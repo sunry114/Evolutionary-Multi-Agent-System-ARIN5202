@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="csrf-token" content="__TOKEN__"><title>Evo · 多智能体协作</title>
+<style nonce="__TOKEN__">
+:root{font-family:system-ui,sans-serif;color:#1b3034;background:#f1f5f4}*{box-sizing:border-box}body{margin:0}
+header{padding:24px 5vw;background:#173e43;color:white;display:flex;justify-content:space-between;gap:16px;align-items:center}
+h1{font-size:24px;margin:0}small{color:#bfd6d5}main{max-width:1180px;margin:28px auto;padding:0 24px}
+nav{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px}button{border:1px solid #bdd0cd;border-radius:8px;padding:10px 16px;background:white;cursor:pointer;color:#173e43}
+button.active,button[type=submit]{background:#176b62;color:white}button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px solid #d3963e}
+section{background:white;padding:24px;border-radius:14px;border:1px solid #d9e4e1}section[hidden]{display:none}
+textarea,input,select{width:100%;padding:12px;margin:8px 0 14px;border:1px solid #bdd0cd;border-radius:8px;font:inherit}
+textarea{min-height:95px}article{padding:16px 0;border-top:1px solid #e0e9e6}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}
+#notice{padding:14px;background:#fff2d6;border-radius:8px;margin-bottom:18px}#status{min-height:30px;color:#8b2c20}
+.row{display:flex;gap:10px;align-items:center}.muted{color:#657c7a}label{display:block}
+@media(max-width:600px){header{align-items:flex-start;flex-direction:column}main{padding:0 12px}section{padding:16px}nav button{flex:1}}
+</style>
+<header><div><h1>Evo / 协作工作台</h1><small>Evolutionary Multi-Agent System · ARIN5202</small></div><button id="refresh">刷新状态</button></header>
+<main><div id="notice" role="status">正在连接…</div>
+<nav aria-label="主要导航"><button data-view="tasks" class="active">任务</button><button data-view="inbox">收件箱</button><button data-view="group">群聊</button><button data-view="dm">私聊</button><button data-view="memory">记忆</button></nav>
+<p id="status" role="status" aria-live="polite"></p>
+<section id="tasks"><h2>目标与任务</h2><form id="run-form"><label>描述目标<textarea name="prompt" required placeholder="描述希望 Agent 完成的任务和验收标准"></textarea></label><button type="submit">提交任务</button></form><div id="task-list"></div></section>
+<section id="inbox" hidden><h2>待处理事项</h2><p class="muted">执行状态与人工审查独立显示。关键动作需明确批准。</p><div id="inbox-list"></div></section>
+<section id="group" hidden><h2>群聊</h2><form id="group-form"><label>消息<textarea name="message" required></textarea></label><button type="submit">发送群聊</button></form><div id="group-list"></div></section>
+<section id="dm" hidden><h2>私聊</h2><form id="dm-form"><label>Agent<select name="agent" id="agents"></select></label><label>消息<textarea name="message" required></textarea></label><button type="submit">发送私聊</button></form><div id="dm-list"></div></section>
+<section id="memory" hidden><h2>Agent 私有记忆</h2><p class="muted">以当前人类用户的查询权限展示；Agent 之间不能读取彼此记忆。</p><div id="memory-list"></div></section>
+</main>
+<script nonce="__TOKEN__">
+const token=document.querySelector('meta[name=csrf-token]').content;
+const el=id=>document.getElementById(id);
+function text(tag,value,parent){const node=document.createElement(tag);node.textContent=typeof value==='string'?value:JSON.stringify(value,null,2);parent.append(node);return node}
+async function api(operation,payload){const r=await fetch('/api/'+operation,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':token},body:JSON.stringify(payload)});const data=await r.json();if(!r.ok)throw Error(data.error||'请求失败');return data}
+function action(parent,label,fn){const b=text('button',label,parent);b.onclick=async()=>{b.disabled=true;try{await fn();await refresh()}catch(e){el('status').textContent=e.message}finally{b.disabled=false}}}
+async function refresh(){try{const r=await fetch('/api/state');if(!r.ok)throw Error('读取状态失败');const s=await r.json();el('notice').textContent=s.mode||'应用后端已连接';
+for(const id of ['task-list','inbox-list','group-list','dm-list','memory-list','agents'])el(id).replaceChildren();
+for(const agent of s.agents||[]){const name=typeof agent==='string'?agent:agent.id;const option=text('option',name,el('agents'));option.value=name}
+for(const task of s.tasks||[]){const article=text('article','',el('task-list'));text('strong',task.prompt||task.id,article);text('p','执行：'+task.status+' · 审查：'+(task.review_status||'—'),article);text('p',task.result||'等待结果',article);
+const details=text('details','',article);text('summary','查看运行记录',details);action(details,'加载 trace',async()=>{const result=await api('trace',{task_id:task.id});text('pre',result,details)});
+if(task.status==='success'&&task.review_status==='pending'){const review=text('article','',el('inbox-list'));text('strong',task.prompt||task.id,review);const feedback=text('textarea','',review);feedback.setAttribute('aria-label','审查意见');action(review,'接受结果',()=>api('review',{task_id:task.id,decision:'accepted',feedback:feedback.value}));action(review,'要求修改',()=>api('review',{task_id:task.id,decision:'changes_requested',feedback:feedback.value}))}
+if(task.review_status==='changes_requested'){const revision=text('textarea','',article);revision.setAttribute('aria-label','修订任务');action(article,'创建修订任务',()=>api('revision',{task_id:task.id,prompt:revision.value}))}}
+for(const request of s.requests||[]){const article=text('article','',el('inbox-list'));text('pre',request,article);if(request.kind==='approval'){action(article,'批准',()=>api('answer',{request_id:request.id,approved:true}));action(article,'拒绝',()=>api('answer',{request_id:request.id,approved:false}))}else{const answer=text('textarea','',article);answer.setAttribute('aria-label','澄清回答');action(article,'回复',()=>api('answer',{request_id:request.id,answer:answer.value}))}}
+for(const message of s.messages||[])text('pre',message,el(message.kind==='dm'?'dm-list':'group-list'));
+for(const memory of s.memory||[])text('pre',memory,el('memory-list'));
+for(const id of ['task-list','inbox-list','memory-list'])if(!el(id).children.length)text('p','暂无记录',el(id));
+}catch(e){el('status').textContent=e.message}}
+for(const button of document.querySelectorAll('[data-view]'))button.onclick=()=>{for(const b of document.querySelectorAll('[data-view]'))b.classList.toggle('active',b===button);for(const id of ['tasks','inbox','group','dm','memory'])el(id).hidden=id!==button.dataset.view};
+for(const name of ['run','group','dm'])el(name+'-form').onsubmit=async event=>{event.preventDefault();const button=event.target.querySelector('button');button.disabled=true;try{const result=await api(name,Object.fromEntries(new FormData(event.target)));el('status').textContent=result.status==='blocked'?'任务已阻塞：'+(result.result||result.message||'请检查详情'):'已提交';event.target.reset();await refresh()}catch(e){el('status').textContent=e.message}finally{button.disabled=false}};
+el('refresh').onclick=refresh;refresh();
+</script></html>
