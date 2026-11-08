@@ -1,27 +1,63 @@
 # Verification (C15)
 
-Target runner is ubuntu-22.04, Python 3.10, no real API keys. CI runs compileall,
-all offline unit/integration tests with ResourceWarning promoted to errors, CLI
-entry points, tracked-secret pattern checks, and wheel asset inclusion.
+Updated: 2026-11-08 (Asia/Shanghai). Current tested implementation: 6cb3780.
+The test suite is authored for this repository; it is not the instructor's
+mid/final dataset. No ordinary test calls a real LLM.
 
-Local Windows checks are preliminary evidence only. POSIX credential tests skip
-on Windows and must run without skip in Linux CI. Network-disabled environments
-may require permission to connect to loopback for Web tests; no external network
-is used by those tests.
+## Current evidence
 
-Commands:
+| Environment / revision | Result | Evidence |
+|---|---|---|
+| Windows, Python 3.12.7 / 6cb3780 | 38 tests: 36 passed, 2 POSIX tests skipped | Local unittest execution recorded in this development session |
+| Ubuntu 22.04, Python 3.10 / 6cb3780 | CI succeeded, including offline tests and POSIX credential checks | [PR #2 run](https://github.com/sunry114/Evolutionary-Multi-Agent-System-ARIN5202/actions/runs/42449807107) |
+| Ubuntu 22.04 / 08ed70d (historical) | Initial interface CI succeeded; initial suite had 22 tests | [PR #1 run](https://github.com/sunry114/Evolutionary-Multi-Agent-System-ARIN5202/actions/runs/42438183681) |
+
+CI also checks compileall, CLI entry points, tracked-secret patterns, installation
+and packaged Web asset inclusion. Live HKGAI connectivity is separate evidence:
+[API_SMOKE_REPORT.md](API_SMOKE_REPORT.md). A successful smoke check is not a
+task completion benchmark.
+
+## Test inventory (38 methods)
+
+| File | Count | What it verifies |
+|---|---:|---|
+| tests/test_baseline.py | 2 | Installed version and CLI help |
+| tests/unit/test_credentials.py | 3 | Environment credentials, POSIX file modes and symlink rejection |
+| tests/unit/test_llm.py | 7 | Request format, retries, exhausted retries, safe failures, malformed completions, endpoint restrictions and redirects |
+| tests/unit/test_provider_diagnostics.py | 16 | Environment config, shared provider factory, token validation, one bounded diagnostic request, safe reports, CLI flags/exits, hidden-key fallback refusal, TLS and transport boundaries |
+| tests/integration/test_interfaces.py | 10 | CLI dispatch, missing backend, demo blocking, HTTP protections, redaction and review/revision contract |
+| Total | 38 | Includes subcases within some test methods |
+
+Web integration tests start a real local HTTP server and connect to loopback.
+Their application backend is a demo/fixture. Provider tests use scripted responses.
+Review tests use a shared in-memory repository fixture; recreating that service is
+not a real database/process restart test.
+
+## Reproduce
+
+After installing the package on Ubuntu 22.04:
+
 ```bash
 python -m unittest discover -s tests/unit -v
 python -m unittest discover -s tests/integration -v
 python -W error::ResourceWarning -m unittest discover -s tests -v
+python -m compileall -q src tests
 python scripts/check_secrets.py
 ```
 
-B owns SQLite lifecycle/migration and memory regressions. A owns planning,
-delegation and task E2E tests. C owns path/SSRF/Git scope, Docker execution and
-platform guard tests. These suites are absent in the initial remote. C15 remains
-an integration scaffold until those tests and a Docker CI job are supplied; this
-workflow does not claim Docker/security/full-platform acceptance.
+All commands above are offline and require no real API key. Restricted environments
+may require permission to connect to loopback for Web tests. POSIX credential tests
+skip on Windows; use Linux to exercise ownership, modes and symlinks.
 
-The pattern check is a precaution, not proof that all possible secrets are absent.
-Never add real keys to tracked files.
+## Remaining verification
+
+D can independently complete browser interaction checks and additional malformed
+HTTP request tests. They are not claimed as complete by the current CI result.
+
+B owns SQLite lifecycle/migrations, memory and objective evaluation regressions.
+A owns planning, delegation and real task E2E. C owns path/SSRF/Git scope, Docker
+execution and platform guard tests. Their modules/suites remain integration
+dependencies; no Docker/full-platform acceptance is claimed.
+
+The secret-pattern check is a precaution, not proof that all possible secrets
+are absent. Never commit real credentials.
