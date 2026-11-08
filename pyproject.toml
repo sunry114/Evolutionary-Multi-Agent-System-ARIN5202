@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evo-collab"
+dynamic = ["version"]
+description = "Linux multi-agent collaboration platform: member D interfaces"
+requires-python = ">=3.9"
+classifiers = ["Operating System :: POSIX :: Linux"]
+
+[project.scripts]
+evo-v3 = "evo.interfaces.cli:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "evo.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"evo.interfaces.web" = ["assets/*.html"]
