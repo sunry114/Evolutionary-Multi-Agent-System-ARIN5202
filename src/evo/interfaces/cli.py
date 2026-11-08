@@ -3,11 +3,19 @@ import argparse
 import getpass
 import json
 import sys
+import warnings
 from pathlib import Path
 
 from evo import __version__
 from evo.adapters.llm.credentials import save_key
 from evo.interfaces.gateway import ApplicationUnavailable, load_application
+
+
+def read_private_key(prompt):
+    # getpass normally warns then falls back to an echoed stdin read. Refuse it.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", getpass.GetPassWarning)
+        return getpass.getpass(prompt)
 
 
 def parser():
@@ -46,6 +54,12 @@ def parser():
     command.add_argument("--port", type=int, default=8768)
     command = commands.add_parser("setup-key", aliases=["setup-hkgai-key"])
     command.add_argument("--provider", choices=("hkgai", "deepseek"), default="hkgai")
+    commands.add_parser("provider-info", help="Validate and display non-secret provider settings (offline)")
+    command = commands.add_parser("check-provider", help="One explicit live API smoke check; may incur usage")
+    command.add_argument("--live", action="store_true", required=True,
+                         help="Explicitly allow one real API request")
+    command.add_argument("--json-object", action="store_true")
+    command.add_argument("--ask-key", action="store_true", help="Enter a key privately for this request only")
     return root
 
 
@@ -56,8 +70,19 @@ def main(argv=None, application=None):
         root.print_help()
         return 0
     try:
+        if args.command in ("provider-info", "check-provider"):
+            from evo.config import ProviderConfig
+            from evo.adapters.llm.diagnostics import check_provider, provider_info
+            config = ProviderConfig.from_environment()
+            if args.command == "provider-info":
+                print(json.dumps(provider_info(config), ensure_ascii=False, indent=2))
+                return 0
+            key = read_private_key("API key (hidden, not saved): ") if args.ask_key else None
+            report = check_provider(config, json_object=args.json_object, api_key=key)
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            return 0 if report["status"] == "success" else 1
         if args.command in ("setup-key", "setup-hkgai-key"):
-            path = save_key(args.provider, getpass.getpass("API key (hidden): "))
+            path = save_key(args.provider, read_private_key("API key (hidden): "))
             print("Saved private credential at " + str(path))
             return 0
         app = application if application is not None else load_application(Path(args.state), args.demo)

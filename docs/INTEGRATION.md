@@ -47,3 +47,13 @@ It does not call LLMs or implement an agent. Closing the process loses all demo
 state. Production trace/review restart recovery and pending approval recovery
 require B/C implementations and integration tests. Do not present preview records
 as evaluation evidence.
+
+
+## LLM integration after the API follow-up
+A can import evo.adapters.llm.factory.create_provider instead of separately
+constructing HTTP clients. It reads the documented non-secret environment config.
+The verified HKGAI completion endpoint is /v1/chat/completions. Catch ProviderError
+and persist only its safe code, not third-party raw response bodies. CredentialError
+indicates missing/unsafe credentials. Credentials remain outside ApplicationGateway
+snapshots, task payloads, trace and reports. check-provider is connectivity evidence
+only; A still owns the agent loop and B the objective evaluation.

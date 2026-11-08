@@ -25,7 +25,7 @@ class ProviderTests(unittest.TestCase):
             return response()
         result = ChatProvider(ProviderConfig(), transport).complete([], json_object=True)
         self.assertEqual(result, {"ok": True})
-        self.assertEqual(calls[0][0], "https://api1.hkgai.net/chat/completions")
+        self.assertEqual(calls[0][0], "https://api1.hkgai.net/v1/chat/completions")
         self.assertEqual(calls[0][1]["Authorization"], "Bearer test-secret")
         self.assertEqual(calls[0][2]["model"], "t2_hkgai-v3_fp8_1m_e7")
 

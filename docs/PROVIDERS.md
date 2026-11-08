@@ -1,9 +1,9 @@
 # Provider configuration (C04)
 
 Only DeepSeek and HKGAI are accepted. Defaults for this course are the supplied
-HKGAI base URL `https://api1.hkgai.net` and model `t2_hkgai-v3_fp8_1m_e7`.
-The course endpoint's completion path needs a live smoke check; if its API
-requires a v1 prefix, select the approved `https://api1.hkgai.net/v1` base URL.
+HKGAI base URL `https://api1.hkgai.net/v1` and model `t2_hkgai-v3_fp8_1m_e7`.
+The /v1 base passed real text and JSON smoke checks on 2026-11-08; the bare
+domain returned HTTP 404. See API_SMOKE_REPORT.md for evidence.
 No real key is required for tests.
 
 Public reference formats:
@@ -23,4 +23,16 @@ Use HKGAI_API_KEY or DEEPSEEK_API_KEY, or Linux setup-key. Private files live at
 regular file, no symlink). Setup refuses existing files; remove the old key
 explicitly before rotating. Never paste keys into tracked files, issues or PRs.
 Do not use a key disclosed in chat for public demonstrations; ask for replacement.
-Real endpoint compatibility and live API behavior remain unverified.
+The course endpoint passed the checks in API_SMOKE_REPORT.md; availability is not guaranteed.
+
+
+create_provider() reads ProviderConfig.from_environment() and is the shared entry
+point for the agent backend. CLI provider-info and check-provider run without an
+ApplicationGateway. check-provider requires --live, disables retries, limits the
+response to 64 output tokens and omits all model content from its report.
+
+ProviderError.code distinguishes authentication, permission, endpoint, rate_limit,
+http_error, connection, tls, invalid_response and invalid_completion. Exceptions
+never copy raw provider bodies. Certificate validation failure is not retried;
+TLS verification remains enabled. Per-call api_key is available for the temporary
+hidden CLI prompt and is not retained on the provider instance.
