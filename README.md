@@ -47,8 +47,9 @@ python -m evo --demo run 'Create hello.md'
 
 ## Configure HKGAI on Linux
 
-The instructor-provided base is https://api1.hkgai.net and model is
-t2_hkgai-v3_fp8_1m_e7. The completion path and live behavior still need verification.
+The instructor-provided service is https://api1.hkgai.net. The verified API base
+is **https://api1.hkgai.net/v1**, with model t2_hkgai-v3_fp8_1m_e7. Text and JSON
+connection checks passed; see [API smoke evidence](docs/API_SMOKE_REPORT.md).
 Enter your key interactively without putting it into source or shell history:
 
 ```bash
@@ -94,3 +95,37 @@ open. Never expose it publicly without a separate reviewed authentication layer.
 D interfaces are independently testable. Full platform acceptance, durable
 restart recovery, Docker regressions, official datasets and memory ablation await
 team integration. Configured CI is not evidence of a successful CI run.
+
+
+## Independent API diagnostics (no A/B/C backend required)
+
+```bash
+python -m evo provider-info
+python -m evo check-provider --live --ask-key
+python -m evo check-provider --live --json-object --ask-key
+```
+
+provider-info validates configuration offline and never reads a key. A live check
+requires --live, makes one fixed request with a 64-token output limit, and may
+incur provider usage. --ask-key reads a temporary key through a hidden prompt and
+does not save it. Omit --ask-key to use the provider environment variable or the
+private Linux credential file. Output is a non-secret summary, error category and
+elapsed time; it never includes the model response body. Exit 0 means expected
+reply, 1 means a failed smoke check, 2 means a CLI/configuration error.
+
+Optional non-secret environment settings: EVO_PROVIDER (hkgai or deepseek),
+EVO_MODEL, EVO_BASE_URL, EVO_TIMEOUT (seconds), EVO_RETRIES. Custom endpoints remain
+rejected; changing environment variables cannot enable development mode.
+
+Agent backend integration can use the same configuration:
+
+```python
+from evo.adapters.llm.factory import create_provider
+provider = create_provider()
+result = provider.complete(
+    [{"role": "user", "content": "Return a JSON object describing your plan."}],
+    json_object=True,
+)
+```
+
+This adds real API connectivity, not the missing orchestration/memory/tools.

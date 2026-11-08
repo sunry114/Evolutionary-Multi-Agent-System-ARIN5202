@@ -8,6 +8,13 @@ class CredentialError(ValueError):
     pass
 
 
+def validate_key(value):
+    value = value.strip()
+    if not value or len(value) > 16384 or any(c.isspace() for c in value):
+        raise CredentialError("Key must be a nonempty single token")
+    return value
+
+
 def key_path(provider):
     if provider not in ("hkgai", "deepseek"):
         raise CredentialError("Unknown credential provider")
@@ -26,7 +33,7 @@ def load_key(provider):
     path = key_path(provider)
     value = os.environ.get(provider.upper() + "_API_KEY", "").strip()
     if value:
-        return value
+        return validate_key(value)
     try:
         _check_directory(path.parent)
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
@@ -38,9 +45,7 @@ def load_key(provider):
             if os.name == "posix" and (info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600):
                 raise CredentialError("Credential file requires owner and mode 0600")
             value = stream.read(16385).strip()
-        if not value or len(value) > 16384 or "\n" in value or "\r" in value:
-            raise CredentialError("Credential file is empty or invalid")
-        return value
+        return validate_key(value)
     except OSError:
         raise CredentialError("Credential unavailable; run setup-key or set provider API key") from None
 
@@ -48,8 +53,7 @@ def load_key(provider):
 def save_key(provider, value):
     if os.name != "posix":
         raise CredentialError("Persistent credential setup requires Linux; use an environment variable")
-    if not value.strip() or any(c.isspace() for c in value.strip()):
-        raise CredentialError("Key must be a nonempty single token")
+    value = validate_key(value)
     path = key_path(provider)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     _check_directory(path.parent)
