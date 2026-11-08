@@ -34,3 +34,9 @@ python -m evo check-provider --live --json-object --ask-key
 credential file or HKGAI_API_KEY may be used by omitting --ask-key. Do not paste
 keys into shell command arguments, screenshots, PRs or test fixtures. Real checks
 are opt-in and are never part of ordinary CI.
+
+
+Implementation reference: [6cb3780](https://github.com/sunry114/Evolutionary-Multi-Agent-System-ARIN5202/commit/6cb3780),
+merged through [PR #2](https://github.com/sunry114/Evolutionary-Multi-Agent-System-ARIN5202/pull/2).
+For current delivery status and remaining acceptance items, see
+[SUBMISSION.md](SUBMISSION.md).

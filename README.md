@@ -87,6 +87,11 @@ open. Never expose it publicly without a separate reviewed authentication layer.
 
 ## Team handoff
 
+Start with **[D 部分交付总览与证据](docs/SUBMISSION.md)** for the latest
+implementation status, merged PRs, CI links and remaining work. Updated 2026-11-08:
+PR #1 and #2 are merged; the current suite contains 38 tests; real HKGAI text and
+JSON checks passed. See the linked report for environments and verification limits.
+
 - [Integration contract](docs/INTEGRATION.md) — operations and A/B/C dependencies.
 - [Architecture](docs/ARCHITECTURE.md), [workflow](docs/WORKFLOW.md).
 - [Requirements matrix](docs/REQUIREMENTS.md), [testing](docs/TESTING.md).
@@ -94,7 +99,8 @@ open. Never expose it publicly without a separate reviewed authentication layer.
 
 D interfaces are independently testable. Full platform acceptance, durable
 restart recovery, Docker regressions, official datasets and memory ablation await
-team integration. Configured CI is not evidence of a successful CI run.
+team integration. Actual successful Ubuntu CI runs are linked in the delivery
+overview; their success does not establish full-platform acceptance.
 
 
 ## Independent API diagnostics (no A/B/C backend required)
