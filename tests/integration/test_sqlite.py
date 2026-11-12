@@ -2,6 +2,7 @@ import gc
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from evo.adapters.persistence.sqlite_memory import SQLiteMemoryStore
@@ -32,8 +33,8 @@ class SQLiteMigrationTests(unittest.TestCase):
 
             self.assertEqual(second.schema_version(), 1)
 
-            with sqlite3.connect(database) as connection:
-                rows = connection.execute(
+            with closing(sqlite3.connect(database)) as connection:
+                 rows = connection.execute(
                     """
                     SELECT version, name
                     FROM schema_migrations
