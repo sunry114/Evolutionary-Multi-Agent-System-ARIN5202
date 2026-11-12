@@ -57,3 +57,26 @@ and persist only its safe code, not third-party raw response bodies. CredentialE
 indicates missing/unsafe credentials. Credentials remain outside ApplicationGateway
 snapshots, task payloads, trace and reports. check-provider is connectivity evidence
 only; A still owns the agent loop and B the objective evaluation.
+
+## C05 storage adapter
+
+`evo.adapters.persistence.sqlite_store.SQLiteStore` implements the durable
+repository operations needed by task, message, trace, approval and review
+integration.
+
+Important error behavior:
+
+- `RecordNotFoundError` is also a `KeyError`;
+- `ConflictError` is also a `ValueError`;
+- duplicate IDs, stale expected review states and duplicate revisions are
+  conflicts;
+- foreign-key failures are reported as safe conflicts without exposing raw
+  database details.
+
+`get_task(task_id)` returns a JSON-compatible mapping including technical
+`status`, optional `review_status`, review feedback and the linked revision task
+ID. A successful task can therefore be passed directly to `ReviewService`.
+
+Storage methods do not determine which actions require approval. They persist the
+request and audit metadata only; C10 owns approval policy and answer processing.
+C12 owns memory recall and learning behavior.

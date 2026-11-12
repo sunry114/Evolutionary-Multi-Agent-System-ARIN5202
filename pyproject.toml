@@ -20,3 +20,4 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "evo.interfaces.web" = ["assets/*.html"]
+"evo.adapters.persistence" = ["migrations/*.sql"]
