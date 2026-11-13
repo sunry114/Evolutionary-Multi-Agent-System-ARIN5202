@@ -30,3 +30,29 @@ jobs:
           cd /tmp
           PYTHONPATH=/tmp/evo-installed python -c "from importlib.resources import files; assert '协作工作台' in files('evo.interfaces.web').joinpath('assets/index.html').read_text(encoding='utf-8')"
           PYTHONPATH=/tmp/evo-installed python -c "import tempfile; from evo.interfaces.sqlite_application import SQLiteApplication; directory = tempfile.TemporaryDirectory(); app = SQLiteApplication(directory.name); assert app.store.schema_version() == 1; assert app.snapshot()['tasks'] == []; directory.cleanup()"
+  browser:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python -m pip install -e .
+      - name: Install pinned browser test runtime
+        working-directory: tests/browser
+        run: |
+          npm install --ignore-scripts --no-audit --no-fund --package-lock=false
+          npx playwright install --with-deps chromium
+      - name: Exercise real browser against SQLite
+        run: node tests/browser/web_acceptance.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-acceptance
+          path: .evo/browser-acceptance/
+          include-hidden-files: true
+          if-no-files-found: ignore

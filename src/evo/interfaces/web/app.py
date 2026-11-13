@@ -4,11 +4,23 @@ import os
 import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
-from urllib.parse import urlsplit
 from evo.interfaces.gateway import ApplicationUnavailable
 
 MAX_BODY = 65536
 OPERATIONS = {"run", "dm", "group", "review", "revision", "answer", "eval", "trace", "metrics", "memory", "task", "tasks"}
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def reject_constant(value):
+    raise ValueError("Non-finite JSON number")
 
 
 def redact(value):
@@ -65,25 +77,33 @@ def make_server(application, port=8768):
 
         def do_POST(self):
             origin = "http://" + self.server.authority
-            if (not self.valid_host() or self.headers.get("Origin") != origin
-                    or not secrets.compare_digest(self.headers.get("X-CSRF-Token", ""), token)):
+            csrf = self.headers.get_all("X-CSRF-Token", [])
+            if (not self.valid_host() or self.headers.get_all("Origin", []) != [origin]
+                    or len(csrf) != 1 or not csrf[0].isascii()
+                    or not secrets.compare_digest(csrf[0], token)):
                 return self.reply(403, {"error": "Invalid Host, Origin or CSRF token"})
-            if self.headers.get("Content-Type", "").split(";")[0].strip().lower() != "application/json":
+            content_types = self.headers.get_all("Content-Type", [])
+            if len(content_types) != 1 or content_types[0].split(";")[0].strip().lower() != "application/json":
                 return self.reply(415, {"error": "JSON content type required"})
-            if self.headers.get("Transfer-Encoding"):
+            if self.headers.get_all("Transfer-Encoding") is not None:
                 return self.reply(400, {"error": "Transfer encoding not supported"})
             try:
                 lengths = self.headers.get_all("Content-Length", [])
-                if len(lengths) != 1:
+                if len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdigit():
                     raise ValueError()
                 length = int(lengths[0])
                 if not 0 < length <= MAX_BODY:
                     return self.reply(413, {"error": "Invalid body size"})
                 body = self.rfile.read(length)
-                payload = json.loads(body)
+                if len(body) != length:
+                    raise ValueError()
+                payload = json.loads(body.decode("utf-8"), object_pairs_hook=unique_object,
+                                     parse_constant=reject_constant)
                 if not isinstance(payload, dict):
                     raise ValueError()
-            except (ValueError, UnicodeError):
+            except (TimeoutError, OSError):
+                return self.reply(408, {"error": "Request body read timed out"})
+            except (ValueError, UnicodeError, RecursionError):
                 return self.reply(400, {"error": "JSON object required"})
             operation = self.path.removeprefix("/api/") if self.path.startswith("/api/") else ""
             if operation not in OPERATIONS:
