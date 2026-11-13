@@ -1,5 +1,11 @@
 # Verification (C15)
 
+Current milestone (2026-11-14): 74 Python methods, 72 passed and 2 POSIX skips
+on Windows. Eight new raw-TCP methods live in tests/security/test_http_boundaries.py.
+Six separate real-browser acceptance groups passed in Edge; Chromium runs in its
+own Ubuntu CI job. See [WEB_ACCEPTANCE.md](WEB_ACCEPTANCE.md) for evidence and commands.
+The dated tables below are historical milestones.
+
 Updated: 2026-11-13 (Asia/Shanghai). Current SQLite integration is based on main
 cbac88e. Full local regression: 66 tests, 64 passed, 2 POSIX skips. Historical
 API-only evidence below refers to 6cb3780.
@@ -56,8 +62,9 @@ skip on Windows; use Linux to exercise ownership, modes and symlinks.
 
 ## Remaining verification
 
-D can independently complete browser interaction checks and additional malformed
-HTTP request tests. They are not claimed as complete by the current CI result.
+Browser interaction and the documented malformed-request checks are now covered
+for the SQLite workspace; see WEB_ACCEPTANCE.md. New full-backend flows still
+require additional acceptance when integrated.
 
 B owns SQLite lifecycle/migrations, memory and objective evaluation regressions.
 A owns planning, delegation and real task E2E. C owns path/SSRF/Git scope, Docker

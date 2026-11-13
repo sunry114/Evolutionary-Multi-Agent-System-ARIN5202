@@ -155,3 +155,12 @@ Set EVO_APPLICATION_FACTORY to override this with the team's complete backend;
 --demo still selects the explicitly volatile preview.
 
 See [SQLite usage, tests and limitations](docs/SQLITE_INTERFACE.md).
+
+
+## Browser and HTTP acceptance
+
+The SQLite workspace now has real-browser acceptance and raw-TCP boundary checks.
+See [WEB_ACCEPTANCE.md](docs/WEB_ACCEPTANCE.md) for reproduction and scope.
+The current Python suite has 74 test methods; six browser groups run separately.
+The Ubuntu workflow has a browser job using pinned Playwright and Chromium,
+with screenshots/report artifacts. These are isolated fixtures, not Agent results.

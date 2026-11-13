@@ -4,6 +4,17 @@
 本文是 D 部分当前交付入口，记录已完成的实现、验证证据和剩余事项。
 它不是完整平台最终验收报告。
 
+## Web acceptance update — 2026-11-14
+
+[Browser/HTTP acceptance report](WEB_ACCEPTANCE.md): actual Edge clicks passed for
+SQLite review/revision, visible trace, errors, navigation, mobile layout and
+server-process restart. Eight new raw-TCP boundary methods passed. Current Python
+suite: 74 methods, 72 passed and 2 POSIX skips locally; browser groups are separate.
+The earlier independent browser/boundary TODOs below are now superseded for the
+current SQLite mode. Full Agent/chat/approval/memory/evaluation flows remain
+pending until A/B/C integration. A new Ubuntu Chromium job provides repeatable
+browser artifacts; do not confuse fixture screenshots with official task results.
+
 ## SQLite integration update — 2026-11-13
 
 [Current C14 SQLite usage and evidence](SQLITE_INTERFACE.md): default CLI/Web now

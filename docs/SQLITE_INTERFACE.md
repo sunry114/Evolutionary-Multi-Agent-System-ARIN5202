@@ -64,7 +64,9 @@ restarted. DB persistence alone does not provide durable execution/approval resu
 
 Local full regression: 66 tests, 64 passed, 2 POSIX-only checks skipped on Windows
 with Python 3.12.7. No real API key or outbound model request is needed.
-Browser interaction QA and broader malformed HTTP request coverage remain pending.
+Browser interaction and documented HTTP boundary coverage were completed in the
+2026-11-14 follow-up; see [WEB_ACCEPTANCE.md](WEB_ACCEPTANCE.md). Full-backend
+execution/approval/chat flows are still outside this milestone.
 
 The wheel must include migrations/*.sql. CI now initializes SQLiteApplication from
 the installed wheel, in addition to checking Web assets; editable installs alone
