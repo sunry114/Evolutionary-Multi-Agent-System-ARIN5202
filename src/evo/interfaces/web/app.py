@@ -5,9 +5,10 @@ import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from urllib.parse import urlsplit
+from evo.interfaces.gateway import ApplicationUnavailable
 
 MAX_BODY = 65536
-OPERATIONS = {"run", "dm", "group", "review", "revision", "answer", "eval", "trace", "metrics", "memory"}
+OPERATIONS = {"run", "dm", "group", "review", "revision", "answer", "eval", "trace", "metrics", "memory", "task", "tasks"}
 
 
 def redact(value):
@@ -90,6 +91,8 @@ def make_server(application, port=8768):
             try:
                 result = application.dispatch(operation, payload)
                 return self.reply(200, result)
+            except ApplicationUnavailable:
+                return self.reply(503, {"error": "Agent execution backend not connected; this mode supports stored tasks, trace, review and revision."})
             except (ValueError, KeyError):
                 return self.reply(409, {"error": "Invalid request or state conflict"})
             except Exception:

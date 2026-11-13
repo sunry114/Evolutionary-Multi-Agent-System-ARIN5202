@@ -306,6 +306,37 @@ class SQLiteStore:
 
         return [dict(row) for row in rows]
 
+    def list_tasks(self, limit: int = 100) -> Sequence[Mapping[str, object]]:
+        """Bounded, deterministic task/review view for the local interface."""
+        if type(limit) is not int or not 1 <= limit <= 500:
+            raise ValueError("Task limit must be between 1 and 500")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT t.*, t.description AS prompt,
+                       r.status AS review_status, r.feedback AS review_feedback,
+                       r.revision_task_id
+                FROM tasks AS t LEFT JOIN reviews AS r ON r.task_id = t.id
+                ORDER BY t.created_at DESC, t.id DESC LIMIT ?
+                """, (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_pending_requests(self) -> Sequence[Mapping[str, object]]:
+        """Read pending requests; answering/resuming remains C's responsibility."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT id, task_id, agent, kind, action, payload_json, status, created_at
+                   FROM approval_requests WHERE status = 'pending'
+                   ORDER BY created_at, id LIMIT 100"""
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["payload"] = _decode_json(item.pop("payload_json"))
+            result.append(item)
+        return result
+
     # ------------------------------------------------------------------
     # Messages
     # ------------------------------------------------------------------

@@ -1,6 +1,8 @@
 # Verification (C15)
 
-Updated: 2026-11-08 (Asia/Shanghai). Current tested implementation: 6cb3780.
+Updated: 2026-11-13 (Asia/Shanghai). Current SQLite integration is based on main
+cbac88e. Full local regression: 66 tests, 64 passed, 2 POSIX skips. Historical
+API-only evidence below refers to 6cb3780.
 The test suite is authored for this repository; it is not the instructor's
 mid/final dataset. No ordinary test calls a real LLM.
 
@@ -17,7 +19,7 @@ and packaged Web asset inclusion. Live HKGAI connectivity is separate evidence:
 [API_SMOKE_REPORT.md](API_SMOKE_REPORT.md). A successful smoke check is not a
 task completion benchmark.
 
-## Test inventory (38 methods)
+## Historical API milestone inventory (38 methods)
 
 | File | Count | What it verifies |
 |---|---:|---|
@@ -30,8 +32,11 @@ task completion benchmark.
 
 Web integration tests start a real local HTTP server and connect to loopback.
 Their application backend is a demo/fixture. Provider tests use scripted responses.
-Review tests use a shared in-memory repository fixture; recreating that service is
-not a real database/process restart test.
+The original ReviewTests use an in-memory repository fixture. New
+test_sqlite_interfaces.py uses real SQLite, independent CLI processes and actual
+Web process restart; see [SQLite evidence](SQLITE_INTERFACE.md).
+The current suite adds 5 C03 domain tests, 13 C05 SQLite tests and 10 C14 SQLite
+interface tests to the historical 38, for 66 total.
 
 ## Reproduce
 

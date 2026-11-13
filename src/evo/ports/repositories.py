@@ -9,6 +9,10 @@ Record = Mapping[str, object]
 
 
 class TaskRepository(Protocol):
+    def list_tasks(self, limit: int = 100) -> Sequence[Record]:
+        """List stored task/review records without scheduling execution."""
+        ...
+
     def save_task(self, task: Task) -> None:
         """Create a task.
 
@@ -69,6 +73,10 @@ class ActionRepository(Protocol):
 
 
 class ApprovalRepository(Protocol):
+    def list_pending_requests(self) -> Sequence[Record]:
+        """Read pending requests without answering or resuming them."""
+        ...
+
     def save_approval_request(
         self,
         *,

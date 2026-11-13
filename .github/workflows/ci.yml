@@ -29,3 +29,4 @@ jobs:
           python -m pip install --target /tmp/evo-installed /tmp/evo-wheels/*.whl
           cd /tmp
           PYTHONPATH=/tmp/evo-installed python -c "from importlib.resources import files; assert '协作工作台' in files('evo.interfaces.web').joinpath('assets/index.html').read_text(encoding='utf-8')"
+          PYTHONPATH=/tmp/evo-installed python -c "import tempfile; from evo.interfaces.sqlite_application import SQLiteApplication; directory = tempfile.TemporaryDirectory(); app = SQLiteApplication(directory.name); assert app.store.schema_version() == 1; assert app.snapshot()['tasks'] == []; directory.cleanup()"

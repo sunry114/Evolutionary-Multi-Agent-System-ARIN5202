@@ -4,6 +4,15 @@
 本文是 D 部分当前交付入口，记录已完成的实现、验证证据和剩余事项。
 它不是完整平台最终验收报告。
 
+## SQLite integration update — 2026-11-13
+
+[Current C14 SQLite usage and evidence](SQLITE_INTERFACE.md): default CLI/Web now
+read real tasks/trace and persist review/revision through B's SQLiteStore. Actual
+Web process restart and concurrent revision checks passed. Local full suite:
+66 tests, 64 passed, 2 POSIX skips. The following November 8 milestone tables are
+historical; their pending SQLite implementation/restart entries are superseded.
+Agent execution, approval resume, memory and evaluation integration remain pending.
+
 ## 1. 当前交付范围
 
 | 工作 | 已实现与已验证 | 尚未完成 |
