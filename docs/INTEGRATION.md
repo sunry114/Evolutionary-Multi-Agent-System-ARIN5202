@@ -3,7 +3,9 @@
 This branch was built against an empty code repository. The following interfaces
 are explicit proposals for A/B/C to review, not claims that their work is present.
 
-Set EVO_APPLICATION_FACTORY=your_package.bootstrap:create_application.
+The default is now interfaces.sqlite_application.SQLiteApplication, supporting
+real SQLite reads/review/revision. Set
+EVO_APPLICATION_FACTORY=your_package.bootstrap:create_application to override it.
 The factory accepts state=Path and returns ApplicationGateway. It must be
 thread-safe: Web uses concurrent request handlers, including human answers while
 a run waits. Import/application construction failures fail clearly.
@@ -44,8 +46,9 @@ created tasks. The UI accepts reviewing only successful tasks with pending revie
 
 The --demo implementation is explicitly in-memory and always blocks execution.
 It does not call LLMs or implement an agent. Closing the process loses all demo
-state. Production trace/review restart recovery and pending approval recovery
-require B/C implementations and integration tests. Do not present preview records
+state. SQLite task/trace/review persistence and actual server-process restart are now
+covered by test_sqlite_interfaces.py. Pending approval answering and execution
+recovery still require A/C integration; persistence is not a resume mechanism. Do not present preview records
 as evaluation evidence.
 
 
@@ -80,3 +83,5 @@ ID. A successful task can therefore be passed directly to `ReviewService`.
 Storage methods do not determine which actions require approval. They persist the
 request and audit metadata only; C10 owns approval policy and answer processing.
 C12 owns memory recall and learning behavior.
+
+Current default workspace behavior and read-query extensions: [SQLITE_INTERFACE.md](SQLITE_INTERFACE.md).

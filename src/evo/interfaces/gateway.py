@@ -24,9 +24,8 @@ def load_application(state, demo=False):
         return DemoApplication()
     target = os.environ.get("EVO_APPLICATION_FACTORY", "")
     if not target:
-        raise ApplicationUnavailable(
-            "A/B/C backend not connected. Set EVO_APPLICATION_FACTORY=module:factory "
-            "or use --demo for the volatile interface preview.")
+        from evo.interfaces.sqlite_application import create_application
+        return create_application(state=state)
     try:
         module, name = target.split(":")
         factory = getattr(importlib.import_module(module), name)

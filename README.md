@@ -81,7 +81,8 @@ python -m evo answer REQUEST_ID --deny
 python -m evo eval DATASET.jsonl --output .evo/report.json --no-memory
 ```
 
-Without a factory, production commands exit with an actionable error. The Web
+Without a factory, the default is the real SQLite query/review workspace; Agent
+execution commands remain unavailable. See [SQLite integration](docs/SQLITE_INTERFACE.md). The Web
 server only binds loopback. Use the printed 127.0.0.1 URL and keep the terminal
 open. Never expose it publicly without a separate reviewed authentication layer.
 
@@ -89,7 +90,7 @@ open. Never expose it publicly without a separate reviewed authentication layer.
 
 Start with **[D 部分交付总览与证据](docs/SUBMISSION.md)** for the latest
 implementation status, merged PRs, CI links and remaining work. Updated 2026-11-08:
-PR #1 and #2 are merged; the current suite contains 38 tests; real HKGAI text and
+PR #1 and #2 are merged; the API milestone contained 38 tests (current SQLite milestone: 66 tests); real HKGAI text and
 JSON checks passed. See the linked report for environments and verification limits.
 
 - [Integration contract](docs/INTEGRATION.md) — operations and A/B/C dependencies.
@@ -97,8 +98,8 @@ JSON checks passed. See the linked report for environments and verification limi
 - [Requirements matrix](docs/REQUIREMENTS.md), [testing](docs/TESTING.md).
 - [Evaluation status](docs/EVALUATION_REPORT.md), [submission evidence](docs/SUBMISSION.md).
 
-D interfaces are independently testable. Full platform acceptance, durable
-restart recovery, Docker regressions, official datasets and memory ablation await
+D interfaces are independently testable. Full platform acceptance, execution/approval
+resume, Docker regressions, official datasets and memory ablation await
 team integration. Actual successful Ubuntu CI runs are linked in the delivery
 overview; their success does not establish full-platform acceptance.
 
@@ -135,3 +136,22 @@ result = provider.complete(
 ```
 
 This adds real API connectivity, not the missing orchestration/memory/tools.
+
+
+## Real SQLite workspace (C14)
+
+```bash
+python -m evo --state .evo web
+python -m evo --state .evo tasks
+python -m evo --state .evo task TASK_ID
+python -m evo --state .evo trace TASK_ID
+```
+
+The default workspace opens .evo/events.sqlite3 and shows real stored task/review
+records. CLI review/revision now use atomic SQLite operations. Data survives
+process restart; a revision remains created until A's scheduler is connected.
+A new database is empty. The UI disables unavailable task/chat/approval actions.
+Set EVO_APPLICATION_FACTORY to override this with the team's complete backend;
+--demo still selects the explicitly volatile preview.
+
+See [SQLite usage, tests and limitations](docs/SQLITE_INTERFACE.md).
