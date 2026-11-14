@@ -24,6 +24,8 @@ def parser():
     root.add_argument("--state", default=".evo")
     root.add_argument("--demo", action="store_true", help="Volatile UI preview; no agents execute")
     commands = root.add_subparsers(dest="command")
+    commands.add_parser("task").add_argument("task_id")
+    commands.add_parser("tasks").add_argument("--limit", type=int, default=100)
     for name in ("run", "group"):
         command = commands.add_parser(name)
         command.add_argument("prompt" if name == "run" else "message")
@@ -99,6 +101,9 @@ def main(argv=None, application=None):
         result = app.dispatch(args.command, payload)
         from evo.interfaces.web.app import redact
         print(json.dumps(redact(result), ensure_ascii=False, indent=2))
+        # Reading a failed task is a successful query, not a failed execution.
+        if args.command in ("task", "tasks", "trace"):
+            return 0
         return 1 if result.get("status") in ("failed", "blocked", "unavailable") or result.get("passed") is False else 0
     except (ApplicationUnavailable, ValueError, OSError) as error:
         # Backend exception text can contain request data and secrets.

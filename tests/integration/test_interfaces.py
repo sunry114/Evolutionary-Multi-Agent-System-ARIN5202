@@ -3,6 +3,7 @@ import io
 import json
 import os
 import threading
+import tempfile
 import unittest
 from http.client import HTTPConnection
 from unittest.mock import patch
@@ -20,8 +21,8 @@ class CliTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue())["status"], "blocked")
 
     def test_missing_application_is_actionable(self):
-        with patch.dict(os.environ, {"EVO_APPLICATION_FACTORY": ""}), contextlib.redirect_stderr(io.StringIO()) as output:
-            self.assertEqual(main(["run", "hello"]), 2)
+        with tempfile.TemporaryDirectory() as state, patch.dict(os.environ, {"EVO_APPLICATION_FACTORY": ""}), contextlib.redirect_stderr(io.StringIO()) as output:
+            self.assertEqual(main(["--state", state, "run", "hello"]), 2)
         self.assertIn("backend not connected", output.getvalue())
 
     def test_commands_map_to_backend(self):

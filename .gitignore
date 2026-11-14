@@ -18,3 +18,4 @@ results/*.json
 .coverage
 htmlcov/
 DEVELOPMENT_PLAN.md
+node_modules/

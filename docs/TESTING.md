@@ -1,6 +1,14 @@
 # Verification (C15)
 
-Updated: 2026-11-08 (Asia/Shanghai). Current tested implementation: 6cb3780.
+Current milestone (2026-11-14): 74 Python methods, 72 passed and 2 POSIX skips
+on Windows. Eight new raw-TCP methods live in tests/security/test_http_boundaries.py.
+Six separate real-browser acceptance groups passed in Edge; Chromium runs in its
+own Ubuntu CI job. See [WEB_ACCEPTANCE.md](WEB_ACCEPTANCE.md) for evidence and commands.
+The dated tables below are historical milestones.
+
+Updated: 2026-11-13 (Asia/Shanghai). Current SQLite integration is based on main
+cbac88e. Full local regression: 66 tests, 64 passed, 2 POSIX skips. Historical
+API-only evidence below refers to 6cb3780.
 The test suite is authored for this repository; it is not the instructor's
 mid/final dataset. No ordinary test calls a real LLM.
 
@@ -17,7 +25,7 @@ and packaged Web asset inclusion. Live HKGAI connectivity is separate evidence:
 [API_SMOKE_REPORT.md](API_SMOKE_REPORT.md). A successful smoke check is not a
 task completion benchmark.
 
-## Test inventory (38 methods)
+## Historical API milestone inventory (38 methods)
 
 | File | Count | What it verifies |
 |---|---:|---|
@@ -30,8 +38,11 @@ task completion benchmark.
 
 Web integration tests start a real local HTTP server and connect to loopback.
 Their application backend is a demo/fixture. Provider tests use scripted responses.
-Review tests use a shared in-memory repository fixture; recreating that service is
-not a real database/process restart test.
+The original ReviewTests use an in-memory repository fixture. New
+test_sqlite_interfaces.py uses real SQLite, independent CLI processes and actual
+Web process restart; see [SQLite evidence](SQLITE_INTERFACE.md).
+The current suite adds 5 C03 domain tests, 13 C05 SQLite tests and 10 C14 SQLite
+interface tests to the historical 38, for 66 total.
 
 ## Reproduce
 
@@ -51,8 +62,9 @@ skip on Windows; use Linux to exercise ownership, modes and symlinks.
 
 ## Remaining verification
 
-D can independently complete browser interaction checks and additional malformed
-HTTP request tests. They are not claimed as complete by the current CI result.
+Browser interaction and the documented malformed-request checks are now covered
+for the SQLite workspace; see WEB_ACCEPTANCE.md. New full-backend flows still
+require additional acceptance when integrated.
 
 B owns SQLite lifecycle/migrations, memory and objective evaluation regressions.
 A owns planning, delegation and real task E2E. C owns path/SSRF/Git scope, Docker

@@ -39,3 +39,26 @@ state. Real backend restart must recover persisted trace/review records, reject
 stale decisions, and reconcile in-flight jobs and approval requests. That requires
 B/C's durable store and is pending; this branch provides only the repository
 contract and service-recreation test with a shared in-memory fixture.
+
+## C05 persistence and restart recovery
+
+Tasks, task-linked messages, trace events, action metadata, approval requests and
+human reviews are durable in `events.sqlite3`. Reconstructing the application
+with the same state path recovers these records.
+
+A successful task receives an independent pending human review record. Accepting
+or requesting changes does not rewrite the task's technical `success` status.
+When changes are requested, revision creation atomically:
+
+1. verifies the expected review state;
+2. creates one child task;
+3. links the child from the review;
+4. changes the review state to `revising`;
+5. appends the audit events.
+
+Duplicate or stale review operations return a state conflict and do not append
+dirty events or create duplicate children.
+
+C05 does not yet resume an executing process or an in-memory model/tool loop.
+Later orchestration and approval commits must reconcile persisted pending records
+when the process starts.

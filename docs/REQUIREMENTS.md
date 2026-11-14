@@ -5,6 +5,25 @@ Current merged implementation baseline: main 4eb3097, including API commit 6cb37
 The instructor's specification governs final acceptance; the C numbers are the
 team's development breakdown, not five separate grading phases.
 
+## Browser and HTTP acceptance follow-up (2026-11-14)
+
+Current SQLite browser review/navigation/revision/trace/mobile checks and HTTP
+boundary tests are complete within the scope in [WEB_ACCEPTANCE.md](WEB_ACCEPTANCE.md).
+A real browser found a disappearing-trace defect that is fixed and covered by
+acceptance. The previous pending browser/boundary entries below are historical;
+they do not describe the current SQLite milestone. The suite now has 74 Python
+methods plus six separate browser acceptance groups. Full platform integration
+and official evaluation remain pending.
+
+## Current C14 SQLite follow-up (2026-11-13)
+
+C03/C05 are now merged in main cbac88e. Default CLI/Web uses real SQLite for stored
+task/trace queries, review and linked revision. Process restart is tested with an
+actual Web child process. Agent execution and approval resume remain unavailable.
+See [SQLITE_INTERFACE.md](SQLITE_INTERFACE.md); local suite is now 66 tests.
+The baseline tables below describe the earlier API milestone, not current absence
+of C03/C05. B owns the persistence implementation; D adds the interface bridge.
+
 ## D implementation and evidence
 
 | Requirement / work item | Implementation | Evidence and remaining boundary |
