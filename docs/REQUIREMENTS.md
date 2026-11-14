@@ -5,6 +5,27 @@ Current merged implementation baseline: main 4eb3097, including API commit 6cb37
 The instructor's specification governs final acceptance; the C numbers are the
 team's development breakdown, not five separate grading phases.
 
+## C06 planning and collaboration (2026-11-14, PR #9 branch)
+
+The C06 service layer provides private DM history, group chat separated from task
+logs, a validated 1–5 subtask DAG, and all-agent bids with a stable winner. Bid
+events include `subtask_id`, so bids for sibling subtasks on one task are
+attributable. `tests/unit/application/` covers these rules.
+
+The planner treats a named required input as missing when its value is `None`,
+blank text, or an empty collection. It creates a clarification request before
+calling the model. For goals with no declared required inputs, the model must
+ask one question when a specific artifact, target, or constraint needed for a
+verifiable result is absent or ambiguous. A question requires a request store
+and `task_id`; the planner raises an error instead of returning an untracked
+question. `StoredClarificationRequests` writes a pending request through the
+existing approval repository. `tests/integration/test_c06_clarification.py`
+reopens SQLite and checks the request, payload, pending inbox, and audit event.
+
+C06 is a service-level milestone. Default CLI/Web dispatch and the task loop do
+not yet call these services; C11 owns that integration and answer/resume behavior.
+These tests do not establish full platform or official dataset acceptance.
+
 ## Browser and HTTP acceptance follow-up (2026-11-14)
 
 Current SQLite browser review/navigation/revision/trace/mobile checks and HTTP
@@ -45,8 +66,8 @@ of C03/C05. B owns the persistence implementation; D adds the interface bridge.
 | Instructor requirement | Owner / expected implementation | Current acceptance state |
 |---|---|---|
 | Real human/Agent private and group chat | A chat + D interfaces | Interface exists; demo only stores human messages; Agent replies pending |
-| Autonomous decomposition, role negotiation and delegation | A C03/C06/C11 | No real implementation in the documented baseline |
-| Proactive clarification and critical-action approval | A/C + D inbox/answer entry | UI/dispatch exists; real pause/resume and persistence pending |
+| Autonomous decomposition, role negotiation and delegation | A C03/C06/C11 | C06 planner and all-agent bidding services exist on PR #9; C11 task-loop scheduling and CLI/Web integration pending |
+| Proactive clarification and critical-action approval | A/C + D inbox/answer entry | C06 can persist pending planner questions through SQLite; human answer/resume and critical-action approval policy pending |
 | Per-Agent memory and improvement from experience | B C05/C12 | Pending implementation and measured evidence |
 | Per-Agent isolated filesystem/sandbox | C C07/C09 | Pending implementation and isolation tests |
 | Search, file CRUD, code execution and Git tools | C C07-C10/C10a | Pending Agent tools; a developer's Git push does not satisfy this capability |
