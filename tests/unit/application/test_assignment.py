@@ -35,6 +35,18 @@ class AssignmentTests(unittest.TestCase):
         self.assertEqual([event["event_type"] for event in events.events],
                          ["agent_bid", "agent_bid", "agent_assigned"])
         self.assertEqual(events.events[0]["payload"]["raw_score"], 4)
+        self.assertEqual(events.events[0]["payload"]["subtask_id"], "s1")
+
+    def test_bids_for_sibling_subtasks_remain_attributable(self):
+        events = Events()
+        service = AssignmentService(Provider(*([
+            {"score": 3, "reason": "Available"}
+        ] * 4)), self.agents, events)
+        service.assign(Subtask("s1", "First"), "task-1")
+        service.assign(Subtask("s2", "Second"), "task-1")
+        bids = [event for event in events.events if event["event_type"] == "agent_bid"]
+        self.assertEqual([event["payload"]["subtask_id"] for event in bids],
+                         ["s1", "s1", "s2", "s2"])
 
     def test_name_breaks_remaining_tie_and_adjustment_is_bounded(self):
         service = AssignmentService(Provider(

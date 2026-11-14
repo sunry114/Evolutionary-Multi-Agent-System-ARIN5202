@@ -68,7 +68,7 @@ class AssignmentService:
             bids.append(bid)
             if self.events is not None and task_id is not None:
                 self.events.append_event(task_id=task_id, event_type="agent_bid", actor=agent.name,
-                                         payload=bid.__dict__)
+                                         payload={"subtask_id": subtask.id, **bid.__dict__})
         winner = sorted(bids, key=lambda b: (-b.final_score, -b.specialty_matches, b.agent))[0]
         if self.events is not None and task_id is not None:
             self.events.append_event(task_id=task_id, event_type="agent_assigned", actor=winner.agent,
