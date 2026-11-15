@@ -7,9 +7,16 @@ Engine; native Windows/macOS execution is not a supported assessment environment
 ## Development status
 
 The original remote contained only README and LICENSE, despite describing a
-working prototype. This branch implements member D's assigned work (C01, C04,
-C14, C15, C16). It does not import or claim an unavailable baseline, or implement
-members A/B/C's orchestration, persistence, tools, memory and evaluation modules.
+working prototype. Development began with member D's assigned work (C01, C04,
+C14, C15, C16), and now includes C03 domain contracts, C05 SQLite persistence,
+C06 collaboration services, C07 isolated workspaces/artifact exchange, C08
+bounded search/text retrieval, C09 fail-closed Linux Docker execution and C10
+durable approval/single-action execution with container Git tools.
+C10a now adds interchangeable Baseline/Claude Code harnesses, platform MCP tools,
+durable approval pause/recovery and an isolated native CLI runtime. See
+[C10a API, boundaries and explicit live smoke](docs/C10a_HARNESS.md).
+The full orchestration loop, automatic execution resume, memory learning and evaluation
+remain integration milestones. No unavailable baseline is claimed.
 
 ## Install and verify
 
@@ -99,7 +106,7 @@ JSON checks passed. See the linked report for environments and verification limi
 - [Evaluation status](docs/EVALUATION_REPORT.md), [submission evidence](docs/SUBMISSION.md).
 
 D interfaces are independently testable. Full platform acceptance, execution/approval
-resume, Docker regressions, official datasets and memory ablation await
+resume, official datasets and memory ablation await
 team integration. Actual successful Ubuntu CI runs are linked in the delivery
 overview; their success does not establish full-platform acceptance.
 
@@ -150,7 +157,8 @@ python -m evo --state .evo trace TASK_ID
 The default workspace opens .evo/events.sqlite3 and shows real stored task/review
 records. CLI review/revision now use atomic SQLite operations. Data survives
 process restart; a revision remains created until A's scheduler is connected.
-A new database is empty. The UI disables unavailable task/chat/approval actions.
+A new database is empty. The UI disables unavailable task/chat execution; C10
+enables explicit human approval/clarification answers without automatic execution.
 Set EVO_APPLICATION_FACTORY to override this with the team's complete backend;
 --demo still selects the explicitly volatile preview.
 
@@ -161,6 +169,73 @@ See [SQLite usage, tests and limitations](docs/SQLITE_INTERFACE.md).
 
 The SQLite workspace now has real-browser acceptance and raw-TCP boundary checks.
 See [WEB_ACCEPTANCE.md](docs/WEB_ACCEPTANCE.md) for reproduction and scope.
-The current Python suite has 74 test methods; six browser groups run separately.
+The browser milestone had 74 Python test methods; six browser groups run separately.
 The Ubuntu workflow has a browser job using pinned Playwright and Chromium,
 with screenshots/report artifacts. These are isolated fixtures, not Agent results.
+
+## C07 workspace and artifact tools
+
+`WorkspaceFilesystem` binds file operations to one agent's private
+`.evo/agents/<agent>/workspace/`. It enforces relative paths, no symlinks/hardlinks,
+regular UTF-8 files, a 1 MiB limit and explicit document/code/config/data purposes.
+Reports use `.md`/`.txt`. `ArtifactExchange` publishes recipient-scoped snapshots;
+authorized agents import independent copies with SHA-256 verification and no
+overwrite. These adapters are ready for the C11 tool broker; default CLI/Web
+execution is unchanged. See [C07 usage and safety tests](docs/C07_WORKSPACES.md).
+
+## C08 search and text retrieval
+
+`WebTools(task_id)` provides task-scoped DuckDuckGo search and public HTTPS text
+retrieval, with bounded requests, redirect/DNS checks, pinned IP connections and
+verified TLS. Search results retain URLs; fetched text is labeled untrusted.
+Offline tests cover positive retrieval, SSRF rejection, resource limits and
+concurrent search budgets. C11 owns dispatcher integration and persistent budget
+recovery. See [C08 contracts, limits and tests](docs/C08_WEB_TOOLS.md).
+
+## C09 Linux Docker execution
+
+`DockerPythonRunner(workspace)` runs approved Python files inside a non-root,
+network-disabled container with a read-only root filesystem, one bound agent
+workspace and CPU/memory/PID/output/time limits. Docker errors fail closed;
+there is no host execution fallback. The default Python image is pinned by digest.
+Prepare it and explicitly enable the real Docker tests:
+
+```bash
+image="$(python -c 'from evo.adapters.tools.linux import DEFAULT_IMAGE; print(DEFAULT_IMAGE)')"
+docker --host unix:///var/run/docker.sock pull "$image"
+EVO_DOCKER_TESTS=1 python -W error::ResourceWarning -m unittest \
+  tests.unit.adapters.test_docker_command tests.integration.test_docker_tools -v
+```
+
+The runner uses the local system Docker socket and requires a non-root host
+UID/GID with access to that socket. C10 owns durable approval decisions; C11 owns
+dispatch and task audit. Default CLI/Web execution remains unavailable.
+See [C09 usage, limits and test evidence](docs/C09_DOCKER_SANDBOX.md).
+
+## C10 approvals and container Git
+
+`ApprovalService` persists decisions and `ActionExecutor` gates `run_python`,
+`delete_file` and `git_push`; high-risk policy can also gate `git_commit`.
+Requests bind task/agent/parameters and file hashes or commit SHA, expire after
+one hour by default and can be consumed only once. Denial blocks the task.
+The default SQLite CLI/Web can now answer approval and clarification requests:
+
+```bash
+python -m evo --state .evo answer REQUEST_ID --approve
+python -m evo --state .evo answer REQUEST_ID --deny
+python -m evo --state .evo answer CLARIFICATION_ID --text 'report.md'
+```
+
+`DockerGitTools` provides isolated init/status/explicit-file commit and approved
+GitHub HTTPS push. It rejects unsafe repository config, disables hooks/helpers,
+and injects a repository-scoped token through stdin into temporary Git process
+configuration. Local Git operations use no network; only push uses bridge
+network with validated targets and redirects disabled. Prepare its pinned image:
+
+```bash
+image="$(python -c 'from evo.adapters.tools.git import DEFAULT_GIT_IMAGE; print(DEFAULT_GIT_IMAGE)')"
+docker --host unix:///var/run/docker.sock pull "$image"
+```
+
+Human answers persist without invoking tools automatically; C11 owns scheduling
+and the complete Agent loop. See [C10 contracts, security boundaries and tests](docs/C10_HITL_GIT.md).

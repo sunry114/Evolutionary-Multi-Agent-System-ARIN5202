@@ -11,6 +11,19 @@ appear in the inbox; answer dispatches only the human's explicit answer.
 The backend validates current request state and resumes the proper task. A denied
 or unanswered approval must never be converted to approval by the interface.
 
+C10 now implements `ApprovalService` and the single-action `ActionExecutor`.
+C10a exposes it through the Harness MCP bridge. A pending critical action ends
+the CLI run at a durable checkpoint; answering through CLI/Web still only saves
+the human decision. A trusted caller explicitly resumes the Harness, which
+revalidates and consumes the approval before restarting from recorded outcomes.
+See [Harness lifecycle and recovery](C10a_HARNESS.md).
+Critical calls atomically create a pending request and put the task in
+waiting_human. The CLI/Web answer operation records the human decision only.
+The trusted scheduler must explicitly call the same executor action to continue;
+claiming checks exact task/agent/parameters/content and consumes approval once.
+Denial or expiry blocks the task; tool execution failure marks it failed; a
+successful tool leaves it running for C11 goal verification. See [C10](C10_HITL_GIT.md).
+
 ## Human review (D + B)
 ```mermaid
 stateDiagram-v2
@@ -36,9 +49,9 @@ status=blocked/failed: consumers must inspect the task result.
 ## Restart behavior
 A server restart invalidates the CSRF token; refresh the page. Demo loses all
 state. Real backend restart must recover persisted trace/review records, reject
-stale decisions, and reconcile in-flight jobs and approval requests. That requires
-B/C's durable store and is pending; this branch provides only the repository
-contract and service-recreation test with a shared in-memory fixture.
+stale decisions, and reconcile in-flight jobs and approval requests. C05/C10
+provide durable records and one-use decisions; automatic reconciliation of
+interrupted model loops and unknown tool side effects remains C11 work.
 
 ## C05 persistence and restart recovery
 
@@ -60,5 +73,6 @@ Duplicate or stale review operations return a state conflict and do not append
 dirty events or create duplicate children.
 
 C05 does not yet resume an executing process or an in-memory model/tool loop.
-Later orchestration and approval commits must reconcile persisted pending records
-when the process starts.
+C10 can restore pending/answered approvals and claim unconsumed decisions after
+restart. C11 must reconcile in-flight running actions and must not replay an
+already-consumed approval when its side effects are unknown.

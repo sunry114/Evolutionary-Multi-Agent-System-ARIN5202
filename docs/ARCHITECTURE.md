@@ -1,8 +1,10 @@
 # Architecture
 
-Implemented on this branch: D's installation, provider adapters, CLI, loopback
-Web UI, and ReviewService. All other boxes below are integration dependencies,
-not implemented components.
+Implemented components include D's installation, provider adapters, CLI, loopback
+Web UI and ReviewService, C05 SQLite, C06 collaboration services, C07 file tools
+and C08 bounded search/retrieval.
+The diagram shows remaining integration boundaries; the full orchestrator, Docker
+execution and memory learning are still pending.
 
 ```mermaid
 flowchart TD
@@ -32,6 +34,18 @@ Production persistence belongs to B. The gateway must never return credentials;
 known environment key values and secret-named fields are additionally redacted
 at CLI/HTTP output. Demo state is volatile and explicitly has no execution.
 
+## C10a external harness boundary
+
+`HarnessAdapter` owns one Agent's internal execution through start/events/wait/
+cancel/resume. `BaselineHarnessAdapter` wraps explicit C10 actions; Claude Code
+2.1.311 runs in a networkless container with native tools disabled. A private
+Unix-socket MCP bridge invokes the bound platform broker and C10 approvals.
+A separate fixed-upstream model proxy holds credentials on the host; no real
+workspace, database, host HOME or Docker socket is mounted into the CLI container.
+Private checkpoints and task locks support scoped context restart and prevent
+concurrent harnesses for one work item. C11 owns scheduling and goal verification.
+See [C10a contracts, isolation and recovery limits](C10a_HARNESS.md).
+
 ## C05 durable SQLite storage
 
 Runtime persistence is stored below the ignored `.evo/` directory:
@@ -52,3 +66,68 @@ Human review is separate from technical execution status. Review decisions use a
 Each agent receives a physically separate memory database. C05 establishes its location, validation and initial schema only. Recall, ranking, bid adjustment and the no-memory ablation are implemented by C12.
 
 SQLite databases are trusted application state. They must never be mounted into an agent Docker sandbox, included in task artifacts, committed to Git, or exposed through Web responses. Event payloads contain bounded non-secret metadata rather than credentials or raw environment variables. 
+
+## C07 workspace and artifact boundary
+
+`adapters/tools/filesystem.py` supplies a broker bound to one agent's
+`agents/<agent>/workspace/`, beside its C05 memory database. Paths are resolved
+inside that workspace and opened relative to no-follow directory descriptors.
+Only bounded UTF-8 regular files with purpose-specific suffixes are accepted;
+symlinks, multiple hardlinks, traversal, `.git` and special files are rejected.
+Documents default to Markdown/TXT. Writes install complete files atomically.
+
+`adapters/tools/artifacts.py` snapshots published bytes and metadata under the
+private `artifacts/<id>/` directory. Visibility and imports require ownership or
+an explicit recipient grant. Imports verify SHA-256 and create an independent
+file without overwriting. Neither artifact storage nor memory is sandbox-mounted.
+The application must select the bound instance using trusted task ownership.
+C10/C11 must obtain human approval before enabling deletion; C09 supplies the
+process boundary for agent-generated code. See [C07 contract](C07_WORKSPACES.md).
+
+## C08 public web boundary
+
+`WebTools` implements `WebPort` with one trusted instance per task. All DNS
+addresses and redirect destinations must be public HTTPS/443; transport connects
+to the validated numeric address with the original TLS hostname. Search parsing
+is replaceable and offline-testable. Results retain source URLs and explicit
+untrusted metadata; fetched HTML becomes labeled text, never executable content.
+Body size, network time, redirects and task search count are bounded. C11 must
+reuse the task instance and persist/recover budget and action audit state.
+See [C08 limits and verification](C08_WEB_TOOLS.md).
+
+## C09 Linux Docker execution boundary
+
+`DockerPythonRunner` accepts one trusted `WorkspaceFilesystem` and approved
+relative Python path. `linux.create_arguments` supplies fixed isolation flags:
+non-root UID/GID, a single workspace bind, no network, read-only root, dropped
+capabilities, no-new-privileges, restricted tmpfs and CPU/memory/PID limits.
+The default image is digest-pinned and resolved to an immutable local image ID.
+Each Docker CLI process uses an empty temporary config and a minimal environment;
+host Docker proxies, context, model credentials and tokens are not inherited.
+
+The runner drains stdout/stderr under a shared byte bound, enforces the attach
+deadline, verifies the container exit state and attempts forced removal on every
+execution exit path. Infrastructure or cleanup errors fail closed without host
+execution. It uses only the local system Docker socket; that socket is never
+mounted into the container. C10 must bind durable approval to the exact action,
+and C11 must select the trusted agent instance and persist execution audit.
+See [C09 contract, lifecycle limits and evidence](C09_DOCKER_SANDBOX.md).
+
+## C10 critical actions and Git
+
+`ApprovalService` implements the approval port through SQLite; `ActionExecutor`
+binds a trusted task owner to workspace/Python/Git ports. Critical operations
+persist exact parameters and content hashes or commit SHA, transition to
+waiting_human, and wait for an explicit CLI/Web answer. Atomic one-use claims
+prevent concurrent execution or replay. Denial/expiry blocks the task; execution
+failures record safe metadata and fail it. Tool success leaves goal verification
+to C11. No automatic model-loop restart occurs in the interface.
+
+`DockerGitTools` uses C09 isolation with a pinned Git image. A conservative local
+config/metadata allowlist excludes executable helpers, hooks, redirects, URL
+rewrites, external gitdirs and alternates. Init/status/explicit-file commits have
+no network. Approved push permits only canonical GitHub HTTPS and a single branch
+at the approved commit. Its exact-repository credential arrives over stdin and
+exists only in Git process environment; push output is replaced by safe summaries.
+Push uses bridge networking with application target enforcement, not an IP-level
+egress firewall. See [C10 boundaries and restart caveats](C10_HITL_GIT.md).

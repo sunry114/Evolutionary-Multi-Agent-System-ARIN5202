@@ -7,6 +7,12 @@ memory or evaluation integrations.
 
 ## Actual browser acceptance
 
+C10 follow-up (2026-11-15): all six browser groups passed on local Ubuntu 24.04.4
+with Chromium 151.0.7922.34 / Playwright 1.62.1. The fixture now includes a pending
+critical action; the browser approves it and observes the request disappear.
+No tool is automatically executed. The historical runtime/results below describe
+the earlier C14 milestone; the current second group includes approval answering.
+
 Command: node tests/browser/web_acceptance.cjs.
 Local runtime: Windows, real headless Microsoft Edge 157.0.4341.42 driven by
 Playwright 1.62.1, against a real local Python HTTP server and isolated SQLite DB.
@@ -15,7 +21,7 @@ Desktop viewport: 1280x900; mobile viewport: 390x844.
 The browser actually clicks and validates:
 
 1. Stored tasks render, HTML/script-like content remains inert, run is disabled.
-2. Invalid review displays an error and allows retry; approval is read-only.
+2. Invalid review displays an error and allows retry; C10 also persists an explicit approval.
 3. Accept result, request changes, create linked revision and load audit trace.
 4. Task/inbox/group/DM/memory navigation and unavailable chat controls.
 5. Stop/restart the server process, reload/refresh and recover decisions/revision.
@@ -79,6 +85,6 @@ Ubuntu CI runs the Python and browser jobs without real credentials.
 ## Remaining boundaries
 
 Browser acceptance covers the current SQLite mode and fixture-driven review flow.
-No real Agent task execution, chat reply, critical tool approval/resume, memory
+No complete Agent task loop, chat reply, automatic critical-tool resume, memory
 evolution, Docker sandbox or official dataset metric is established. Those flows
 must receive separate acceptance tests when A/B/C provides the implementations.

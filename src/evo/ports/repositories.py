@@ -59,6 +59,15 @@ class EventRepository(Protocol):
 
 
 class ActionRepository(Protocol):
+    def start_action(self, task_id: str, agent: str, tool_name: str, arguments: Record) -> str:
+        ...
+
+    def finish_action(self, action_id: str, *, succeeded: bool, result: Record) -> None:
+        ...
+
+    def get_action(self, action_id: str) -> Record:
+        ...
+
     def save_action(
         self,
         *,
@@ -73,6 +82,18 @@ class ActionRepository(Protocol):
 
 
 class ApprovalRepository(Protocol):
+    def prepare_critical_action(self, task_id: str, agent: str, tool_name: str, payload: Record) -> str:
+        ...
+
+    def answer_request(self, request_id: str, response: Record, *, max_age_seconds: float = 3600) -> Record:
+        ...
+
+    def expire_request_if_due(self, request_id: str, *, max_age_seconds: float = 3600) -> Record:
+        ...
+
+    def claim_approved_action(self, request_id: str, task_id: str, agent: str, tool_name: str,
+                              payload: Record, *, max_age_seconds: float = 3600) -> bool:
+        ...
     def list_pending_requests(self) -> Sequence[Record]:
         """Read pending requests without answering or resuming them."""
         ...

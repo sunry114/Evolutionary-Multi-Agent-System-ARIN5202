@@ -8,14 +8,16 @@ With no EVO_APPLICATION_FACTORY and no --demo, CLI/Web now load SQLiteApplicatio
 It uses B's SQLiteStore and A's ReviewRepository port through D's ReviewService.
 Runtime database: <state>/events.sqlite3; --state defaults to ignored .evo/.
 
-Supported operations: tasks, task, trace, review and revision. Reads return stored
+Supported operations: tasks, task, trace, review, revision and (since C10) answer. Reads return stored
 records; they do not create tasks. Review keeps technical status unchanged.
 Revision atomically links one created child; it does not execute or schedule it.
 Concurrent duplicate revisions conflict, with no extra child or dirty audit event.
 
-Pending approvals are read-only. The UI disables run/chat forms and approval
-buttons in this mode. Execution, Agent replies, memory, metrics, eval and answer
-remain unavailable until A/B/C supplies a full gateway. HTTP returns 503 for these
+Since C10, pending approval/clarification requests can be answered through CLI/Web.
+Decisions are atomic and durable; denial blocks the task. Answering does not
+automatically execute a tool or resume a model loop. The UI still disables
+run/chat forms. Execution, Agent replies, memory, metrics and eval
+remain unavailable until the full gateway is integrated. HTTP returns 503 for these
 operations; CLI returns 2. Unsupported calls do not write task or approval state.
 The existing --demo mode stays volatile; EVO_APPLICATION_FACTORY overrides SQLite
 mode for the future full application.
@@ -56,7 +58,7 @@ restarted. DB persistence alone does not provide durable execution/approval resu
 - Two concurrent revisions producing exactly one child.
 - Invalid types, limits and IDs without unintended writes.
 - Unavailable backends without side effects.
-- Persisted tasks and read-only approval snapshot.
+- Persisted tasks and pending approval snapshot (C10 additionally tests human answers).
 - Bounded listing and querying a technically failed task.
 - Actual Web server process restart preserving review, revision and trace;
   the old CSRF token is rejected and a duplicate revision remains rejected.
@@ -66,7 +68,8 @@ Local full regression: 66 tests, 64 passed, 2 POSIX-only checks skipped on Windo
 with Python 3.12.7. No real API key or outbound model request is needed.
 Browser interaction and documented HTTP boundary coverage were completed in the
 2026-11-14 follow-up; see [WEB_ACCEPTANCE.md](WEB_ACCEPTANCE.md). Full-backend
-execution/approval/chat flows are still outside this milestone.
+full execution/chat flows are still outside this milestone. C10 adds approval
+decision persistence, schema/CSRF rejection and CLI/Web answer tests; see [C10](C10_HITL_GIT.md).
 
 The wheel must include migrations/*.sql. CI now initializes SQLiteApplication from
 the installed wheel, in addition to checking Web assets; editable installs alone

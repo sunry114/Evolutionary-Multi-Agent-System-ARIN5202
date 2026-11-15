@@ -44,7 +44,7 @@ async function run() {
   await page.goto(url);
   await page.locator('#notice').filter({hasText:'SQLite'}).waitFor();
   const tasks=page.locator('#task-list article');
-  assert.equal(await tasks.count(),4);
+  assert.equal(await tasks.count(),5);
   assert.equal(await page.locator('#run-form button').isDisabled(),true);
   assert.equal(await page.locator('img').count(),0);
   assert.equal(await page.evaluate(()=>window.__xss===true),false);
@@ -52,12 +52,14 @@ async function run() {
   await page.screenshot({path:path.join(output,'desktop.png'),fullPage:true});
 
   await page.getByRole('button',{name:'收件箱',exact:true}).click();
-  assert.equal(await page.getByRole('button',{name:'批准',exact:true}).count(),0);
+  const approval=page.locator('#inbox-list article').filter({hasText:'delete_file'});
+  await approval.getByRole('button',{name:'批准',exact:true}).click();
+  await approval.waitFor({state:'detached'});
   const bad=page.locator('#inbox-list article').filter({hasText:'Error sample'});
   await bad.getByRole('button',{name:'要求修改',exact:true}).click();
   await page.waitForFunction(()=>document.querySelector('#status').textContent.includes('Invalid request'));
   assert.equal(await bad.getByRole('button',{name:'要求修改',exact:true}).isEnabled(),true);
-  checks.push('Invalid review shows error and re-enables the action; approval is read-only');
+  checks.push('Approval decision persists; invalid review shows error and re-enables the action');
 
   const accept=page.locator('#inbox-list article').filter({hasText:'Accept sample'});
   await accept.getByRole('button',{name:'接受结果',exact:true}).click();
@@ -72,7 +74,7 @@ async function run() {
   await parent.getByRole('button',{name:'创建修订任务',exact:true}).click();
   await page.waitForFunction(()=>document.querySelector('#status').textContent.includes('Revision saved'));
   await parent.getByText('执行：success · 审查：revising',{exact:true}).waitFor();
-  assert.equal(await tasks.count(),5);
+  assert.equal(await tasks.count(),6);
   await parent.locator('summary').click();
   await parent.getByRole('button',{name:'加载 trace',exact:true}).click();
   await parent.locator('pre').filter({hasText:'revision_linked'}).waitFor();
@@ -92,7 +94,7 @@ async function run() {
   await page.locator('#notice').filter({hasText:'SQLite'}).waitFor();
   assert.notEqual(await page.locator('meta[name="csrf-token"]').getAttribute('content'),oldToken);
   await tasks.filter({hasText:'Revise sample'}).getByText('执行：success · 审查：revising',{exact:true}).waitFor();
-  assert.equal(await tasks.count(),5);
+  assert.equal(await tasks.count(),6);
   await page.getByRole('button',{name:'刷新状态',exact:true}).click();
   await tasks.filter({hasText:'Accept sample'}).getByText('执行：success · 审查：accepted',{exact:true}).waitFor();
   checks.push('Actual server-process restart + reload/refresh retains decisions and revision');
