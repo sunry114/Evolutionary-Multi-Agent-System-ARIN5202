@@ -61,6 +61,18 @@ indicates missing/unsafe credentials. Credentials remain outside ApplicationGate
 snapshots, task payloads, trace and reports. check-provider is connectivity evidence
 only; A still owns the agent loop and B the objective evaluation.
 
+## C10a harness adapter
+
+Use `create_harness(HarnessConfig(adapter='claude_code'), state, broker,
+model=model, credential_loader=loader)` with a trusted `PlatformToolBroker` bound
+to the task owner. State must share the SQLite state root. `RunRequest` carries
+task/agent/session/workspace/role/authorized memory. Poll `wait` and `events`;
+answer durable approval requests through the existing CLI/Web, then explicitly
+call `resume(result.resume_ref, original_request)`. Recovery restarts the CLI from
+recorded platform outcomes, with a fresh native session ID. C11 must verify the
+goal independently; a successful harness never marks the task successful.
+See [API example and development endpoint setup](C10a_HARNESS.md).
+
 ## C05 storage adapter
 
 `evo.adapters.persistence.sqlite_store.SQLiteStore` implements the durable

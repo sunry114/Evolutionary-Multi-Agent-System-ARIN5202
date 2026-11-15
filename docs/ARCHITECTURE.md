@@ -34,6 +34,18 @@ Production persistence belongs to B. The gateway must never return credentials;
 known environment key values and secret-named fields are additionally redacted
 at CLI/HTTP output. Demo state is volatile and explicitly has no execution.
 
+## C10a external harness boundary
+
+`HarnessAdapter` owns one Agent's internal execution through start/events/wait/
+cancel/resume. `BaselineHarnessAdapter` wraps explicit C10 actions; Claude Code
+2.1.311 runs in a networkless container with native tools disabled. A private
+Unix-socket MCP bridge invokes the bound platform broker and C10 approvals.
+A separate fixed-upstream model proxy holds credentials on the host; no real
+workspace, database, host HOME or Docker socket is mounted into the CLI container.
+Private checkpoints and task locks support scoped context restart and prevent
+concurrent harnesses for one work item. C11 owns scheduling and goal verification.
+See [C10a contracts, isolation and recovery limits](C10a_HARNESS.md).
+
 ## C05 durable SQLite storage
 
 Runtime persistence is stored below the ignored `.evo/` directory:

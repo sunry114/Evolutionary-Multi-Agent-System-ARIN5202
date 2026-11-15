@@ -1,6 +1,7 @@
 """Non-secret provider configuration."""
 import math
 import os
+import re
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -52,3 +53,55 @@ class ProviderConfig:
             )
         except (ValueError, TypeError, OverflowError):
             raise ValueError("Invalid provider environment configuration") from None
+
+
+@dataclass(frozen=True)
+class HarnessConfig:
+    adapter: str = "baseline"
+    cli_path: str = "claude"
+    cli_version: str = "2.1.311"
+    timeout: float = 180
+    max_output_bytes: int = 4 * 1024 * 1024
+    max_tool_calls: int = 20
+
+    def __post_init__(self):
+        if self.adapter not in ("baseline", "claude_code", "pi", "custom"):
+            raise ValueError("Unknown harness adapter")
+        if (not isinstance(self.cli_path, str) or not self.cli_path
+                or not re.fullmatch(r"2\.\d+\.\d+", self.cli_version)
+                or type(self.timeout) not in (int, float) or not math.isfinite(self.timeout)
+                or not 0 < self.timeout <= 600
+                or type(self.max_output_bytes) is not int or not 1024 <= self.max_output_bytes <= 8 * 1024 * 1024
+                or type(self.max_tool_calls) is not int or not 1 <= self.max_tool_calls <= 20):
+            raise ValueError("Invalid harness resource limits or CLI version")
+
+
+@dataclass(frozen=True)
+class HarnessModelConfig:
+    """Anthropic wire protocol; provider identity is independent of that protocol."""
+
+    provider: str = "deepseek"
+    endpoint: str = "https://api.deepseek.com/anthropic"
+    model: str = ""
+    development: bool = False
+    evaluation: bool = False
+
+    def __post_init__(self):
+        try:
+            endpoint = self.endpoint.rstrip("/")
+            parts = urlsplit(endpoint)
+            approved = ((self.provider == "deepseek" and endpoint == "https://api.deepseek.com/anthropic")
+                        or (self.provider == "hkgai" and endpoint in ENDPOINTS["hkgai"]))
+            if (not parts.hostname or parts.username or parts.password or parts.query or parts.fragment
+                    or parts.scheme not in ("http", "https") or not 0 < (parts.port or 80) < 65536
+                    or any(ord(c) <= 32 for c in endpoint) or "\\" in endpoint or "%" in endpoint
+                    or any(p in (".", "..") for p in parts.path.split("/"))
+                    or type(self.development) is not bool or type(self.evaluation) is not bool
+                    or (not approved and (self.provider != "development" or not self.development or self.evaluation))
+                    or (parts.scheme != "https" and not self.development)
+                    or (self.evaluation and self.development)
+                    or not isinstance(self.model, str) or not re.fullmatch(r"[A-Za-z0-9_./:\[\]-]{1,200}", self.model)):
+                raise ValueError()
+        except (ValueError, TypeError, AttributeError):
+            raise ValueError("Invalid harness backend; third-party endpoints require explicit development mode") from None
+        object.__setattr__(self, "endpoint", endpoint)

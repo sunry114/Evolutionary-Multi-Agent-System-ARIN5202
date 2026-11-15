@@ -5,6 +5,17 @@ Current merged implementation baseline: main 4eb3097, including API commit 6cb37
 The instructor's specification governs final acceptance; the C numbers are the
 team's development breakdown, not five separate grading phases.
 
+## C10a pluggable Agent Harness (2026-11-15)
+
+- Harness port, explicit Baseline action adapter, Claude Code 2.1.311 adapter and registry implemented.
+- Platform MCP bridge preserves C07-C10 tool, ownership and approval boundaries.
+- Networkless CLI container, fixed-upstream model proxy, scoped context recovery,
+  task execution lease and cleanup quarantine implemented and tested.
+- Explicit local third-party development smoke passed; formal backend validation,
+  C11/C13 integration and Ubuntu 22.04 remote CI remain separate evidence.
+
+See [C10a contracts and verification](C10a_HARNESS.md).
+
 ## C10 durable approvals and secure Git operations (2026-11-15)
 
 `application/approvals.py` and `executor.py` implement exact-action, one-use human

@@ -1,5 +1,30 @@
 # Verification (C15)
 
+## C10a local verification (2026-11-15)
+
+C10a adds 32 tests: 14 harness/backend/broker tests, 9 real fake-CLI subprocess
+protocol/lifecycle tests, 5 fixed-upstream proxy tests and 4 Docker command tests.
+Full regression with `EVO_DOCKER_TESTS=1`: **232 tests, no skips**, on local
+Ubuntu 24.04.4 x86_64 / Python 3.12.3 / Docker 29.1.3. Python 3.10 is also
+verified locally. Default CI uses controllable CLI/proxy fixtures and no live key.
+
+Explicit real Claude Code 2.1.311 smoke used the user's local third-party
+development endpoint. It generated/read a Markdown file, generated a fixed Python
+script, paused for a durable approval, executed that exact approved script in the
+C09 container and restarted from recorded context. This is development evidence,
+not formal DeepSeek/HKGAI backend or dataset evaluation evidence. Endpoint and
+credentials are not included in the report. The local private report and trace
+remain under ignored `.evo/harness-smoke/`.
+
+The final smoke task was `smoke-dcdb19bdacaa47a28c879280eeaa05ac`, initial run
+`b867e269600949dd8c38541c3731b3be`, resumed run
+`3410c25db39a44e19e406141eab6e007`. All five objective smoke checks passed,
+including exact Python stdout and one successful approved code execution.
+
+Compileall, wheel build and packaged relay inclusion are checked. Ubuntu 22.04
+remote CI and C11/C13 business integration remain pending. See
+[C10a reproduction and boundaries](C10a_HARNESS.md).
+
 ## C10 local verification (2026-11-15)
 
 Full regression with `EVO_DOCKER_TESTS=1`: **200 tests, no skips**, on local

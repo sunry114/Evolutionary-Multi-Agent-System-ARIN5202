@@ -12,6 +12,11 @@ The backend validates current request state and resumes the proper task. A denie
 or unanswered approval must never be converted to approval by the interface.
 
 C10 now implements `ApprovalService` and the single-action `ActionExecutor`.
+C10a exposes it through the Harness MCP bridge. A pending critical action ends
+the CLI run at a durable checkpoint; answering through CLI/Web still only saves
+the human decision. A trusted caller explicitly resumes the Harness, which
+revalidates and consumes the approval before restarting from recorded outcomes.
+See [Harness lifecycle and recovery](C10a_HARNESS.md).
 Critical calls atomically create a pending request and put the task in
 waiting_human. The CLI/Web answer operation records the human decision only.
 The trusted scheduler must explicitly call the same executor action to continue;

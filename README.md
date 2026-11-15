@@ -12,6 +12,9 @@ C14, C15, C16), and now includes C03 domain contracts, C05 SQLite persistence,
 C06 collaboration services, C07 isolated workspaces/artifact exchange, C08
 bounded search/text retrieval, C09 fail-closed Linux Docker execution and C10
 durable approval/single-action execution with container Git tools.
+C10a now adds interchangeable Baseline/Claude Code harnesses, platform MCP tools,
+durable approval pause/recovery and an isolated native CLI runtime. See
+[C10a API, boundaries and explicit live smoke](docs/C10a_HARNESS.md).
 The full orchestration loop, automatic execution resume, memory learning and evaluation
 remain integration milestones. No unavailable baseline is claimed.
 
