@@ -1,8 +1,9 @@
 # Architecture
 
-Implemented on this branch: D's installation, provider adapters, CLI, loopback
-Web UI, and ReviewService. All other boxes below are integration dependencies,
-not implemented components.
+Implemented components include D's installation, provider adapters, CLI, loopback
+Web UI and ReviewService, C05 SQLite, C06 collaboration services and C07 file tools.
+The diagram shows remaining integration boundaries; the full orchestrator, Docker
+execution and memory learning are still pending.
 
 ```mermaid
 flowchart TD
@@ -52,3 +53,20 @@ Human review is separate from technical execution status. Review decisions use a
 Each agent receives a physically separate memory database. C05 establishes its location, validation and initial schema only. Recall, ranking, bid adjustment and the no-memory ablation are implemented by C12.
 
 SQLite databases are trusted application state. They must never be mounted into an agent Docker sandbox, included in task artifacts, committed to Git, or exposed through Web responses. Event payloads contain bounded non-secret metadata rather than credentials or raw environment variables. 
+
+## C07 workspace and artifact boundary
+
+`adapters/tools/filesystem.py` supplies a broker bound to one agent's
+`agents/<agent>/workspace/`, beside its C05 memory database. Paths are resolved
+inside that workspace and opened relative to no-follow directory descriptors.
+Only bounded UTF-8 regular files with purpose-specific suffixes are accepted;
+symlinks, multiple hardlinks, traversal, `.git` and special files are rejected.
+Documents default to Markdown/TXT. Writes install complete files atomically.
+
+`adapters/tools/artifacts.py` snapshots published bytes and metadata under the
+private `artifacts/<id>/` directory. Visibility and imports require ownership or
+an explicit recipient grant. Imports verify SHA-256 and create an independent
+file without overwriting. Neither artifact storage nor memory is sandbox-mounted.
+The application must select the bound instance using trusted task ownership.
+C10/C11 must obtain human approval before enabling deletion; C09 supplies the
+process boundary for agent-generated code. See [C07 contract](C07_WORKSPACES.md).

@@ -5,6 +5,15 @@ Current merged implementation baseline: main 4eb3097, including API commit 6cb37
 The instructor's specification governs final acceptance; the C numbers are the
 team's development breakdown, not five separate grading phases.
 
+## C07 workspace isolation and artifact exchange (2026-11-15)
+
+`adapters/tools/filesystem.py` and `artifacts.py` implement private bound
+workspaces, bounded UTF-8 files, purpose-specific suffixes, path/link rejection,
+and explicit recipient-scoped publish/import with snapshot digest verification.
+23 new tests cover path boundaries, independent copies, restart, corruption,
+concurrent no-clobber imports and C05 coexistence. See [C07](C07_WORKSPACES.md).
+Docker/process isolation and task-loop/approval integration remain C09–C11 work.
+
 ## C06 planning and collaboration (2026-11-14, PR #9 branch)
 
 The C06 service layer provides private DM history, group chat separated from task
@@ -69,9 +78,9 @@ of C03/C05. B owns the persistence implementation; D adds the interface bridge.
 | Autonomous decomposition, role negotiation and delegation | A C03/C06/C11 | C06 planner and all-agent bidding services exist on PR #9; C11 task-loop scheduling and CLI/Web integration pending |
 | Proactive clarification and critical-action approval | A/C + D inbox/answer entry | C06 can persist pending planner questions through SQLite; human answer/resume and critical-action approval policy pending |
 | Per-Agent memory and improvement from experience | B C05/C12 | Pending implementation and measured evidence |
-| Per-Agent isolated filesystem/sandbox | C C07/C09 | Pending implementation and isolation tests |
-| Search, file CRUD, code execution and Git tools | C C07-C10/C10a | Pending Agent tools; a developer's Git push does not satisfy this capability |
-| Markdown/TXT only document tasks | C tool policy, team execution | No complex-format support added; real tool/output enforcement pending |
+| Per-Agent isolated filesystem/sandbox | C C07/C09 | C07 bound workspaces and artifact isolation tested; Docker process isolation pending C09 |
+| Search, file CRUD, code execution and Git tools | C C07-C10/C10a | C07 file CRUD and publish/import adapters implemented; search, code execution, Git and task-loop integration pending |
+| Markdown/TXT only document tasks | C tool policy, team execution | C07 enforces document suffixes separately from code/config/data; full task-output integration pending C11 |
 | Minimal functional UI | D C14 | CLI/basic Web exists; elaborate design is unnecessary |
 | DeepSeek/HKGAI only; no OpenAI/Anthropic APIs | D C04 + A/C integration | Adapter selection restricted; course HKGAI verified; full system must preserve restriction |
 | Automatic goal/subtask completion and execution time | B C13 + A task state | CLI query/assessment entry only; real metric computation pending |

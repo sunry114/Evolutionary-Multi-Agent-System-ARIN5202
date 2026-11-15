@@ -7,9 +7,11 @@ Engine; native Windows/macOS execution is not a supported assessment environment
 ## Development status
 
 The original remote contained only README and LICENSE, despite describing a
-working prototype. This branch implements member D's assigned work (C01, C04,
-C14, C15, C16). It does not import or claim an unavailable baseline, or implement
-members A/B/C's orchestration, persistence, tools, memory and evaluation modules.
+working prototype. Development began with member D's assigned work (C01, C04,
+C14, C15, C16), and now includes C03 domain contracts, C05 SQLite persistence,
+C06 collaboration services and C07 isolated workspaces/artifact exchange.
+The full orchestration loop, sandbox execution, memory learning and evaluation
+remain integration milestones. No unavailable baseline is claimed.
 
 ## Install and verify
 
@@ -161,6 +163,16 @@ See [SQLite usage, tests and limitations](docs/SQLITE_INTERFACE.md).
 
 The SQLite workspace now has real-browser acceptance and raw-TCP boundary checks.
 See [WEB_ACCEPTANCE.md](docs/WEB_ACCEPTANCE.md) for reproduction and scope.
-The current Python suite has 74 test methods; six browser groups run separately.
+The browser milestone had 74 Python test methods; six browser groups run separately.
 The Ubuntu workflow has a browser job using pinned Playwright and Chromium,
 with screenshots/report artifacts. These are isolated fixtures, not Agent results.
+
+## C07 workspace and artifact tools
+
+`WorkspaceFilesystem` binds file operations to one agent's private
+`.evo/agents/<agent>/workspace/`. It enforces relative paths, no symlinks/hardlinks,
+regular UTF-8 files, a 1 MiB limit and explicit document/code/config/data purposes.
+Reports use `.md`/`.txt`. `ArtifactExchange` publishes recipient-scoped snapshots;
+authorized agents import independent copies with SHA-256 verification and no
+overwrite. These adapters are ready for the C11 tool broker; default CLI/Web
+execution is unchanged. See [C07 usage and safety tests](docs/C07_WORKSPACES.md).

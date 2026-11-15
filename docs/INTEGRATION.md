@@ -85,3 +85,19 @@ request and audit metadata only; C10 owns approval policy and answer processing.
 C12 owns memory recall and learning behavior.
 
 Current default workspace behavior and read-query extensions: [SQLITE_INTERFACE.md](SQLITE_INTERFACE.md).
+
+## C07 file adapters
+
+Construct `WorkspaceFilesystem(state, owner)` and `ArtifactExchange(workspace)`
+in trusted application code. `WorkspacePort` and `ArtifactPort` in `ports/tools.py`
+describe their methods; `Artifact` carries ID, owner, original name, purpose,
+byte size, SHA-256 and recipients. Select the instance from trusted task ownership,
+never a model-supplied source agent. Only the workspace directory may be mounted
+into C09 containers. Code/config/data require explicit purpose; user reports
+must use the default `document` purpose and `.md`/`.txt`.
+
+Publish needs explicit recipients; import checks authorization and integrity and
+never overwrites an existing destination. C10/C11 must derive `delete_file`'s
+`approved=True` from a validated human decision, never forward it from model
+arguments. The adapters do not implement the task dispatcher, approval waiting,
+or Docker execution. See [usage, limits and test evidence](C07_WORKSPACES.md).

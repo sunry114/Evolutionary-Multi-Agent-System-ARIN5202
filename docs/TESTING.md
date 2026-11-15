@@ -1,6 +1,19 @@
 # Verification (C15)
 
-Current milestone (2026-11-14): 74 Python methods, 72 passed and 2 POSIX skips
+## C07 local verification (2026-11-15)
+
+C07 adds 23 Linux tests: 11 in `security/test_path_boundary.py` and 12 in
+`integration/test_artifact_exchange.py`. They cover workspace CRUD and policy,
+path/symlink/hardlink/special-file rejection, UTF-8 byte limits, descriptor cleanup,
+recipient permissions, snapshot copies, restart, integrity, concurrent imports,
+publication failure cleanup and C05 coexistence. See [C07](C07_WORKSPACES.md).
+The local environment is Ubuntu 24.04.4 x86_64 / Python 3.12.3; this is developer
+verification, not a new Ubuntu 22.04 CI or official evaluation claim.
+Full regression passed: **111 tests, no skips**, with ResourceWarning promoted
+to an error. Compileall, diff whitespace checks and the tracked secret-pattern
+check also passed.
+
+Previous browser milestone (2026-11-14): 74 Python methods, 72 passed and 2 POSIX skips
 on Windows. Eight new raw-TCP methods live in tests/security/test_http_boundaries.py.
 Six separate real-browser acceptance groups passed in Edge; Chromium runs in its
 own Ubuntu CI job. See [WEB_ACCEPTANCE.md](WEB_ACCEPTANCE.md) for evidence and commands.
@@ -67,9 +80,9 @@ for the SQLite workspace; see WEB_ACCEPTANCE.md. New full-backend flows still
 require additional acceptance when integrated.
 
 B owns SQLite lifecycle/migrations, memory and objective evaluation regressions.
-A owns planning, delegation and real task E2E. C owns path/SSRF/Git scope, Docker
-execution and platform guard tests. Their modules/suites remain integration
-dependencies; no Docker/full-platform acceptance is claimed.
+A owns planning, delegation and real task E2E. C07 now supplies the file path and
+artifact suites; SSRF/Git scope and Docker execution tests remain later milestones.
+No Docker/full-platform acceptance is claimed.
 
 The secret-pattern check is a precaution, not proof that all possible secrets
 are absent. Never commit real credentials.

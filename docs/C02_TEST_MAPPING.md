@@ -9,9 +9,9 @@
    |    Web task flow     |      integration/test_web_api.py      |  部分已有  |     C14     |   D    |
    |   collective task    |      e2e/test_collective_task.py      |   待 C11   |     C11     |   A    |
    |      delegation      |      e2e/test_collective_task.py      |   待 C11   |     C11     |   A    |
-   |    path boundary     |    security/test_path_boundary.py     |   待 C07   |     C07     |   C    |
+   |    path boundary     |    security/test_path_boundary.py     |   已覆盖   |     C07     |   C    |
    |   private targets    |         security/test_ssrf.py         |   待 C08   |     C08     |   C    |
-   |  artifact exchange   | integration/test_artifact_exchange.py |   待 C07   |     C07     |   C    |
+   |  artifact exchange   | integration/test_artifact_exchange.py |   已覆盖   |     C07     |   C    |
    |   stale file check   |    unit/evaluation/test_checks.py     |   待 C13   |     C13     |   B    |
    | failed run objective |    unit/evaluation/test_checks.py     |   待 C13   |     C13     |   B    |
    | repeated denied tool |   unit/application/test_executor.py   | 待 C10/C11 |   C10/C11   |   C/A  |
