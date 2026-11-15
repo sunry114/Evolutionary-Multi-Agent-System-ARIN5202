@@ -1,5 +1,10 @@
 # Requirements traceability
 
+Latest C14 milestone (2026-11-15): ChatService-backed DM/group chat, persisted
+history and ApprovalService answers are now connected. See [C14_STATUS.md](C14_STATUS.md)
+for current validation, limitations and remaining C11/C12/C13 dependencies.
+Earlier dated counts and unavailable-chat statements below are historical.
+
 Updated: 2026-11-08 (Asia/Shanghai). D owns C01/C04/C14/C15/C16 in the team plan.
 Current merged implementation baseline: main 4eb3097, including API commit 6cb3780.
 The instructor's specification governs final acceptance; the C numbers are the

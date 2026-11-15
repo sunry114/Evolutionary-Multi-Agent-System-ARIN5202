@@ -13,7 +13,7 @@ const output = path.resolve(process.env.EVO_BROWSER_OUTPUT || path.join(root, '.
 fs.mkdirSync(output, {recursive: true});
 const state = fs.mkdtempSync(path.join(os.tmpdir(), 'evo-browser-'));
 const python = process.env.EVO_TEST_PYTHON || 'python';
-const env = {...process.env, PYTHONIOENCODING:'utf-8', EVO_APPLICATION_FACTORY:''};
+const env = {...process.env, PYTHONIOENCODING:'utf-8', EVO_APPLICATION_FACTORY:'c14_fixture:create_application', PYTHONPATH:[path.join(__dirname),process.env.PYTHONPATH].filter(Boolean).join(path.delimiter)};
 let server, browser;
 const checks = [];
 async function start() {
@@ -44,7 +44,7 @@ async function run() {
   await page.goto(url);
   await page.locator('#notice').filter({hasText:'SQLite'}).waitFor();
   const tasks=page.locator('#task-list article');
-  assert.equal(await tasks.count(),5);
+  assert.equal(await tasks.count(),7);
   assert.equal(await page.locator('#run-form button').isDisabled(),true);
   assert.equal(await page.locator('img').count(),0);
   assert.equal(await page.evaluate(()=>window.__xss===true),false);
@@ -55,6 +55,11 @@ async function run() {
   const approval=page.locator('#inbox-list article').filter({hasText:'delete_file'});
   await approval.getByRole('button',{name:'批准',exact:true}).click();
   await approval.waitFor({state:'detached'});
+  const denied=page.locator('#inbox-list article').filter({hasText:'run_python'});
+  await denied.getByRole('button',{name:'拒绝',exact:true}).click();await denied.waitFor({state:'detached'});
+  const clarification=page.locator('#inbox-list article').filter({hasText:'Which input file?'});
+  await clarification.getByRole('textbox',{name:'澄清回答'}).fill('report.md');
+  await clarification.getByRole('button',{name:'回复',exact:true}).click();await clarification.waitFor({state:'detached'});
   const bad=page.locator('#inbox-list article').filter({hasText:'Error sample'});
   await bad.getByRole('button',{name:'要求修改',exact:true}).click();
   await page.waitForFunction(()=>document.querySelector('#status').textContent.includes('Invalid request'));
@@ -74,7 +79,7 @@ async function run() {
   await parent.getByRole('button',{name:'创建修订任务',exact:true}).click();
   await page.waitForFunction(()=>document.querySelector('#status').textContent.includes('Revision saved'));
   await parent.getByText('执行：success · 审查：revising',{exact:true}).waitFor();
-  assert.equal(await tasks.count(),6);
+  assert.equal(await tasks.count(),8);
   await parent.locator('summary').click();
   await parent.getByRole('button',{name:'加载 trace',exact:true}).click();
   await parent.locator('pre').filter({hasText:'revision_linked'}).waitFor();
@@ -86,18 +91,40 @@ async function run() {
   for(const [label,id] of [['群聊','group'],['私聊','dm'],['记忆','memory']]) {
     await page.getByRole('button',{name:label,exact:true}).click();
     assert.equal(await page.locator('#'+id).isVisible(),true);
-    if(id!=='memory')assert.equal(await page.locator('#'+id+'-form button').isDisabled(),true);
+    if(id!=='memory')assert.equal(await page.locator('#'+id+'-form button').isEnabled(),true);
   }
-  checks.push('Navigation and unavailable chat controls');
+  checks.push('Navigation and live chat controls');
+  await page.getByRole('button',{name:'群聊',exact:true}).click();
+  await page.locator('#group-form textarea').fill('Group fixture input');
+  await page.locator('#group-form button').click();
+  await page.locator('#group-list').getByText(/Fixture reply from reviewer/).waitFor();
+  await page.getByRole('button',{name:'私聊',exact:true}).click();
+  await page.locator('#agents').selectOption('builder');
+  await page.locator('#dm-form textarea').fill('Private builder input');await page.locator('#dm-form button').click();
+  await page.locator('#dm-list').getByText(/Fixture reply from builder/).waitFor();
+  assert.equal(await page.locator('#agents').inputValue(),'builder');
+  await page.locator('#agents').selectOption('reviewer');assert.equal(await page.locator('#dm-list pre').count(),0);
+  await page.locator('#dm-form textarea').fill('Private reviewer input');await page.locator('#dm-form button').click();
+  await page.locator('#dm-list').getByText(/Fixture reply from reviewer/).waitFor();
+  assert.equal((await page.locator('#dm-list').innerText()).includes('Private builder input'),false);
+  await page.locator('#agents').selectOption('builder');
+  await page.locator('#dm-form textarea').fill('force-provider-error');await page.locator('#dm-form button').click();
+  await page.waitForFunction(()=>document.querySelector('#status').textContent.includes('Agent reply failed'));
+  await page.locator('#dm-list').getByText(/force-provider-error/).waitFor();
+  assert.equal((await page.locator('#status').innerText()).includes('private-fixture-error'),false);
+  checks.push('Real ChatService + SQLite through offline provider: group replies, private histories and safe provider failure');
   const oldToken=await page.locator('meta[name="csrf-token"]').getAttribute('content');
   await stop();url=await start();await page.goto(url);
   await page.locator('#notice').filter({hasText:'SQLite'}).waitFor();
   assert.notEqual(await page.locator('meta[name="csrf-token"]').getAttribute('content'),oldToken);
   await tasks.filter({hasText:'Revise sample'}).getByText('执行：success · 审查：revising',{exact:true}).waitFor();
-  assert.equal(await tasks.count(),6);
+  assert.equal(await tasks.count(),8);
   await page.getByRole('button',{name:'刷新状态',exact:true}).click();
   await tasks.filter({hasText:'Accept sample'}).getByText('执行：success · 审查：accepted',{exact:true}).waitFor();
-  checks.push('Actual server-process restart + reload/refresh retains decisions and revision');
+  await page.getByRole('button',{name:'私聊',exact:true}).click();await page.locator('#agents').selectOption('builder');
+  await page.locator('#dm-list').getByText(/Private builder input/).waitFor();
+  await page.getByRole('button',{name:'任务',exact:true}).click();
+  checks.push('Actual restart retains review/revision, chat histories and human decisions');
   await page.setViewportSize({width:390,height:844});
   await page.screenshot({path:path.join(output,'mobile.png'),fullPage:true});
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true,

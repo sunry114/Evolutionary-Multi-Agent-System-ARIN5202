@@ -1,5 +1,10 @@
 # C14 browser acceptance and C15 HTTP boundaries
 
+Latest C14 milestone (2026-11-15): ChatService-backed DM/group chat, persisted
+history and ApprovalService answers are now connected. See [C14_STATUS.md](C14_STATUS.md)
+for current validation, limitations and remaining C11/C12/C13 dependencies.
+Earlier dated counts and unavailable-chat statements below are historical.
+
 Updated: 2026-11-14 (Asia/Shanghai). Based on main 1db0197 (SQLite PR #7 merged).
 This closes the independently testable browser/boundary work for the current
 SQLite workspace. It does not complete agent execution, chat, approval resume,

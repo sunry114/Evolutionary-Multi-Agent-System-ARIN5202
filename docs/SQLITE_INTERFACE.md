@@ -1,5 +1,10 @@
 # C14 SQLite workspace integration
 
+Latest C14 milestone (2026-11-15): ChatService-backed DM/group chat, persisted
+history and ApprovalService answers are now connected. See [C14_STATUS.md](C14_STATUS.md)
+for current validation, limitations and remaining C11/C12/C13 dependencies.
+Earlier dated counts and unavailable-chat statements below are historical.
+
 Updated: 2026-11-13 (Asia/Shanghai). Based on main cbac88e (C03 and C05 merged).
 
 ## Implemented behavior

@@ -4,7 +4,7 @@ This branch was built against an empty code repository. The following interfaces
 are explicit proposals for A/B/C to review, not claims that their work is present.
 
 The default is now interfaces.sqlite_application.SQLiteApplication, supporting
-real SQLite reads/review/revision. Set
+real SQLite reads/review/revision, ChatService DM/group and durable human answers. Set
 EVO_APPLICATION_FACTORY=your_package.bootstrap:create_application to override it.
 The factory accepts state=Path and returns ApplicationGateway. It must be
 thread-safe: Web uses concurrent request handlers, including human answers while
@@ -170,3 +170,20 @@ operations. To enable approved push, trusted bootstrap code must configure a
 `RepositoryToken(exact_repository, loader)`; model arguments never include tokens.
 Push uses fixed commit/refspec and URL-scoped temporary authorization over stdin.
 See [C10 API, supported arguments and lifecycle](C10_HITL_GIT.md).
+
+
+## C14 live gateway (2026-11-15)
+Default SQLiteApplication now composes ChatService, ReviewService and ApprovalService.
+It exposes dm, group, messages and answer in addition to stored task operations.
+Create it with provider= for dependency injection in offline tests; normal calls
+lazily use create_provider() and external credentials. Agent registry defaults are
+DEFAULT_AGENTS; pass agents= for an explicit alternative. Chat failure returns a
+safe ApplicationFailure (HTTP 502/CLI 1), credential absence returns unavailable
+(HTTP 503/CLI 2), bad input/state returns 409/CLI 2. Human decisions are saved;
+execution resume remains C11's responsibility.
+
+snapshot.capabilities drives disabled controls. Current run/memory/eval/metrics
+remain false. A/B can supply a full factory with those methods; do not mark them
+available until they have real implementations. messages optionally accepts agent
+and returns bounded persisted human-visible history. DM data must not enter group
+or another Agent's prompt. See [C14_STATUS.md](C14_STATUS.md) for acceptance evidence.

@@ -1,5 +1,10 @@
 # Verification (C15)
 
+Latest C14 milestone (2026-11-15): ChatService-backed DM/group chat, persisted
+history and ApprovalService answers are now connected. See [C14_STATUS.md](C14_STATUS.md)
+for current validation, limitations and remaining C11/C12/C13 dependencies.
+Earlier dated counts and unavailable-chat statements below are historical.
+
 ## C10a local verification (2026-11-15)
 
 C10a adds 32 tests: 14 harness/backend/broker tests, 9 real fake-CLI subprocess

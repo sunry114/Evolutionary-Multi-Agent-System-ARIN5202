@@ -4,10 +4,10 @@ import os
 import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
-from evo.interfaces.gateway import ApplicationUnavailable
+from evo.interfaces.gateway import ApplicationFailure, ApplicationUnavailable
 
 MAX_BODY = 65536
-OPERATIONS = {"run", "dm", "group", "review", "revision", "answer", "eval", "trace", "metrics", "memory", "task", "tasks"}
+OPERATIONS = {"run", "dm", "group", "review", "revision", "answer", "eval", "trace", "metrics", "memory", "task", "tasks", "messages"}
 
 
 def unique_object(pairs):
@@ -111,8 +111,10 @@ def make_server(application, port=8768):
             try:
                 result = application.dispatch(operation, payload)
                 return self.reply(200, result)
-            except ApplicationUnavailable:
-                return self.reply(503, {"error": "Agent execution backend not connected; this mode supports stored tasks, trace, review and revision."})
+            except ApplicationUnavailable as error:
+                return self.reply(503, {"error": str(error)})
+            except ApplicationFailure as error:
+                return self.reply(502, {"error": str(error)})
             except (ValueError, KeyError):
                 return self.reply(409, {"error": "Invalid request or state conflict"})
             except Exception:
