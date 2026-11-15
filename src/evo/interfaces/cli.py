@@ -8,7 +8,7 @@ from pathlib import Path
 
 from evo import __version__
 from evo.adapters.llm.credentials import save_key
-from evo.interfaces.gateway import ApplicationUnavailable, load_application
+from evo.interfaces.gateway import ApplicationFailure, ApplicationUnavailable, load_application
 
 
 def read_private_key(prompt):
@@ -26,6 +26,7 @@ def parser():
     commands = root.add_subparsers(dest="command")
     commands.add_parser("task").add_argument("task_id")
     commands.add_parser("tasks").add_argument("--limit", type=int, default=100)
+    commands.add_parser("messages").add_argument("--agent")
     for name in ("run", "group"):
         command = commands.add_parser(name)
         command.add_argument("prompt" if name == "run" else "message")
@@ -102,9 +103,12 @@ def main(argv=None, application=None):
         from evo.interfaces.web.app import redact
         print(json.dumps(redact(result), ensure_ascii=False, indent=2))
         # Reading a failed task is a successful query, not a failed execution.
-        if args.command in ("task", "tasks", "trace"):
+        if args.command in ("task", "tasks", "trace", "messages"):
             return 0
         return 1 if result.get("status") in ("failed", "blocked", "unavailable") or result.get("passed") is False else 0
+    except ApplicationFailure as error:
+        print(str(error), file=sys.stderr)
+        return 1
     except (ApplicationUnavailable, ValueError, OSError) as error:
         # Backend exception text can contain request data and secrets.
         print(str(error) if isinstance(error, ApplicationUnavailable) else "Request failed; check input and application state", file=sys.stderr)

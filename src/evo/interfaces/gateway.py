@@ -8,6 +8,11 @@ class ApplicationUnavailable(RuntimeError):
     pass
 
 
+class ApplicationFailure(RuntimeError):
+    """A safe, user-facing operation failure; never wrap raw provider text."""
+    pass
+
+
 class ApplicationGateway(Protocol):
     def snapshot(self) -> dict:
         """JSON-safe tasks, agents, messages, memory, pending requests; no secrets."""

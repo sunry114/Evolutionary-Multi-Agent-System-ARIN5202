@@ -1,5 +1,10 @@
 # D 部分交付总览与证据
 
+Latest C14 milestone (2026-11-15): ChatService-backed DM/group chat, persisted
+history and ApprovalService answers are now connected. See [C14_STATUS.md](C14_STATUS.md)
+for current validation, limitations and remaining C11/C12/C13 dependencies.
+Earlier dated counts and unavailable-chat statements below are historical.
+
 更新时间：2026-11-08（Asia/Shanghai）。贡献者：**Xiaowen612**。
 本文是 D 部分当前交付入口，记录已完成的实现、验证证据和剩余事项。
 它不是完整平台最终验收报告。

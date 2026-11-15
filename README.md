@@ -239,3 +239,21 @@ docker --host unix:///var/run/docker.sock pull "$image"
 
 Human answers persist without invoking tools automatically; C11 owns scheduling
 and the complete Agent loop. See [C10 contracts, security boundaries and tests](docs/C10_HITL_GIT.md).
+
+
+## Current C14: live chat and human answers
+
+[C14 status and evidence](docs/C14_STATUS.md) is the current acceptance checklist.
+The default workspace now supports real DM/group replies through the course HKGAI
+provider, saved histories and ApprovalService answers. Configure credentials using
+setup-key or the provider environment variable. No key is needed for stored task
+queries, review/revision or answering existing requests.
+
+```bash
+python -m evo --state .evo dm builder 'Describe your role.'
+python -m evo --state .evo group 'Discuss how to divide a review task.'
+python -m evo --state .evo messages --agent builder
+```
+
+Automatic goal execution/resume (C11), memory (C12) and objective eval/metrics (C13)
+remain unavailable. They cannot be replaced by chat replies or demo successes.

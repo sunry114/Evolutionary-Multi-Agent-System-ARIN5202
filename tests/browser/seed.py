@@ -15,3 +15,8 @@ for task_id, prompt in (("accept", "Accept sample"), ("revise", "Revise sample")
 store.save_task(Task("critical", "Critical action fixture", owner="builder", status=TaskStatus.RUNNING))
 ApprovalService(store).request_approval("critical", "builder", "delete_file",
                                       {"arguments": {"path": "report.md"}, "sha256": "fixture"})
+
+store.save_task(Task("denied", "Denied action fixture", owner="builder", status=TaskStatus.RUNNING))
+ApprovalService(store).request_approval("denied", "builder", "run_python", {"fixture": True})
+store.save_task(Task("clarify", "Clarification fixture", owner="builder", status=TaskStatus.RUNNING))
+ApprovalService(store).request_clarification("clarify", "Which input file?")
