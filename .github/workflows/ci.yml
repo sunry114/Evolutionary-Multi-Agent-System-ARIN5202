@@ -78,13 +78,21 @@ jobs:
             docker --host unix:///var/run/docker.sock image inspect "$image" --format '{{.Id}} {{json .RepoDigests}}'
           } > "$RUNNER_TEMP/c09-environment.txt"
           cat "$RUNNER_TEMP/c09-environment.txt"
+      - name: Prepare fixed Git image and record digest
+        run: |
+          image="$(python -c 'from evo.adapters.tools.git import DEFAULT_GIT_IMAGE; print(DEFAULT_GIT_IMAGE)')"
+          docker --host unix:///var/run/docker.sock pull "$image"
+          docker --host unix:///var/run/docker.sock image inspect "$image" --format '{{.Id}} {{json .RepoDigests}}' > "$RUNNER_TEMP/c10-git-image.txt"
+          cat "$RUNNER_TEMP/c10-git-image.txt"
       - name: Run mandatory Docker execution tests
         env:
           EVO_DOCKER_TESTS: '1'
-        run: python -W error::ResourceWarning -m unittest tests.unit.adapters.test_docker_command tests.integration.test_docker_tools -v
+        run: python -W error::ResourceWarning -m unittest tests.unit.adapters.test_docker_command tests.unit.application.test_approval tests.security.test_git_scope tests.integration.test_docker_tools tests.integration.test_git_tools -v
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: c09-docker-environment
-          path: ${{ runner.temp }}/c09-environment.txt
+          name: sandbox-environment
+          path: |
+            ${{ runner.temp }}/c09-environment.txt
+            ${{ runner.temp }}/c10-git-image.txt
           if-no-files-found: warn

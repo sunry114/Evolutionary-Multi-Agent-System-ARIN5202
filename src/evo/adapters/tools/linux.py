@@ -39,10 +39,12 @@ def validate_workspace(workspace: Path) -> Path:
     return workspace
 
 
-def create_arguments(workspace: Path, name: str, image_id: str, script: str) -> list[str]:
+def isolation_arguments(workspace: Path, name: str, *, network: str = "none") -> list[str]:
     workspace = validate_workspace(workspace)
+    if network not in ("none", "bridge"):
+        raise ToolError("Unsupported sandbox network")
     return [
-        "create", "--name", name, "--pull", "never", "--network", "none",
+        "create", "--name", name, "--pull", "never", "--network", network,
         "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
         "--cpus", "1", "--memory", "256m", "--memory-swap", "256m",
         "--pids-limit", "64", "--ulimit", "nofile=256:256",
@@ -50,6 +52,11 @@ def create_arguments(workspace: Path, name: str, image_id: str, script: str) -> 
         "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777",
         "--mount", f"type=bind,src={workspace},dst=/workspace",
         "--workdir", "/workspace", "--log-driver", "none",
+    ]
+
+
+def create_arguments(workspace: Path, name: str, image_id: str, script: str) -> list[str]:
+    return isolation_arguments(workspace, name) + [
         "--env", "PYTHONDONTWRITEBYTECODE=1", "--entrypoint", "python",
         image_id, "-I", "-B", "-u", "/workspace/" + script,
     ]

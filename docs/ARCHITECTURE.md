@@ -100,3 +100,22 @@ execution. It uses only the local system Docker socket; that socket is never
 mounted into the container. C10 must bind durable approval to the exact action,
 and C11 must select the trusted agent instance and persist execution audit.
 See [C09 contract, lifecycle limits and evidence](C09_DOCKER_SANDBOX.md).
+
+## C10 critical actions and Git
+
+`ApprovalService` implements the approval port through SQLite; `ActionExecutor`
+binds a trusted task owner to workspace/Python/Git ports. Critical operations
+persist exact parameters and content hashes or commit SHA, transition to
+waiting_human, and wait for an explicit CLI/Web answer. Atomic one-use claims
+prevent concurrent execution or replay. Denial/expiry blocks the task; execution
+failures record safe metadata and fail it. Tool success leaves goal verification
+to C11. No automatic model-loop restart occurs in the interface.
+
+`DockerGitTools` uses C09 isolation with a pinned Git image. A conservative local
+config/metadata allowlist excludes executable helpers, hooks, redirects, URL
+rewrites, external gitdirs and alternates. Init/status/explicit-file commits have
+no network. Approved push permits only canonical GitHub HTTPS and a single branch
+at the approved commit. Its exact-repository credential arrives over stdin and
+exists only in Git process environment; push output is replaced by safe summaries.
+Push uses bridge networking with application target enforcement, not an IP-level
+egress firewall. See [C10 boundaries and restart caveats](C10_HITL_GIT.md).

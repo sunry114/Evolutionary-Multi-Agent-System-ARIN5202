@@ -3,9 +3,10 @@ from pathlib import Path
 
 from evo.adapters.persistence.sqlite_store import SQLiteStore
 from evo.application.reviews import ReviewService
+from evo.application.approvals import ApprovalService
 from evo.interfaces.gateway import ApplicationUnavailable
 
-CAPABILITIES = {name: name in ("tasks", "task", "trace", "review", "revision")
+CAPABILITIES = {name: name in ("tasks", "task", "trace", "review", "revision", "answer")
                 for name in ("tasks", "task", "trace", "review", "revision",
                              "run", "dm", "group", "answer", "memory", "eval", "metrics")}
 
@@ -21,6 +22,7 @@ class SQLiteApplication:
     def __init__(self, state):
         self.store = SQLiteStore(Path(state) / "events.sqlite3")
         self.reviews = ReviewService(self.store)
+        self.approvals = ApprovalService(self.store)
 
     def snapshot(self):
         tasks = self.store.list_tasks()
@@ -44,6 +46,11 @@ class SQLiteApplication:
                 "tasks, task, trace, review and revision only.")
         if operation == "tasks":
             return {"tasks": self.store.list_tasks(payload.get("limit", 100))}
+        if operation == "answer":
+            if set(payload) not in ({"request_id", "approved"}, {"request_id", "answer"}):
+                raise ValueError("Invalid human response")
+            request_id = required_text(payload, "request_id")
+            return self.approvals.answer(request_id, {k: v for k, v in payload.items() if k != "request_id"})
         task_id = required_text(payload, "task_id")
         if operation == "task":
             return {"task": self.store.get_task(task_id),

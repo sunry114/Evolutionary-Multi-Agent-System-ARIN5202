@@ -133,3 +133,11 @@ print(config)
             result = self.runner._capture([sys.executable, "-c", code], 5, 4096)
         self.assertEqual(result.exit_code, 0, result.stderr)
         self.assertFalse(Path(result.stdout.strip()).exists())
+
+    def test_capture_bounded_stdin_and_early_closed_pipe(self):
+        result = self.runner._capture([sys.executable, "-c", "import sys; print(len(sys.stdin.buffer.read()))"],
+                                      5, 100, input_data=b"fixture\n")
+        self.assertEqual((result.exit_code, result.stdout), (0, "8\n"))
+        for data in ("not bytes", b"x" * 4097):
+            with self.assertRaises(ValueError):
+                self.runner._capture([sys.executable, "-c", "pass"], 5, 100, input_data=data)

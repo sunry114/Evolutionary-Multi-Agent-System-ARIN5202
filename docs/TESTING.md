@@ -1,5 +1,24 @@
 # Verification (C15)
 
+## C10 local verification (2026-11-15)
+
+Full regression with `EVO_DOCKER_TESTS=1`: **200 tests, no skips**, on local
+Ubuntu 24.04.4 x86_64 / Docker 29.1.3 under both Python 3.12.3 and Python 3.10.21.
+C10 adds 47 methods: 25 approval/executor tests, 13 Git scope tests, 6 real
+Git/action container tests, 2 CLI/HTTP answer tests and 1 bounded stdin regression.
+Tests cover concurrent one-shot decisions/claims, hashes/scope changes, denial,
+expiry, safe audit results, malformed tool results, Git config/path/repository
+rejection, explicit-file commits, disabled hooks and real temporary header URL
+matching without GitHub access. All six Chromium browser groups passed, now
+including a human approval click. See [C10 details and limits](C10_HITL_GIT.md).
+
+Compileall for both Python versions, whitespace and secret-pattern checks pass.
+No real remote push, token or LLM is used; push transport is controlled and the
+real wrapper/config match is tested inside Docker. Remote Ubuntu 22.04 CI for
+this commit remains pending. The Docker job pulls both pinned image digests and
+saves `sandbox-environment` metadata. Without `EVO_DOCKER_TESTS=1`, nine real
+Docker test methods are explicitly skipped.
+
 ## C09 local verification (2026-11-15)
 
 C09 adds 10 unit tests in `unit/adapters/test_docker_command.py` and 3 opt-in
@@ -108,8 +127,9 @@ require additional acceptance when integrated.
 B owns SQLite lifecycle/migrations, memory and objective evaluation regressions.
 A owns planning, delegation and real task E2E. C07 now supplies the file path and
 artifact suites; C08 supplies SSRF/search suites; C09 supplies Docker unit and
-real execution tests. Git scope and full-platform integration remain later
-milestones. Local Docker checks do not establish full-platform acceptance.
+real execution tests; C10 supplies approval/Git scope and container tests.
+Full-platform integration remains a later milestone. Local Docker checks do not
+establish full-platform acceptance.
 
 The secret-pattern check is a precaution, not proof that all possible secrets
 are absent. Never commit real credentials.

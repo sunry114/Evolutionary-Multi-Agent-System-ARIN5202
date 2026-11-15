@@ -31,7 +31,7 @@ class DockerPythonRunner:
         self.timeout = timeout
         self.max_output_bytes = max_output_bytes
 
-    def _capture(self, command, timeout, limit):
+    def _capture(self, command, timeout, limit, *, input_data=None):
         """Drain both pipes with a total byte bound and a monotonic deadline."""
         # Docker config can automatically inject proxy credentials into containers.
         # Keep it empty for the entire CLI lifetime; never read ~/.docker/config.json.
@@ -39,11 +39,13 @@ class DockerPythonRunner:
             env = {"DOCKER_CONFIG": config, "LC_ALL": "C"}
             if "PATH" in os.environ:
                 env["PATH"] = os.environ["PATH"]
-            return self._capture_process(command, timeout, limit, env)
+            return self._capture_process(command, timeout, limit, env, input_data)
 
-    def _capture_process(self, command, timeout, limit, env):
+    def _capture_process(self, command, timeout, limit, env, input_data=None):
+        if input_data is not None and (not isinstance(input_data, bytes) or len(input_data) > 4096):
+            raise ValueError("Invalid bounded process input")
         try:
-            process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
+            process = subprocess.Popen(command, stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                        env=env)
         except OSError:
@@ -52,6 +54,12 @@ class DockerPythonRunner:
         timed_out = limited = False
         deadline = time.monotonic() + timeout
         try:
+            if input_data is not None:
+                try:
+                    process.stdin.write(input_data)
+                    process.stdin.close()
+                except BrokenPipeError:
+                    process.stdin.close()
             with selectors.DefaultSelector() as selector:
                 for index, stream in enumerate((process.stdout, process.stderr)):
                     os.set_blocking(stream.fileno(), False)
@@ -79,6 +87,8 @@ class DockerPythonRunner:
                     except subprocess.TimeoutExpired:
                         timed_out = True
         finally:
+            if process.stdin is not None and not process.stdin.closed:
+                process.stdin.close()
             if process.poll() is None:
                 process.kill()
             process.wait()

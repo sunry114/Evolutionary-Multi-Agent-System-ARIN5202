@@ -662,6 +662,171 @@ class SQLiteStore:
         return item
 
     # ------------------------------------------------------------------
+    # Atomic critical actions and human decisions
+    # ------------------------------------------------------------------
+
+    def _active_task(self, connection, task_id, agent=None):
+        row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if row is None:
+            raise RecordNotFoundError("Task not found")
+        if row["status"] in ("success", "failed", "blocked"):
+            raise ConflictError("Task is terminal")
+        if agent is not None and row["owner"] != agent:
+            raise ConflictError("Action owner does not match task")
+        return row
+
+    def prepare_critical_action(self, task_id, agent, tool_name, payload):
+        """Deduplicate and persist the exact pending action and approval atomically."""
+        encoded = _json_object(payload)
+        with self._transaction() as connection:
+            task = self._active_task(connection, task_id, agent)
+            row = connection.execute(
+                """SELECT id FROM approval_requests WHERE task_id=? AND agent=?
+                   AND kind='approval' AND action=? AND payload_json=? ORDER BY created_at LIMIT 1""",
+                (task_id, agent, tool_name, encoded)).fetchone()
+            if row:
+                request_id = row["id"]
+            else:
+                if task["status"] != "running":
+                    raise ConflictError("Only a running task may request a new critical action")
+                request_id = str(uuid.uuid4())
+                now = _utc_now()
+                connection.execute(
+                    """INSERT INTO actions(id,task_id,agent,tool_name,arguments_json,status,created_at)
+                       VALUES(?,?,?,?,?,'requested',?)""",
+                    (request_id, task_id, agent, tool_name, encoded, now))
+                connection.execute(
+                    """INSERT INTO approval_requests
+                       (id,task_id,agent,kind,action,payload_json,status,created_at)
+                       VALUES(?,?,?,'approval',?,?,'pending',?)""",
+                    (request_id, task_id, agent, tool_name, encoded, now))
+                connection.execute("UPDATE tasks SET status='waiting_human',updated_at=? WHERE id=?",
+                                   (now, task_id))
+                self._insert_event(connection, task_id=task_id, event_type="request_created", actor=agent,
+                                   payload={"request_id": request_id, "action": tool_name,
+                                            "arguments": payload, "status": "pending"})
+        return request_id
+
+    def _expire_action_request(self, connection, row, max_age_seconds):
+        if (datetime.now(timezone.utc) - datetime.fromisoformat(row["created_at"])).total_seconds() < max_age_seconds:
+            return False
+        now = _utc_now()
+        connection.execute("UPDATE approval_requests SET status='expired',answered_at=? WHERE id=?",
+                           (now, row["id"]))
+        connection.execute("UPDATE actions SET status='blocked',completed_at=? WHERE id=? AND status='requested'",
+                           (now, row["id"]))
+        connection.execute("UPDATE tasks SET status='blocked',updated_at=? WHERE id=?", (now, row["task_id"]))
+        self._insert_event(connection, task_id=row["task_id"], event_type="request_expired", actor="system",
+                           payload={"request_id": row["id"]})
+        return True
+
+    def answer_request(self, request_id, response, *, max_age_seconds=3600):
+        """One human answer and audit event; stale/duplicate decisions never write."""
+        if not isinstance(response, Mapping):
+            raise ValueError("Invalid human response")
+        with self._transaction() as connection:
+            row = connection.execute("SELECT * FROM approval_requests WHERE id=?", (request_id,)).fetchone()
+            if row is None:
+                raise RecordNotFoundError("Approval request not found")
+            self._active_task(connection, row["task_id"])
+            if row["status"] != "pending":
+                raise ConflictError("Request already answered")
+            if row["kind"] == "approval":
+                if set(response) != {"approved"} or type(response["approved"]) is not bool:
+                    raise ValueError("Approval requires an explicit boolean")
+                status = "approved" if response["approved"] else "denied"
+            else:
+                if (set(response) != {"answer"} or not isinstance(response["answer"], str)
+                        or not response["answer"].strip() or len(response["answer"]) > 4000):
+                    raise ValueError("Clarification requires bounded text")
+                status = "answered"
+            if not self._expire_action_request(connection, row, max_age_seconds):
+                now = _utc_now()
+                connection.execute(
+                    "UPDATE approval_requests SET status=?,answered_at=?,answer_json=? WHERE id=?",
+                    (status, now, _json_object(response), request_id))
+                if status == "denied":
+                    connection.execute("UPDATE actions SET status='blocked',completed_at=? WHERE id=? AND status='requested'",
+                                       (now, request_id))
+                    connection.execute("UPDATE tasks SET status='blocked',updated_at=? WHERE id=?", (now, row["task_id"]))
+                self._insert_event(connection, task_id=row["task_id"], event_type="request_answered", actor="human",
+                                   payload={"request_id": request_id, "status": status})
+        return self.get_approval_request(request_id)
+
+    def expire_request_if_due(self, request_id, *, max_age_seconds=3600):
+        with self._transaction() as connection:
+            row = connection.execute("SELECT * FROM approval_requests WHERE id=?", (request_id,)).fetchone()
+            if row is None:
+                raise RecordNotFoundError("Approval request not found")
+            action = connection.execute("SELECT status FROM actions WHERE id=?", (request_id,)).fetchone()
+            task = connection.execute("SELECT status FROM tasks WHERE id=?", (row["task_id"],)).fetchone()
+            if (row["status"] in ("pending", "approved") and (action is None or action["status"] == "requested")
+                    and task["status"] not in ("success", "failed", "blocked")):
+                self._expire_action_request(connection, row, max_age_seconds)
+        return self.get_approval_request(request_id)
+
+    def claim_approved_action(self, request_id, task_id, agent, tool_name, payload, *, max_age_seconds=3600):
+        """Atomically consume approval once; never execute a changed or replayed action."""
+        claimed = False
+        with self._transaction() as connection:
+            self._active_task(connection, task_id, agent)
+            row = connection.execute("SELECT * FROM approval_requests WHERE id=?", (request_id,)).fetchone()
+            if (row is None or row["kind"] != "approval" or row["task_id"] != task_id
+                    or row["agent"] != agent or row["action"] != tool_name
+                    or row["payload_json"] != _json_object(payload) or row["status"] != "approved"):
+                raise ConflictError("Approval does not authorize this action")
+            action = connection.execute("SELECT * FROM actions WHERE id=?", (request_id,)).fetchone()
+            if (action is None or action["status"] != "requested"
+                    or action["arguments_json"] != row["payload_json"]):
+                raise ConflictError("Approval already consumed or action unavailable")
+            if not self._expire_action_request(connection, row, max_age_seconds):
+                now = _utc_now()
+                connection.execute("UPDATE actions SET status='running' WHERE id=?", (request_id,))
+                connection.execute("UPDATE tasks SET status='running',updated_at=? WHERE id=?", (now, task_id))
+                self._insert_event(connection, task_id=task_id, event_type="action_started", actor=agent,
+                                   payload={"action_id": request_id, "tool_name": tool_name})
+                claimed = True
+        return claimed
+
+    def start_action(self, task_id, agent, tool_name, arguments):
+        with self._transaction() as connection:
+            task = self._active_task(connection, task_id, agent)
+            if task["status"] != "running":
+                raise ConflictError("Task is not running")
+            action_id = str(uuid.uuid4())
+            connection.execute(
+                """INSERT INTO actions(id,task_id,agent,tool_name,arguments_json,status,created_at)
+                   VALUES(?,?,?,?,?,'running',?)""",
+                (action_id, task_id, agent, tool_name, _json_object(arguments), _utc_now()))
+            self._insert_event(connection, task_id=task_id, event_type="action_started", actor=agent,
+                               payload={"action_id": action_id, "tool_name": tool_name, "arguments": arguments})
+        return action_id
+
+    def finish_action(self, action_id, *, succeeded, result):
+        with self._transaction() as connection:
+            row = connection.execute("SELECT * FROM actions WHERE id=?", (action_id,)).fetchone()
+            if row is None or row["status"] != "running":
+                raise ConflictError("Action is not running")
+            status = "success" if succeeded else "failed"
+            now = _utc_now()
+            connection.execute("UPDATE actions SET status=?,result_json=?,completed_at=? WHERE id=?",
+                               (status, _json_object(result), now, action_id))
+            if not succeeded:
+                connection.execute("UPDATE tasks SET status='failed',updated_at=? WHERE id=?", (now, row["task_id"]))
+            self._insert_event(connection, task_id=row["task_id"], event_type="action_completed", actor=row["agent"],
+                               payload={"action_id": action_id, "status": status, "result": result})
+
+    def get_action(self, action_id):
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM actions WHERE id=?", (action_id,)).fetchone()
+        if row is None:
+            raise RecordNotFoundError("Action not found")
+        item = dict(row)
+        item["arguments"] = _decode_json(item.pop("arguments_json"))
+        item["result"] = _decode_json(item.pop("result_json"))
+        return item
+
+    # ------------------------------------------------------------------
     # Atomic human review and revision
     # ------------------------------------------------------------------
 

@@ -47,8 +47,8 @@ created tasks. The UI accepts reviewing only successful tasks with pending revie
 The --demo implementation is explicitly in-memory and always blocks execution.
 It does not call LLMs or implement an agent. Closing the process loses all demo
 state. SQLite task/trace/review persistence and actual server-process restart are now
-covered by test_sqlite_interfaces.py. Pending approval answering and execution
-recovery still require A/C integration; persistence is not a resume mechanism. Do not present preview records
+covered by test_sqlite_interfaces.py. C10 now supplies pending approval answering;
+automatic model-loop recovery still requires C11 integration. Do not present preview records
 as evaluation evidence.
 
 
@@ -80,8 +80,9 @@ Important error behavior:
 `status`, optional `review_status`, review feedback and the linked revision task
 ID. A successful task can therefore be passed directly to `ReviewService`.
 
-Storage methods do not determine which actions require approval. They persist the
-request and audit metadata only; C10 owns approval policy and answer processing.
+Storage methods do not determine which actions require approval. They persist
+requests, decisions and audit metadata and atomically claim actions; C10's
+application service owns approval policy and answer processing.
 C12 owns memory recall and learning behavior.
 
 Current default workspace behavior and read-query extensions: [SQLITE_INTERFACE.md](SQLITE_INTERFACE.md).
@@ -133,3 +134,27 @@ only the agent workspace mount. Its temporary Docker config excludes host proxy
 and credential configuration. Git/network policy is C10 work; the C09 command
 builder is intentionally restricted to network-disabled Python execution.
 See [C09 setup, resource limits and recovery caveats](C09_DOCKER_SANDBOX.md).
+
+## C10 approvals and single-action execution
+
+`ApprovalService(store)` implements request creation, explicit human answers,
+scope validation, expiry and one-use claims. SQLiteApplication's `answer`
+operation is now enabled: exactly `request_id` plus `approved:boolean` or
+`answer:string`; the existing CSRF/Host/Origin protections apply. A successful
+answer persists a decision only and never executes a tool automatically.
+
+`ActionExecutor(store, approvals, agent=..., workspace=..., python=..., git=...,
+require_commit_approval=False)` is the C11 single-action integration point.
+Only trusted assigned owners with running tasks can start actions. Critical
+operations return waiting_human/request_id until a decision exists. Resume with
+the identical call, optionally specifying the request_id; scope/content changes,
+replays and expired decisions cannot authorize execution. Outcomes are JSON-safe;
+success concerns the action, while the goal remains running for C11 verification.
+Persisted results contain only safe exit/timeout/output-limit/error metadata.
+
+`DockerGitTools` implements `GitPort`. Explicit commit paths are required; the
+adapter rejects custom/executable repository config and uses no network for local
+operations. To enable approved push, trusted bootstrap code must configure a
+`RepositoryToken(exact_repository, loader)`; model arguments never include tokens.
+Push uses fixed commit/refspec and URL-scoped temporary authorization over stdin.
+See [C10 API, supported arguments and lifecycle](C10_HITL_GIT.md).

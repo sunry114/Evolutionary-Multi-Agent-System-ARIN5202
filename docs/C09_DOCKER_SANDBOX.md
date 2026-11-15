@@ -88,7 +88,8 @@ events/memory/其他 agent/socket 不可见、只读根、无网络、capabiliti
 普通离线测试显式跳过 3 项真实 Docker 测试。设置 `EVO_DOCKER_TESTS=1` 后不再允许因
 Docker 或镜像缺失而跳过，必须实际成功。CI 独立 `docker-integration` job 在
 Ubuntu 22.04 / Python 3.10 拉取同一 digest 并执行全部 13 项测试，保存包含 commit SHA、
-宿主/Python/Docker 版本和实际镜像 ID/digest 的 `c09-docker-environment` artifact。
+宿主/Python/Docker 版本和实际镜像 ID/digest 的 artifact（C10 起名为
+`sandbox-environment`，并加入 Git 镜像信息）。
 
 本地开发者验证环境为 Ubuntu 24.04.4 x86_64 / Docker Engine 29.1.3；
 Python 3.12.3 和 Python 3.10.21 各自执行完整测试集（显式启用 Docker）：

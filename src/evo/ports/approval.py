@@ -16,3 +16,13 @@ class ApprovalPort(Protocol):
     def get_answer(self, request_id: str) -> Optional[Mapping[str, object]]:
         """Return None while unanswered; a denial is an explicit answer."""
         ...
+
+    def claim(self, request_id: str, task_id: str, agent: str, action: str,
+              payload: Mapping[str, object]) -> bool:
+        """Atomically consume exact approval once; expired approval returns false."""
+        ...
+
+    def check_scope(self, request_id: str, task_id: str, agent: str, action: str,
+                    payload: Mapping[str, object]) -> None:
+        """Reject unrelated or modified requests before polling their answers."""
+        ...

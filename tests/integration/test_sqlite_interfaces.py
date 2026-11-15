@@ -102,19 +102,19 @@ class SQLiteInterfaceTests(unittest.TestCase):
 
     def test_unavailable_backends_have_no_side_effects(self):
         before = self.app.snapshot()
-        for op in ("run", "dm", "group", "answer", "eval", "metrics", "memory"):
+        for op in ("run", "dm", "group", "eval", "metrics", "memory"):
             with self.subTest(op=op), self.assertRaises(ApplicationUnavailable):
                 self.app.dispatch(op, {"prompt": "x"})
         self.assertEqual(self.app.snapshot(), before)
 
-    def test_snapshot_real_records_and_readonly_requests(self):
+    def test_snapshot_real_records_and_answer_capability(self):
         self.app.store.save_approval_request(request_id="r1", task_id="t1", agent="builder",
                                              kind="approval", payload={"tool": "run_python"})
         snapshot = SQLiteApplication(self.state).snapshot()
         self.assertEqual(len(snapshot["tasks"]), 2)
         self.assertEqual(snapshot["requests"][0]["id"], "r1")
         self.assertEqual(snapshot["requests"][0]["payload"], {"tool": "run_python"})
-        self.assertFalse(snapshot["capabilities"]["answer"])
+        self.assertTrue(snapshot["capabilities"]["answer"])
         self.assertFalse(snapshot["capabilities"]["run"])
 
     def test_task_limit_and_failed_task_query_exit(self):
@@ -198,9 +198,40 @@ class SQLiteInterfaceTests(unittest.TestCase):
             ("review", {"task_id": "missing", "decision": "accepted"}, 409),
             ("review", {"task_id": "t1", "decision": "accepted", "feedback": []}, 409),
             ("revision", {"task_id": "t1", "prompt": " "}, 409),
-            ("run", {"prompt": "x"}, 503), ("answer", {"request_id": "r1", "approved": True}, 503),
+            ("run", {"prompt": "x"}, 503), ("answer", {"request_id": "r1", "approved": True}, 409),
         ):
             with self.subTest(op=op):
                 self.assertEqual(self.http(address, "/api/" + op, payload, token)[0], expected)
         self.assertEqual(self.app.store.get_task("t1")["review_status"], "pending")
         self.assertEqual(len(self.app.store.list_tasks()), 2)
+
+    def test_cli_approval_answer_persists_without_automatically_executing(self):
+        from evo.application.approvals import ApprovalService
+        self.app.store.save_task(Task("active", "Approve action", owner="builder", status=TaskStatus.RUNNING))
+        request_id = ApprovalService(self.app.store).request_approval(
+            "active", "builder", "run_python", {"arguments": {"path": "main.py"}, "sha256": "fixture"})
+        result = self.command("answer", request_id, "--approve")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["status"], "approved")
+        restored = SQLiteApplication(self.state)
+        self.assertEqual(restored.store.get_approval_request(request_id)["status"], "approved")
+        self.assertEqual(restored.store.get_action(request_id)["status"], "requested")
+        self.assertEqual(restored.store.get_task("active")["status"], "waiting_human")
+        self.assertNotEqual(self.command("answer", request_id, "--deny").returncode, 0)
+
+    def test_http_answers_require_csrf_validate_schema_and_persist_denial(self):
+        from evo.application.approvals import ApprovalService
+        self.app.store.save_task(Task("active", "Approve action", owner="builder", status=TaskStatus.RUNNING))
+        request_id = ApprovalService(self.app.store).request_approval(
+            "active", "builder", "delete_file", {"arguments": {"path": "report.md"}, "sha256": "fixture"})
+        child, address = self.start_web()
+        token = self.token(address)
+        self.assertEqual(self.http(address, "/api/answer", {"request_id": request_id, "approved": True})[0], 403)
+        for payload in ({"request_id": request_id, "approved": "true"},
+                        {"request_id": request_id, "approved": True, "answer": "yes"}):
+            self.assertEqual(self.http(address, "/api/answer", payload, token)[0], 409)
+        self.assertEqual(self.http(address, "/api/answer", {"request_id": request_id, "approved": False}, token)[0], 200)
+        self.stop_web(child)
+        restored = SQLiteApplication(self.state)
+        self.assertEqual(restored.store.get_task("active")["status"], "blocked")
+        self.assertEqual(restored.store.get_approval_request(request_id)["status"], "denied")

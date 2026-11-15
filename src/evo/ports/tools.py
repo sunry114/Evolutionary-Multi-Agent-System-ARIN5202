@@ -99,3 +99,26 @@ class PythonRunnerPort(Protocol):
     def run_python(self, path: str, *, approved: bool = False) -> ExecutionResult:
         """Approval must come from trusted application state, never model arguments."""
         ...
+
+
+class GitPort(Protocol):
+    def validate_push_target(self, repository: str, branch: str) -> None:
+        ...
+
+    def validate_commit(self, paths: Sequence[str], message: str) -> None:
+        ...
+
+    def init(self) -> ExecutionResult:
+        ...
+
+    def status(self) -> ExecutionResult:
+        ...
+
+    def head(self) -> str:
+        ...
+
+    def commit(self, paths: Sequence[str], message: str) -> ExecutionResult:
+        ...
+
+    def push(self, repository: str, branch: str, revision: str, *, approved: bool = False) -> ExecutionResult:
+        ...

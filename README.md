@@ -10,8 +10,9 @@ The original remote contained only README and LICENSE, despite describing a
 working prototype. Development began with member D's assigned work (C01, C04,
 C14, C15, C16), and now includes C03 domain contracts, C05 SQLite persistence,
 C06 collaboration services, C07 isolated workspaces/artifact exchange, C08
-bounded search/text retrieval and C09 fail-closed Linux Docker execution.
-The full orchestration loop, approval integration, memory learning and evaluation
+bounded search/text retrieval, C09 fail-closed Linux Docker execution and C10
+durable approval/single-action execution with container Git tools.
+The full orchestration loop, automatic execution resume, memory learning and evaluation
 remain integration milestones. No unavailable baseline is claimed.
 
 ## Install and verify
@@ -153,7 +154,8 @@ python -m evo --state .evo trace TASK_ID
 The default workspace opens .evo/events.sqlite3 and shows real stored task/review
 records. CLI review/revision now use atomic SQLite operations. Data survives
 process restart; a revision remains created until A's scheduler is connected.
-A new database is empty. The UI disables unavailable task/chat/approval actions.
+A new database is empty. The UI disables unavailable task/chat execution; C10
+enables explicit human approval/clarification answers without automatic execution.
 Set EVO_APPLICATION_FACTORY to override this with the team's complete backend;
 --demo still selects the explicitly volatile preview.
 
@@ -206,3 +208,31 @@ The runner uses the local system Docker socket and requires a non-root host
 UID/GID with access to that socket. C10 owns durable approval decisions; C11 owns
 dispatch and task audit. Default CLI/Web execution remains unavailable.
 See [C09 usage, limits and test evidence](docs/C09_DOCKER_SANDBOX.md).
+
+## C10 approvals and container Git
+
+`ApprovalService` persists decisions and `ActionExecutor` gates `run_python`,
+`delete_file` and `git_push`; high-risk policy can also gate `git_commit`.
+Requests bind task/agent/parameters and file hashes or commit SHA, expire after
+one hour by default and can be consumed only once. Denial blocks the task.
+The default SQLite CLI/Web can now answer approval and clarification requests:
+
+```bash
+python -m evo --state .evo answer REQUEST_ID --approve
+python -m evo --state .evo answer REQUEST_ID --deny
+python -m evo --state .evo answer CLARIFICATION_ID --text 'report.md'
+```
+
+`DockerGitTools` provides isolated init/status/explicit-file commit and approved
+GitHub HTTPS push. It rejects unsafe repository config, disables hooks/helpers,
+and injects a repository-scoped token through stdin into temporary Git process
+configuration. Local Git operations use no network; only push uses bridge
+network with validated targets and redirects disabled. Prepare its pinned image:
+
+```bash
+image="$(python -c 'from evo.adapters.tools.git import DEFAULT_GIT_IMAGE; print(DEFAULT_GIT_IMAGE)')"
+docker --host unix:///var/run/docker.sock pull "$image"
+```
+
+Human answers persist without invoking tools automatically; C11 owns scheduling
+and the complete Agent loop. See [C10 contracts, security boundaries and tests](docs/C10_HITL_GIT.md).
