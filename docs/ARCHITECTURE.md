@@ -1,7 +1,8 @@
 # Architecture
 
 Implemented components include D's installation, provider adapters, CLI, loopback
-Web UI and ReviewService, C05 SQLite, C06 collaboration services and C07 file tools.
+Web UI and ReviewService, C05 SQLite, C06 collaboration services, C07 file tools
+and C08 bounded search/retrieval.
 The diagram shows remaining integration boundaries; the full orchestrator, Docker
 execution and memory learning are still pending.
 
@@ -70,3 +71,14 @@ file without overwriting. Neither artifact storage nor memory is sandbox-mounted
 The application must select the bound instance using trusted task ownership.
 C10/C11 must obtain human approval before enabling deletion; C09 supplies the
 process boundary for agent-generated code. See [C07 contract](C07_WORKSPACES.md).
+
+## C08 public web boundary
+
+`WebTools` implements `WebPort` with one trusted instance per task. All DNS
+addresses and redirect destinations must be public HTTPS/443; transport connects
+to the validated numeric address with the original TLS hostname. Search parsing
+is replaceable and offline-testable. Results retain source URLs and explicit
+untrusted metadata; fetched HTML becomes labeled text, never executable content.
+Body size, network time, redirects and task search count are bounded. C11 must
+reuse the task instance and persist/recover budget and action audit state.
+See [C08 limits and verification](C08_WEB_TOOLS.md).

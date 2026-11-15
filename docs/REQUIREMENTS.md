@@ -5,6 +5,15 @@ Current merged implementation baseline: main 4eb3097, including API commit 6cb37
 The instructor's specification governs final acceptance; the C numbers are the
 team's development breakdown, not five separate grading phases.
 
+## C08 bounded search and retrieval (2026-11-15)
+
+`adapters/tools/web.py` supplies task-scoped search and text retrieval with public
+HTTPS/443 enforcement, all-address DNS validation, pinned IP/TLS connections,
+redirect checks, bounded responses/time/searches and explicit untrusted source
+metadata. 29 offline tests cover parser behavior, SSRF and transport boundaries.
+C11 dispatcher and persistent search budget recovery remain pending.
+See [C08](C08_WEB_TOOLS.md); no live-search or official evaluation claim is made.
+
 ## C07 workspace isolation and artifact exchange (2026-11-15)
 
 `adapters/tools/filesystem.py` and `artifacts.py` implement private bound
@@ -79,7 +88,7 @@ of C03/C05. B owns the persistence implementation; D adds the interface bridge.
 | Proactive clarification and critical-action approval | A/C + D inbox/answer entry | C06 can persist pending planner questions through SQLite; human answer/resume and critical-action approval policy pending |
 | Per-Agent memory and improvement from experience | B C05/C12 | Pending implementation and measured evidence |
 | Per-Agent isolated filesystem/sandbox | C C07/C09 | C07 bound workspaces and artifact isolation tested; Docker process isolation pending C09 |
-| Search, file CRUD, code execution and Git tools | C C07-C10/C10a | C07 file CRUD and publish/import adapters implemented; search, code execution, Git and task-loop integration pending |
+| Search, file CRUD, code execution and Git tools | C C07-C10/C10a | C07 file/publish/import and C08 search/retrieval adapters tested; code execution, Git and task-loop integration pending |
 | Markdown/TXT only document tasks | C tool policy, team execution | C07 enforces document suffixes separately from code/config/data; full task-output integration pending C11 |
 | Minimal functional UI | D C14 | CLI/basic Web exists; elaborate design is unnecessary |
 | DeepSeek/HKGAI only; no OpenAI/Anthropic APIs | D C04 + A/C integration | Adapter selection restricted; course HKGAI verified; full system must preserve restriction |

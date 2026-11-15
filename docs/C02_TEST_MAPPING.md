@@ -4,13 +4,13 @@
    | :------------------: | :-----------------------------------: | :--------: | :---------: | :----: |
    |   review revision    |      integration/test_sqlite.py       |   待 C05   |     C05     |   B    |
    | group chat isolation |     unit/application/test_chat.py     |   待 C06   |     C06     |   A    |
-   |   search filtering   |         security/test_ssrf.py         |   待 C08   |     C08     |   C    |
+   |   search filtering   | unit/adapters/test_search_parser.py + security/test_ssrf.py |   已覆盖   |     C08     |   C    |
    |   memory relevance   |    unit/persistence/test_memory.py    |   待 C12   |     C12     |   B    |
    |    Web task flow     |      integration/test_web_api.py      |  部分已有  |     C14     |   D    |
    |   collective task    |      e2e/test_collective_task.py      |   待 C11   |     C11     |   A    |
    |      delegation      |      e2e/test_collective_task.py      |   待 C11   |     C11     |   A    |
    |    path boundary     |    security/test_path_boundary.py     |   已覆盖   |     C07     |   C    |
-   |   private targets    |         security/test_ssrf.py         |   待 C08   |     C08     |   C    |
+   |   private targets    |         security/test_ssrf.py         |   已覆盖   |     C08     |   C    |
    |  artifact exchange   | integration/test_artifact_exchange.py |   已覆盖   |     C07     |   C    |
    |   stale file check   |    unit/evaluation/test_checks.py     |   待 C13   |     C13     |   B    |
    | failed run objective |    unit/evaluation/test_checks.py     |   待 C13   |     C13     |   B    |

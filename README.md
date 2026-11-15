@@ -9,7 +9,8 @@ Engine; native Windows/macOS execution is not a supported assessment environment
 The original remote contained only README and LICENSE, despite describing a
 working prototype. Development began with member D's assigned work (C01, C04,
 C14, C15, C16), and now includes C03 domain contracts, C05 SQLite persistence,
-C06 collaboration services and C07 isolated workspaces/artifact exchange.
+C06 collaboration services, C07 isolated workspaces/artifact exchange and C08
+bounded search/text retrieval.
 The full orchestration loop, sandbox execution, memory learning and evaluation
 remain integration milestones. No unavailable baseline is claimed.
 
@@ -176,3 +177,12 @@ Reports use `.md`/`.txt`. `ArtifactExchange` publishes recipient-scoped snapshot
 authorized agents import independent copies with SHA-256 verification and no
 overwrite. These adapters are ready for the C11 tool broker; default CLI/Web
 execution is unchanged. See [C07 usage and safety tests](docs/C07_WORKSPACES.md).
+
+## C08 search and text retrieval
+
+`WebTools(task_id)` provides task-scoped DuckDuckGo search and public HTTPS text
+retrieval, with bounded requests, redirect/DNS checks, pinned IP connections and
+verified TLS. Search results retain URLs; fetched text is labeled untrusted.
+Offline tests cover positive retrieval, SSRF rejection, resource limits and
+concurrent search budgets. C11 owns dispatcher integration and persistent budget
+recovery. See [C08 contracts, limits and tests](docs/C08_WEB_TOOLS.md).

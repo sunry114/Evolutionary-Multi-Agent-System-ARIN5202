@@ -1,5 +1,18 @@
 # Verification (C15)
 
+## C08 local verification (2026-11-15)
+
+C08 adds 29 offline tests: 10 search/parser methods in
+`unit/adapters/test_search_parser.py` and 19 methods in `security/test_ssrf.py`.
+They exercise public retrieval, unsafe targets/DNS/redirects, pinned IP with original
+TLS hostname, MIME/encoding/framing/body bounds, DNS saturation, real HTTPResponse
+parsing and wall deadlines using local Unix socketpair without TCP/network access.
+See [C08 contracts and limits](C08_WEB_TOOLS.md). Full regression: **140 tests,
+no skips**, with ResourceWarning promoted to an error on Ubuntu 24.04.4 /
+Python 3.12.3. All 29 C08 tests also passed on local Python 3.10. Compileall,
+diff whitespace and secret-pattern checks (including new untracked source) passed.
+Ubuntu 22.04 / Python 3.10 CI and live-provider availability remain separate evidence.
+
 ## C07 local verification (2026-11-15)
 
 C07 adds 23 Linux tests: 11 in `security/test_path_boundary.py` and 12 in
@@ -81,7 +94,8 @@ require additional acceptance when integrated.
 
 B owns SQLite lifecycle/migrations, memory and objective evaluation regressions.
 A owns planning, delegation and real task E2E. C07 now supplies the file path and
-artifact suites; SSRF/Git scope and Docker execution tests remain later milestones.
+artifact suites; C08 supplies SSRF/search suites. Git scope and Docker execution
+tests remain later milestones.
 No Docker/full-platform acceptance is claimed.
 
 The secret-pattern check is a precaution, not proof that all possible secrets

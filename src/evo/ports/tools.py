@@ -1,6 +1,6 @@
 """Tool dispatch contract; implementations enforce isolation and path policy."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping, Protocol, Sequence, Tuple
 
 
@@ -48,6 +48,31 @@ class ArtifactPort(Protocol):
 
     def import_artifact(self, artifact_id: str, destination: str) -> Artifact:
         """Import a permitted snapshot as a new file; never overwrite."""
+        ...
+
+
+@dataclass(frozen=True)
+class SearchResult:
+    title: str
+    url: str
+    untrusted: bool = field(default=True, init=False)
+
+
+@dataclass(frozen=True)
+class WebPage:
+    url: str
+    text: str
+    media_type: str
+    untrusted: bool = field(default=True, init=False)
+
+
+class WebPort(Protocol):
+    """One trusted instance per task; retrieved content is never instructions."""
+
+    def search(self, query: str) -> Sequence[SearchResult]:
+        ...
+
+    def fetch_url(self, url: str) -> WebPage:
         ...
 
 

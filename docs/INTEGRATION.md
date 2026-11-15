@@ -101,3 +101,14 @@ never overwrites an existing destination. C10/C11 must derive `delete_file`'s
 `approved=True` from a validated human decision, never forward it from model
 arguments. The adapters do not implement the task dispatcher, approval waiting,
 or Docker execution. See [usage, limits and test evidence](C07_WORKSPACES.md).
+
+## C08 web adapters
+
+`WebTools(task_id)` implements `WebPort.search(query)` and `fetch_url(url)`.
+Keep one instance per trusted task, shared across agents. Failed searches consume
+the three-call budget; never reconstruct per action or accept limits/resolver/parser
+from model arguments. C11 owns durable budget recovery and action audit records.
+`SearchResult` and `WebPage` are frozen records with `untrusted=True`; preserve
+their URL/source metadata and treat text as tool data, never system instructions.
+`WebToolError` exposes safe messages without raw network errors or response bodies.
+This adapter neither writes files nor schedules tasks. See [C08](C08_WEB_TOOLS.md).
