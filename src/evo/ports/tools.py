@@ -80,3 +80,22 @@ class ToolPort(Protocol):
     def call(self, agent: str, name: str, arguments: Mapping[str, object]) -> object:
         """Execute one validated tool call for the named agent."""
         ...
+
+
+class ToolError(RuntimeError):
+    """Safe-to-report tool infrastructure or policy failure."""
+
+
+@dataclass(frozen=True)
+class ExecutionResult:
+    exit_code: int
+    stdout: str
+    stderr: str
+    timed_out: bool = False
+    output_limited: bool = False
+
+
+class PythonRunnerPort(Protocol):
+    def run_python(self, path: str, *, approved: bool = False) -> ExecutionResult:
+        """Approval must come from trusted application state, never model arguments."""
+        ...

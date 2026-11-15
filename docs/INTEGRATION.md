@@ -112,3 +112,24 @@ from model arguments. C11 owns durable budget recovery and action audit records.
 their URL/source metadata and treat text as tool data, never system instructions.
 `WebToolError` exposes safe messages without raw network errors or response bodies.
 This adapter neither writes files nor schedules tasks. See [C08](C08_WEB_TOOLS.md).
+
+## C09 Docker Python adapter
+
+`DockerPythonRunner(workspace, image=DEFAULT_IMAGE, timeout=30,
+max_output_bytes=65536)` implements `PythonRunnerPort.run_python(path,
+approved=False)`. Select `workspace` from trusted task ownership, and supply
+`approved=True` only after C10 validates a durable decision for that exact action.
+Neither agent selection nor approval flags may be forwarded from model arguments.
+
+`ExecutionResult` contains `exit_code`, `stdout`, `stderr`, `timed_out` and
+`output_limited`. C11 must treat timeout/output-limit/nonzero exit as unsuccessful
+and preserve safe audit metadata. Output is untrusted and may contain sensitive
+workspace content; redact before logging. Infrastructure failures expose safe
+`ToolError`; denied execution exposes `PermissionError`; file policy errors use
+`ValueError`. No automatic image pull or host execution fallback occurs.
+
+The runner uses the local system Docker socket, digest-pinned Python image and
+only the agent workspace mount. Its temporary Docker config excludes host proxy
+and credential configuration. Git/network policy is C10 work; the C09 command
+builder is intentionally restricted to network-disabled Python execution.
+See [C09 setup, resource limits and recovery caveats](C09_DOCKER_SANDBOX.md).

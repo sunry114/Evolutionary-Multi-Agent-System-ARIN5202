@@ -82,3 +82,21 @@ untrusted metadata; fetched HTML becomes labeled text, never executable content.
 Body size, network time, redirects and task search count are bounded. C11 must
 reuse the task instance and persist/recover budget and action audit state.
 See [C08 limits and verification](C08_WEB_TOOLS.md).
+
+## C09 Linux Docker execution boundary
+
+`DockerPythonRunner` accepts one trusted `WorkspaceFilesystem` and approved
+relative Python path. `linux.create_arguments` supplies fixed isolation flags:
+non-root UID/GID, a single workspace bind, no network, read-only root, dropped
+capabilities, no-new-privileges, restricted tmpfs and CPU/memory/PID limits.
+The default image is digest-pinned and resolved to an immutable local image ID.
+Each Docker CLI process uses an empty temporary config and a minimal environment;
+host Docker proxies, context, model credentials and tokens are not inherited.
+
+The runner drains stdout/stderr under a shared byte bound, enforces the attach
+deadline, verifies the container exit state and attempts forced removal on every
+execution exit path. Infrastructure or cleanup errors fail closed without host
+execution. It uses only the local system Docker socket; that socket is never
+mounted into the container. C10 must bind durable approval to the exact action,
+and C11 must select the trusted agent instance and persist execution audit.
+See [C09 contract, lifecycle limits and evidence](C09_DOCKER_SANDBOX.md).

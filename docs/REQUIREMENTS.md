@@ -5,6 +5,16 @@ Current merged implementation baseline: main 4eb3097, including API commit 6cb37
 The instructor's specification governs final acceptance; the C numbers are the
 team's development breakdown, not five separate grading phases.
 
+## C09 fail-closed Linux Docker execution (2026-11-15)
+
+`adapters/tools/docker.py` and `linux.py` supply approved Python execution in a
+non-root, network-disabled, resource-bounded container mounting only the bound
+agent workspace. The default image is digest-pinned; host Docker configuration
+and credentials are excluded. Ten unit tests and three opt-in real Docker tests
+cover isolation, failure paths, output/time limits and cleanup.
+See [C09 contracts and evidence](C09_DOCKER_SANDBOX.md). C10 approval lifecycle,
+C11 dispatch/audit and remote Ubuntu 22.04 CI acceptance remain separate work.
+
 ## C08 bounded search and retrieval (2026-11-15)
 
 `adapters/tools/web.py` supplies task-scoped search and text retrieval with public
@@ -21,7 +31,8 @@ workspaces, bounded UTF-8 files, purpose-specific suffixes, path/link rejection,
 and explicit recipient-scoped publish/import with snapshot digest verification.
 23 new tests cover path boundaries, independent copies, restart, corruption,
 concurrent no-clobber imports and C05 coexistence. See [C07](C07_WORKSPACES.md).
-Docker/process isolation and task-loop/approval integration remain C09–C11 work.
+Docker/process isolation is supplied by C09; task-loop/approval integration remains
+C10–C11 work.
 
 ## C06 planning and collaboration (2026-11-14, PR #9 branch)
 
@@ -87,8 +98,8 @@ of C03/C05. B owns the persistence implementation; D adds the interface bridge.
 | Autonomous decomposition, role negotiation and delegation | A C03/C06/C11 | C06 planner and all-agent bidding services exist on PR #9; C11 task-loop scheduling and CLI/Web integration pending |
 | Proactive clarification and critical-action approval | A/C + D inbox/answer entry | C06 can persist pending planner questions through SQLite; human answer/resume and critical-action approval policy pending |
 | Per-Agent memory and improvement from experience | B C05/C12 | Pending implementation and measured evidence |
-| Per-Agent isolated filesystem/sandbox | C C07/C09 | C07 bound workspaces and artifact isolation tested; Docker process isolation pending C09 |
-| Search, file CRUD, code execution and Git tools | C C07-C10/C10a | C07 file/publish/import and C08 search/retrieval adapters tested; code execution, Git and task-loop integration pending |
+| Per-Agent isolated filesystem/sandbox | C C07/C09 | C07 workspace/artifact boundaries and C09 Docker isolation tested locally; remote baseline CI and task-loop integration pending |
+| Search, file CRUD, code execution and Git tools | C C07-C10/C10a | C07 files/artifacts, C08 web and C09 Python adapters tested; Git, durable approval and task-loop integration pending |
 | Markdown/TXT only document tasks | C tool policy, team execution | C07 enforces document suffixes separately from code/config/data; full task-output integration pending C11 |
 | Minimal functional UI | D C14 | CLI/basic Web exists; elaborate design is unnecessary |
 | DeepSeek/HKGAI only; no OpenAI/Anthropic APIs | D C04 + A/C integration | Adapter selection restricted; course HKGAI verified; full system must preserve restriction |

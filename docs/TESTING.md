@@ -1,5 +1,18 @@
 # Verification (C15)
 
+## C09 local verification (2026-11-15)
+
+C09 adds 10 unit tests in `unit/adapters/test_docker_command.py` and 3 opt-in
+real Docker methods in `integration/test_docker_tools.py`. They cover bounded
+non-root execution, mount/network/filesystem/capability isolation, timeouts,
+output limits, exit status, fail-closed errors, environment isolation and cleanup.
+Full regression with `EVO_DOCKER_TESTS=1`: **153 tests, no skips**, on local
+Ubuntu 24.04.4 x86_64 / Docker 29.1.3, for both Python 3.12.3 and Python 3.10.21.
+Compileall, diff whitespace and secret-pattern checks passed. Ordinary offline
+runs skip the three real Docker methods; the dedicated Ubuntu 22.04 / Python 3.10
+CI job requires them and saves environment/image metadata. Its remote execution
+is still pending for this commit. See [C09 commands and limits](C09_DOCKER_SANDBOX.md).
+
 ## C08 local verification (2026-11-15)
 
 C08 adds 29 offline tests: 10 search/parser methods in
@@ -94,9 +107,9 @@ require additional acceptance when integrated.
 
 B owns SQLite lifecycle/migrations, memory and objective evaluation regressions.
 A owns planning, delegation and real task E2E. C07 now supplies the file path and
-artifact suites; C08 supplies SSRF/search suites. Git scope and Docker execution
-tests remain later milestones.
-No Docker/full-platform acceptance is claimed.
+artifact suites; C08 supplies SSRF/search suites; C09 supplies Docker unit and
+real execution tests. Git scope and full-platform integration remain later
+milestones. Local Docker checks do not establish full-platform acceptance.
 
 The secret-pattern check is a precaution, not proof that all possible secrets
 are absent. Never commit real credentials.
