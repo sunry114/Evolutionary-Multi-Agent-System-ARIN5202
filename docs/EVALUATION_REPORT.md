@@ -1,5 +1,11 @@
 # Evaluation report — official results pending
 
+Current update 2026-11-18: C11/C12/C13 and runtime wiring are merged in main
+204882f. Memory/metrics and Web evaluation entry points are connected in this
+follow-up. See [MID_TEST_RUNBOOK.md](MID_TEST_RUNBOOK.md) for actual dataset
+protocol, private preparation paths, evidence audit and remaining formal evaluation.
+The prior unavailable-backend statements and test counts below are dated history.
+
 The C13 JSONL evaluator and its scripted acceptance tests are documented in
 [C13_EVALUATION.md](C13_EVALUATION.md). They establish the measurement path,
 not official mid/final results or a measured memory benefit.

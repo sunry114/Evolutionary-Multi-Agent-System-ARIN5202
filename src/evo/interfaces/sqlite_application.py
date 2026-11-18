@@ -2,6 +2,8 @@
 from pathlib import Path
 from threading import RLock
 import uuid
+from datetime import datetime, timezone
+from dataclasses import asdict
 
 from evo.adapters.persistence.sqlite_store import SQLiteStore
 from evo.application.reviews import ReviewService
@@ -19,7 +21,7 @@ DEFAULT_AGENTS = (
     Agent("reviewer", "Review results and verification evidence"),
 )
 
-CAPABILITIES = {name: name in ("tasks", "task", "trace", "review", "revision", "answer", "dm", "group", "messages", "run", "resume", "agents", "eval")
+CAPABILITIES = {name: True
                 for name in ("tasks", "task", "trace", "review", "revision",
                              "run", "resume", "dm", "group", "answer", "memory", "eval", "metrics", "messages", "agents")}
 
@@ -150,6 +152,40 @@ class SQLiteApplication:
             records.extend(self.store.list_direct_messages("human", item.name)[-100:])
         return sorted(records, key=lambda m: (m["created_at"], m["id"]))[-400:]
 
+    def memory(self, payload):
+        self._refresh_agents()
+        agent = required_text(payload, "agent")
+        if agent not in {item.name for item in self.agents}:
+            raise ValueError("Unknown agent")
+        query = payload.get("query", "")
+        if not isinstance(query, str) or len(query) > 1000:
+            raise ValueError("Invalid memory query")
+        path = self.state / "agents" / agent / "memory.sqlite3"
+        if not path.exists():
+            return {"agent": agent, "memory": []}
+        if not path.resolve().is_relative_to(self.state.resolve()) or path.is_symlink() or path.parent.is_symlink():
+            raise ValueError("Unsafe memory path")
+        from evo.adapters.persistence.sqlite_memory import SQLiteMemoryStore
+        memory = SQLiteMemoryStore(self.state, agent)
+        records = ([asdict(item) for item in memory.recall(query)] if query.strip()
+                   else memory.list_recent())
+        return {"agent": agent, "memory": records}
+
+    def metrics(self, task_id):
+        task = self.store.get_task(task_id)
+        children = list(self.store.list_children(task_id))
+        started = datetime.fromisoformat(task["created_at"])
+        terminal = task["status"] in ("success", "failed", "blocked")
+        ended = datetime.fromisoformat(task["updated_at"]) if terminal else datetime.now(timezone.utc)
+        completed = sum(child["status"] == "success" for child in children)
+        return {"task_id": task_id, "status": task["status"],
+                "basis": "stored_task_state", "goal_completed": task["status"] == "success",
+                "completed_subtasks": completed, "total_subtasks": len(children),
+                "subtask_completion_rate": completed / len(children) if children else None,
+                "elapsed_seconds": max(0, (ended - started).total_seconds()),
+                "timing_final": terminal, "includes_human_wait": True,
+                "note": "Stored task wall time and direct-child states; not an official dataset quality score."}
+
     def chat(self, operation, payload):
         self._refresh_agents()
         message = required_text(payload, "message")
@@ -201,6 +237,10 @@ class SQLiteApplication:
             return self.run_task(payload)
         if operation == "eval":
             return self.evaluate(payload)
+        if operation == "memory":
+            return self.memory(payload)
+        if operation == "metrics":
+            return self.metrics(required_text(payload, "task_id"))
         if operation == "agents":
             if set(payload) != {"agents"}:
                 raise ValueError("Invalid agent registry request")
