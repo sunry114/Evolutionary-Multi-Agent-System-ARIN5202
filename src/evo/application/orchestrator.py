@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import uuid
 from dataclasses import asdict, dataclass
+from pathlib import PurePosixPath
 
 from evo.domain.models import Experience, Message, Task
 from evo.domain.statuses import TaskStatus
@@ -21,9 +22,8 @@ class ArtifactCheck:
 
     def __post_init__(self):
         if not isinstance(self.path, str) or not self.path or not isinstance(self.contains, str) or (
-                self.exact is not None and not isinstance(self.exact, str)) or (
-                not self.contains and self.exact is None):
-            raise ValueError("Artifact check needs a path and expected content")
+                self.exact is not None and not isinstance(self.exact, str)):
+            raise ValueError("Artifact check needs a path and valid expected content")
 
     def verify(self, workspace, artifacts: tuple[ArtifactRef, ...]) -> bool:
         # A pre-existing file and a model-provided evidence string are insufficient.
@@ -82,7 +82,8 @@ class Orchestrator:
         status = TaskStatus(task["status"])
         evidence = verified["path"] if verified else ""
         if status == TaskStatus.SUCCESS:
-            lesson = "Verified artifact at " + evidence
+            lesson = ("Verified artifact at " + evidence if evidence else
+                      "Subtask completed; final delivery is verified at the root task")
             category = None
         else:
             category = "verification" if task["result"] == "Objective evidence missing" else (
@@ -106,12 +107,18 @@ class Orchestrator:
         return self.store.transition_task(task_id, target, expected=current,
                                           owner=owner, result=result)
 
-    def run(self, goal: str, *, checks: dict[str, ArtifactCheck],
+    def run(self, goal: str, *, checks: dict[str, ArtifactCheck] | None = None,
+            final_check: ArtifactCheck | None = None,
             actions: dict[str, tuple[ToolCall, ...]] | None = None,
             required_inputs=None, task_id: str | None = None,
             memory_enabled: bool = True):
         if not isinstance(goal, str) or not goal.strip():
             raise ValueError("Goal cannot be empty")
+        checks = {} if checks is None else checks
+        if final_check is not None and not isinstance(final_check, ArtifactCheck):
+            raise ValueError("Invalid final delivery check")
+        if final_check is not None and checks:
+            raise ValueError("Use either final delivery or subtask checks")
         if not isinstance(checks, dict) or not all(
                 isinstance(k, str) and isinstance(v, ArtifactCheck)
                 for k, v in checks.items()):
@@ -128,18 +135,27 @@ class Orchestrator:
             raise ValueError("Task identifier is too long for subtasks")
         if type(memory_enabled) is not bool:
             raise ValueError("Invalid memory mode")
-        self.store.save_task(Task(task_id, goal.strip()))
+        try:
+            existing = self.store.get_task(task_id)
+        except KeyError:
+            existing = None
+        if existing is None:
+            self.store.save_task(Task(task_id, goal.strip()))
+        elif (existing["status"] != "created" or existing["parent_id"]
+              or existing["prompt"] != goal.strip()):
+            raise ValueError("Only a matching draft task can be started")
         self._event(task_id, "run_config", {
             "memory_enabled": memory_enabled,
             "agents": [{"name": agent.name, "specialty": agent.specialty}
                        for agent in self.agents.values()],
             "checks": {key: asdict(value) for key, value in checks.items()},
+            "final_check": asdict(final_check) if final_check else None,
             "actions": {key: [asdict(x) for x in value] for key, value in actions.items()},
         })
         self._move(task_id, "planning")
-        return self._plan(task_id, goal.strip(), checks, actions, required_inputs)
+        return self._plan(task_id, goal.strip(), checks, actions, required_inputs, final_check)
 
-    def _plan(self, root_id, goal, checks, actions, required_inputs=None):
+    def _plan(self, root_id, goal, checks, actions, required_inputs=None, final_check=None):
         try:
             plan = self.planner.plan(goal, task_id=root_id, required_inputs=required_inputs)
             if plan.question:
@@ -155,6 +171,7 @@ class Orchestrator:
             self._event(root_id, "plan_created", {
                 "subtasks": [asdict(s) for s in plan.subtasks],
                 "checks": {key: asdict(value) for key, value in checks.items()},
+                "final_check": asdict(final_check) if final_check else None,
                 "actions": {key: [asdict(x) for x in value] for key, value in actions.items()},
             })
             self._move(root_id, "ready")
@@ -201,9 +218,15 @@ class Orchestrator:
             else:
                 handle = harness.start(request)
             self._event(task_id, "harness_started", {"run_id": handle.run_id})
-            outcome = harness.wait(handle, timeout=None)
-            if outcome is None:
-                outcome = harness.cancel(handle)
+            while True:
+                outcome = harness.wait(handle, timeout=0.5)
+                if outcome is not None:
+                    break
+                child = self.store.get_task(task_id)
+                root = self.store.get_task(child["parent_id"]) if child["parent_id"] else child
+                if child["status"] == "blocked" or root["status"] == "blocked":
+                    harness.cancel(handle)
+                    return
             events = harness.events(handle)
             steps = sum(e.kind == "tool_call" for e in events)
             searches = sum(e.kind == "tool_call" and e.payload.get("name") == "search"
@@ -219,8 +242,12 @@ class Orchestrator:
                     self._move(task_id, "waiting_human")
                 return
             if outcome.status == "success":
+                self._event(task_id, "artifacts_produced",
+                            {"artifacts": [asdict(item) for item in outcome.artifacts]})
                 if check is not None and check.verify(workspace, outcome.artifacts):
                     self._event(task_id, "objective_verified", asdict(check))
+                    self._move(task_id, "success", result=outcome.text[:4000])
+                elif check is None:
                     self._move(task_id, "success", result=outcome.text[:4000])
                 else:
                     self._move(task_id, "failed", result="Objective evidence missing")
@@ -238,6 +265,8 @@ class Orchestrator:
         if plan is None:
             raise ValueError("No durable task plan")
         for item in plan["subtasks"]:
+            if self.store.get_task(root_id)["status"] == "blocked":
+                return self.snapshot(root_id)
             child_id = root_id + "-" + item["id"]
             try:
                 child = self.store.get_task(child_id)
@@ -268,8 +297,12 @@ class Orchestrator:
                         raise ValueError("Assignment selected unknown agent")
                     self._move(child_id, "assigned", owner=owner)
                     self._move(child_id, "running")
-                except Exception:
-                    self._event(child_id, "orchestration_error", {"code": "assignment_failed"})
+                except Exception as exc:
+                    from evo.application.assignment import AssignmentError
+                    detail = ({"reason": exc.code, "agent": exc.agent}
+                              if isinstance(exc, AssignmentError) else {"reason": "internal_error"})
+                    self._event(child_id, "orchestration_error",
+                                {"code": "assignment_failed", **detail})
                     self._move(child_id, "failed", result="Assignment failed")
                     continue
             else:
@@ -280,8 +313,14 @@ class Orchestrator:
             if resume:
                 self._move(child_id, "running")
             check = ArtifactCheck(**plan["checks"][item["id"]]) if item["id"] in plan["checks"] else None
+            description = item["description"]
+            if plan.get("final_check") and item["id"] == plan["subtasks"][-1]["id"]:
+                delivery = ArtifactCheck(**plan["final_check"])
+                description += ("\nFinal delivery: write " + delivery.path +
+                                " as a " + delivery.purpose + " artifact. " +
+                                ("It must contain: " + delivery.contains if delivery.contains else ""))
             try:
-                self._execute(child_id, owner, item["description"], check,
+                self._execute(child_id, owner, description, check,
                               plan["actions"].get(item["id"], ()), resume=resume)
             except Exception:
                 self._event(child_id, "orchestration_error", {"code": "execution_failed"})
@@ -292,9 +331,70 @@ class Orchestrator:
                 self._move(root_id, "waiting_human")
                 return self.snapshot(root_id)
         statuses = [row["status"] for row in self.store.list_children(root_id)]
+        if self.store.get_task(root_id)["status"] == "blocked":
+            return self.snapshot(root_id)
         final = "success" if statuses and all(x == "success" for x in statuses) else (
             "blocked" if any(x == "blocked" for x in statuses) else "failed")
+        if final == "success" and plan.get("final_check"):
+            return self._verify_final_delivery(root_id, ArtifactCheck(**plan["final_check"]))
         self._move(root_id, final, result="Subtasks: " + ", ".join(statuses))
+        return self.snapshot(root_id)
+
+    def _verify_final_delivery(self, root_id, check):
+        """Verify a recorded artifact after all subtasks; ask before a format change."""
+        candidates = []
+        for child in self.store.list_children(root_id):
+            recorded = self._last_event(child["id"], "artifacts_produced")
+            if not recorded:
+                continue
+            workspace = self.workspace_factory(child["owner"])
+            for raw in recorded["artifacts"]:
+                if raw["purpose"] != check.purpose:
+                    continue
+                actual = ArtifactCheck(raw["path"], raw["purpose"], check.contains, check.exact)
+                if actual.verify(workspace, (ArtifactRef(**raw),)):
+                    candidates.append((child, raw))
+        exact = next(((child, raw) for child, raw in reversed(candidates)
+                      if raw["path"] == check.path), None)
+        if exact:
+            self._event(root_id, "objective_verified",
+                        {**asdict(check), "agent": exact[0]["owner"]})
+            self._move(root_id, "success", result="Final artifact: " + check.path)
+            return self.snapshot(root_id)
+        stem = PurePosixPath(check.path).stem
+        alternative = next(((child, raw) for child, raw in reversed(candidates)
+                            if PurePosixPath(raw["path"]).stem == stem), None)
+        if alternative is None:
+            alternative = next(reversed(candidates), None)
+        if alternative is None:
+            self._move(root_id, "failed", result="Final delivery evidence missing")
+            return self.snapshot(root_id)
+        child, raw = alternative
+        prior = self._last_event(root_id, "format_confirmation_requested")
+        if prior:
+            decision = self.store.get_approval_request(prior["request_id"])
+            if (prior["path"] != raw["path"] or prior["sha256"] != raw["sha256"]):
+                self._move(root_id, "failed", result="Final artifact changed after format decision")
+            elif decision["status"] == "answered" and decision["answer"]["answer"] == "accept":
+                self._event(root_id, "objective_verified", {**asdict(check),
+                            "actual_path": raw["path"], "agent": child["owner"],
+                            "format_approved": True})
+                self._move(root_id, "success", result="Final artifact: " + raw["path"])
+            elif decision["status"] == "answered":
+                self._move(root_id, "failed", result="Alternative delivery format declined")
+            else:
+                self._move(root_id, "waiting_human")
+            return self.snapshot(root_id)
+        request_id = str(uuid.uuid4())
+        self.store.save_approval_request(request_id=request_id, task_id=root_id,
+                                         agent=child["owner"], kind="clarification",
+                                         action="delivery_format",
+                                         payload={"expected": check.path, "actual": raw["path"],
+                                                  "question": "预期 " + check.path + "，实际得到 " + raw["path"] +
+                                                              "。是否接受该格式交付？"})
+        self._event(root_id, "format_confirmation_requested",
+                    {"request_id": request_id, "path": raw["path"], "sha256": raw["sha256"]})
+        self._move(root_id, "waiting_human")
         return self.snapshot(root_id)
 
     def resume(self, root_id):
@@ -311,7 +411,9 @@ class Orchestrator:
             return self._plan(root_id, root["description"] + "\nClarification: " +
                               answer["answer"]["answer"],
                               {k: ArtifactCheck(**v) for k, v in config["checks"].items()},
-                              {k: tuple(ToolCall(**x) for x in v) for k, v in config["actions"].items()})
+                              {k: tuple(ToolCall(**x) for x in v) for k, v in config["actions"].items()},
+                              final_check=(ArtifactCheck(**config["final_check"])
+                                           if config.get("final_check") else None))
         pending = next((row for row in self.store.list_children(root_id)
                         if row["status"] == "waiting_human"), None)
         if pending:
@@ -320,6 +422,9 @@ class Orchestrator:
                 decision = self.store.get_approval_request(paused["request_id"])
                 if decision["status"] == "pending":
                     raise ValueError("Human decision is still pending")
+        format_request = self._last_event(root_id, "format_confirmation_requested")
+        if format_request and self.store.get_approval_request(format_request["request_id"])["status"] == "pending":
+            raise ValueError("Delivery format decision is still pending")
         self._move(root_id, "running")
         return self._drive(root_id)
 

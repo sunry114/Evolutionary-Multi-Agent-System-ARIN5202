@@ -6,6 +6,7 @@ from unittest.mock import patch
 from evo.application.orchestrator import ArtifactCheck
 from evo.application.approvals import ApprovalService
 from evo.adapters.tools.docker import DockerPythonRunner
+from evo.adapters.llm.client import ProviderError
 from evo.config import HarnessConfig
 from evo.domain.models import Agent, Task
 from evo.domain.statuses import TaskStatus
@@ -23,6 +24,38 @@ class Provider:
 
 
 class ExecutionFactoryTests(unittest.TestCase):
+    def test_bid_provider_error_is_categorized_in_trace(self):
+        class FailingBidProvider(Provider):
+            def complete(self, messages, json_object=False):
+                if "Bid honestly" in messages[0]["content"]:
+                    raise ProviderError("secret provider detail", code="rate_limit")
+                return super().complete(messages, json_object=json_object)
+        with tempfile.TemporaryDirectory() as temp:
+            coordinator = create_orchestrator(
+                temp, agents=(Agent("builder", "documents"),), provider=FailingBidProvider(),
+                harness_config=HarnessConfig(adapter="baseline"))
+            result = coordinator.run("Write report.md", checks={
+                "s1": ArtifactCheck("report.md", exact="done")})
+            child_id = result["subtasks"][0]["id"]
+            errors = [event["payload"] for event in coordinator.store.list_events(child_id)
+                      if event["event_type"] == "orchestration_error"]
+            self.assertEqual(errors, [{"agent": "builder", "code": "assignment_failed",
+                                       "reason": "rate_limit"}])
+            self.assertNotIn("secret provider detail", str(errors))
+
+    def test_draft_task_starts_with_same_id_after_discussion(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = SQLiteApplication(temp, provider=Provider(), agents=(Agent("builder", "documents"),))
+            draft = app.dispatch("create", {"prompt": "Write report.md"})
+            with patch.dict("os.environ", {"EVO_HARNESS_ADAPTER": "baseline"}):
+                coordinator = app._coordinator()
+            result = coordinator.run("Write report.md", task_id=draft["task_id"],
+                                     checks={"s1": ArtifactCheck("report.md", exact="done")},
+                                     actions={"s1": (ToolCall("write_file", {"path": "report.md", "content": "done"}),)})
+            self.assertEqual(result["task"]["id"], draft["task_id"])
+            self.assertEqual(result["task"]["status"], "success")
+            self.assertEqual(len([t for t in app.snapshot()["tasks"] if not t["parent_id"]]), 1)
+
     def test_real_store_workspace_broker_and_baseline_harness_are_wired(self):
         with tempfile.TemporaryDirectory() as temp:
             agent = Agent("builder", "documents")
@@ -37,6 +70,21 @@ class ExecutionFactoryTests(unittest.TestCase):
             self.assertEqual((Path(temp) / "agents" / "builder" / "workspace" / "report.md").read_text(), "done")
             events = coordinator.store.list_events(result["subtasks"][0]["id"])
             self.assertTrue(any(item["event_type"] == "objective_verified" for item in events))
+
+    def test_baseline_final_html_delivery_waits_for_format_confirmation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            agent = Agent("builder", "documents")
+            coordinator = create_orchestrator(
+                temp, agents=(agent,), provider=Provider(),
+                harness_config=HarnessConfig(adapter="baseline"))
+            first = coordinator.run("Write report.md", final_check=ArtifactCheck("report.md"),
+                                    actions={"s1": (ToolCall("write_file", {
+                                        "path": "report.html", "content": "<p>done</p>"}),)})
+            self.assertEqual(first["subtasks"][0]["status"], "success")
+            self.assertEqual(first["task"]["status"], "waiting_human")
+            request = coordinator.store.list_pending_requests()[0]
+            ApprovalService(coordinator.store).answer(request["id"], {"answer": "accept"})
+            self.assertEqual(coordinator.resume(first["task"]["id"])["task"]["status"], "success")
 
     def test_recreated_factory_resumes_one_approved_action(self):
         with tempfile.TemporaryDirectory() as temp:

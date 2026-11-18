@@ -129,18 +129,18 @@ def main(argv=None, application=None):
         if args.command == "agents":
             payload = {"agents": json.loads(Path(args.file).read_text(encoding="utf-8"))}
         if args.command in ("run", "group") and (args.command == "run" or args.execute):
-            if bool(args.expect_file) != bool(args.expect_text):
-                raise ValueError("Run requires both expected file and text")
+            if args.expect_text and not args.expect_file:
+                raise ValueError("Expected text requires an expected file")
             if args.checks_file and args.expect_file:
-                raise ValueError("Choose checks file or expected file and text")
+                raise ValueError("Choose checks file or final expected file")
             payload = ({"prompt": args.prompt} if args.command == "run"
                        else {"message": args.message, "execute": True})
             payload["no_memory"] = args.no_memory
             if args.checks_file:
                 payload["checks"] = json.loads(Path(args.checks_file).read_text(encoding="utf-8"))
             elif args.expect_file:
-                payload["checks"] = {"s1": {"path": args.expect_file,
-                                            "contains": args.expect_text}}
+                payload["final_check"] = {"path": args.expect_file,
+                                          "contains": args.expect_text or ""}
         elif args.command == "group":
             if args.expect_file or args.expect_text or args.checks_file or args.no_memory:
                 raise ValueError("Group execution flags require --execute")

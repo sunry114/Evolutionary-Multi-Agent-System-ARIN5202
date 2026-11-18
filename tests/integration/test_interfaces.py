@@ -11,6 +11,7 @@ from unittest.mock import patch
 from evo.interfaces.cli import main
 from evo.interfaces.demo import DemoApplication
 from evo.interfaces.web.app import make_server
+from evo.interfaces.sqlite_application import SQLiteApplication
 from evo.application.reviews import ReviewService
 
 
@@ -21,7 +22,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue())["status"], "blocked")
 
     def test_missing_application_is_actionable(self):
-        with tempfile.TemporaryDirectory() as state, patch.dict(os.environ, {"EVO_APPLICATION_FACTORY": ""}), contextlib.redirect_stderr(io.StringIO()) as output:
+        with tempfile.TemporaryDirectory() as state, patch.dict(os.environ, {"EVO_APPLICATION_FACTORY": ""}), patch.object(SQLiteApplication, "_coordinator", side_effect=RuntimeError("unavailable")), contextlib.redirect_stderr(io.StringIO()) as output:
             self.assertEqual(main(["--state", state, "run", "hello", "--expect-file", "hello.md", "--expect-text", "hello"]), 2)
         self.assertIn("Execution needs", output.getvalue())
 
@@ -34,6 +35,9 @@ class CliTests(unittest.TestCase):
         commands = [
             (["run", "Python report", "--no-memory"], "run",
              {"prompt": "Python report", "no_memory": True}),
+            (["run", "Python report", "--expect-file", "report.html"], "run",
+             {"prompt": "Python report", "no_memory": False,
+              "final_check": {"path": "report.html", "contains": ""}}),
             (["dm", "builder", "hello"], "dm", {"agent": "builder", "message": "hello"}),
             (["answer", "r1", "--deny"], "answer", {"request_id": "r1", "approved": False}),
             (["revision", "t1", "fix"], "revision", {"task_id": "t1", "prompt": "fix"}),

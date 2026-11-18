@@ -56,13 +56,14 @@ class PathBoundaryTests(unittest.TestCase):
         self.assertEqual(self.other.read_file("private.txt"), "Bob's secret")
 
     def test_purpose_controls_document_and_non_document_suffixes(self):
-        for purpose, path in [("document", "report.txt"), ("code", "main.py"),
+        for purpose, path in [("document", "report.txt"), ("document", "report.html"),
+                              ("document", "report.json"), ("document", "report.csv"),
+                              ("document", "report.yaml"), ("code", "main.py"),
                               ("config", "config.json"), ("config", "config.yaml"),
                               ("data", "data.json"), ("data", "data.csv")]:
             self.fs.write_file(path, "text", purpose=purpose)
             self.assertEqual(self.fs.read_file(path, purpose=purpose), "text")
-        for path in ["report.pdf", "report.docx", "report.html", "script.sh",
-                     "report.json", "report.csv", "report.py", "report.yaml"]:
+        for path in ["report.pdf", "report.docx", "script.sh", "report.py"]:
             with self.subTest(path=path), self.assertRaises(PathPolicyError):
                 self.fs.write_file(path, "a document")
         for path, purpose in [("main.py", "data"), ("report.md", "config"),

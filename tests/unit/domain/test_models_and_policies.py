@@ -35,6 +35,7 @@ class DomainTests(unittest.TestCase):
     def test_document_policy(self):
         validate_document_path("report.md")
         validate_document_path("notes.TXT")
+        validate_document_path("report.HTML")
         with self.assertRaises(ValueError):
             validate_document_path("report.pdf")
 

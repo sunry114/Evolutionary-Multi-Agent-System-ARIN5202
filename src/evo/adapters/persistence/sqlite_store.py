@@ -354,6 +354,69 @@ class SQLiteStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_board_tasks(self, limit: int = 100) -> Sequence[Mapping[str, object]]:
+        """Tasks still visible on the board; clearing is recorded in the event log."""
+        if type(limit) is not int or not 1 <= limit <= 500:
+            raise ValueError("Task limit must be between 1 and 500")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT t.*, t.description AS prompt,
+                          r.status AS review_status, r.feedback AS review_feedback,
+                          r.revision_task_id
+                   FROM tasks AS t LEFT JOIN reviews AS r ON r.task_id = t.id
+                   WHERE NOT EXISTS (SELECT 1 FROM events AS e
+                                     WHERE e.task_id = t.id AND e.event_type = 'board_cleared')
+                   ORDER BY t.created_at DESC, t.id DESC LIMIT ?""", (limit,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def clear_finished_board(self) -> Mapping[str, int]:
+        """Remove terminal task cards from the board without touching task records."""
+        with self._transaction() as connection:
+            rows = connection.execute(
+                """SELECT t.id FROM tasks AS t
+                   WHERE t.status IN ('success', 'failed', 'blocked')
+                     AND NOT EXISTS (SELECT 1 FROM events AS e
+                                     WHERE e.task_id = t.id AND e.event_type = 'board_cleared')"""
+            ).fetchall()
+            for row in rows:
+                self._insert_event(connection, task_id=row["id"],
+                                   event_type="board_cleared", actor="human")
+        return {"cleared_tasks": len(rows)}
+
+    def terminate_task(self, task_id: str) -> Mapping[str, object]:
+        """Block an active root and its children, and remove its scoped chat history."""
+        with self._transaction() as connection:
+            root = connection.execute("SELECT id, status, parent_id FROM tasks WHERE id = ?",
+                                      (task_id,)).fetchone()
+            if root is None:
+                raise RecordNotFoundError("Task not found")
+            if root["parent_id"] or root["status"] in ("success", "failed", "blocked"):
+                raise ConflictError("Only an active root task can be terminated")
+            rows = connection.execute(
+                "WITH RECURSIVE family(id) AS (SELECT id FROM tasks WHERE id = ? "
+                "UNION ALL SELECT t.id FROM tasks t JOIN family f ON t.parent_id = f.id) "
+                "SELECT id FROM family", (task_id,)).fetchall()
+            ids = [row["id"] for row in rows]
+            placeholders = ",".join("?" for _ in ids)
+            now = _utc_now()
+            connection.execute(
+                f"UPDATE tasks SET status = 'blocked', result = 'Terminated by human', updated_at = ? "
+                f"WHERE id IN ({placeholders}) AND status NOT IN ('success', 'failed', 'blocked')",
+                (now, *ids))
+            connection.execute(
+                f"UPDATE approval_requests SET status = 'denied', answered_at = ? "
+                f"WHERE task_id IN ({placeholders}) AND status = 'pending'", (now, *ids))
+            connection.execute(
+                f"UPDATE actions SET status = 'blocked', completed_at = ? "
+                f"WHERE task_id IN ({placeholders}) AND status IN ('requested', 'running')",
+                (now, *ids))
+            removed = connection.execute(
+                f"DELETE FROM messages WHERE task_id IN ({placeholders})", ids).rowcount
+            self._insert_event(connection, task_id=task_id, event_type="task_terminated",
+                               actor="human", payload={"cleared_messages": removed})
+        return {"task_id": task_id, "status": "blocked", "cleared_messages": removed}
+
     def list_pending_requests(self) -> Sequence[Mapping[str, object]]:
         """Read pending requests; answering/resuming remains C's responsibility."""
         with self._connect() as connection:

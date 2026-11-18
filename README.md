@@ -72,14 +72,14 @@ See [provider configuration](docs/PROVIDERS.md).
 ## Run a verified task
 
 The default application now wires C11 to the permitted provider and a scoped
-Harness. A simple one-subtask CLI run needs a human-supplied objective check:
+Harness. A CLI run takes a final delivery file; expected text is optional:
 
 ```bash
 EVO_PROVIDER=deepseek python -m evo run 'Create hello.md containing hello' \
   --expect-file hello.md --expect-text hello
-python -m evo answer REQUEST_ID --approve
-python -m evo resume TASK_ID
 ```
+If the final file uses a different format, answer its format request with
+`python -m evo answer REQUEST_ID --text accept` or `--text decline`.
 
 Install the supported native Claude CLI and configure its path with
 `EVO_CLAUDE_CLI` if needed. The configured DeepSeek/HKGAI key must be available
@@ -224,7 +224,9 @@ with screenshots/report artifacts. These are isolated fixtures, not Agent result
 `WorkspaceFilesystem` binds file operations to one agent's private
 `.evo/agents/<agent>/workspace/`. It enforces relative paths, no symlinks/hardlinks,
 regular UTF-8 files, a 1 MiB limit and explicit document/code/config/data purposes.
-Reports use `.md`/`.txt`. `ArtifactExchange` publishes recipient-scoped snapshots;
+Text documents can use `.md`, `.txt`, `.html`, `.htm`, `.rst`, `.xml`, `.json`,
+`.csv`, `.yaml`, or `.yml`; binary formats such as PDF are not supported by the
+workspace file tool. `ArtifactExchange` publishes recipient-scoped snapshots;
 authorized agents import independent copies with SHA-256 verification and no
 overwrite. These adapters are ready for the C11 tool broker; default CLI/Web
 execution is unchanged. See [C07 usage and safety tests](docs/C07_WORKSPACES.md).
@@ -308,6 +310,30 @@ task completion.
 
 
 ## Mid Test and current D handoff (2026-11-18)
+
+The Web task board accepts a typed goal or local Markdown files. A role heading
+such as `## Researcher (researcher)` followed by a `text` code block initializes
+an Agent; `## Task 1` / `## Task 2` sections or files named `task_1.md` /
+`task_2.md` provide selectable task text. Review the imported text before
+creating the task. Creation saves a draft on the board; the group view shows
+configured Agents' replies through the provider. Use **开始执行** on the draft card
+to set the final delivery file and optional expected content. Intermediate
+subtasks can complete without named files. After all subtasks finish, the root
+task verifies the final artifact. If a verified text artifact has a different
+filename or format, the private chat asks the human to accept or decline it;
+acceptance completes delivery. Pending approvals, clarification
+questions and result reviews appear in the private chat page, with a red dot on
+its tab. Private chat keeps a separate conversation per Agent. An Agent can write
+`@agent_name` in a group reply to ask that Agent for a follow-up; each directed
+pair is answered at most once per group turn, with at most eight follow-ups.
+The task board's **终止任务** action requires human confirmation, blocks the active
+task and its unfinished children, denies pending requests, and removes only
+messages linked to that task. The trace remains for audit.
+Group and private chat can be filtered by task; task-scoped private messages are
+also removed on termination. Each displayed message shows its creation time.
+Creating a task leaves the user on the board while Agents discuss it. The
+**清空** button in the finished column hides finished cards persistently; task
+records and trace remain available, and future tasks appear normally.
 
 Start with [MID_TEST_RUNBOOK.md](docs/MID_TEST_RUNBOOK.md). The instructor ZIP uses
 sequential role-based scenarios, not independent JSONL cases. Prepare it privately

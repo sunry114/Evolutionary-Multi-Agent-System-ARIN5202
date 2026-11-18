@@ -1,6 +1,7 @@
 """Auditable all-agent bidding, adapted from the original Engine assignment."""
 
 import math
+import re
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -25,6 +26,15 @@ class Assignment:
     bids: Tuple[Bid, ...]
 
 
+class AssignmentError(ValueError):
+    """A safe failure category for task traces, without provider response text."""
+
+    def __init__(self, code, agent):
+        super().__init__("Agent assignment failed")
+        self.code = code
+        self.agent = agent
+
+
 class AssignmentService:
     def __init__(self, provider, agents, events=None, memory_adjustment=None):
         self.provider = provider
@@ -38,26 +48,49 @@ class AssignmentService:
                *, memory_enabled: bool = True) -> Assignment:
         bids = []
         for agent in self.agents:
-            result = self.provider.complete(
-                [{"role": "system", "content":
-                  "You are %s, specializing in %s. Bid honestly from 0 to 5. "
-                  "Return JSON {score,reason,proposed_approach,risks}."
-                  % (agent.name, agent.specialty)},
-                 {"role": "user", "content": subtask.description}],
-                json_object=True)
-            if not isinstance(result, dict):
-                raise ValueError("Invalid bid")
-            score = result.get("score")
-            if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score) or not 0 <= score <= 5:
-                raise ValueError("Bid score must be between 0 and 5")
-            reason = result.get("reason")
-            if not isinstance(reason, str) or not reason.strip():
-                raise ValueError("Bid reason is required")
+            for attempt in range(2):
+                try:
+                    result = self.provider.complete(
+                        [{"role": "system", "content":
+                          "You are %s, specializing in %s. Bid honestly from 0 to 5. "
+                          "Return only JSON with numeric score between 0 and 5 and nonempty reason. "
+                          "Keys: score, reason, proposed_approach, risks."
+                          % (agent.name, agent.specialty)},
+                         {"role": "user", "content": subtask.description +
+                          ("\nYour previous bid was invalid. Return all required fields as JSON."
+                           if attempt else "")}], json_object=True)
+                except Exception as exc:
+                    code = getattr(exc, "code", "provider_failure")
+                    if code not in {"authentication", "permission", "endpoint", "rate_limit",
+                                    "http_error", "tls", "connection", "invalid_response",
+                                    "invalid_completion", "provider_error"}:
+                        code = "provider_failure"
+                    raise AssignmentError(code, agent.name) from None
+                score = result.get("score") if isinstance(result, dict) else None
+                if isinstance(score, str) and re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", score.strip()):
+                    score = float(score.strip())
+                reason = result.get("reason") if isinstance(result, dict) else None
+                valid = (not isinstance(score, bool) and isinstance(score, (int, float))
+                         and math.isfinite(score) and 0 <= score <= 5
+                         and isinstance(reason, str) and bool(reason.strip())
+                         and isinstance(result.get("proposed_approach", ""), str)
+                         and isinstance(result.get("risks", ""), str))
+                if valid:
+                    break
+                if self.events is not None and task_id is not None:
+                    self.events.append_event(task_id=task_id, event_type="agent_bid_retry",
+                                             actor=agent.name,
+                                             payload={"subtask_id": subtask.id, "attempt": attempt + 1})
+            else:
+                raise AssignmentError("invalid_bid", agent.name)
             adjustment = 0.0
             if memory_enabled and self.memory_adjustment is not None:
-                adjustment = float(self.memory_adjustment(agent.name, subtask.description))
-                if not math.isfinite(adjustment):
-                    raise ValueError("Invalid memory adjustment")
+                try:
+                    adjustment = float(self.memory_adjustment(agent.name, subtask.description))
+                    if not math.isfinite(adjustment):
+                        raise ValueError("Invalid memory adjustment")
+                except Exception:
+                    raise AssignmentError("memory_adjustment_failed", agent.name) from None
                 adjustment = max(-1.0, min(1.0, adjustment))
             approach = result.get("proposed_approach", "")
             risks = result.get("risks", "")

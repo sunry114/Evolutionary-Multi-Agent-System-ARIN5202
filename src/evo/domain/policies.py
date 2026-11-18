@@ -6,7 +6,8 @@ from typing import Sequence
 
 
 CRITICAL_TOOLS = frozenset({"run_python", "delete_file", "git_push"})
-DOCUMENT_SUFFIXES = frozenset({".md", ".txt"})
+DOCUMENT_SUFFIXES = frozenset({".md", ".txt", ".html", ".htm", ".rst", ".xml",
+                               ".json", ".csv", ".yaml", ".yml"})
 
 
 @dataclass(frozen=True)
@@ -47,4 +48,4 @@ def validate_execution_budget(total_tasks: int, steps: int, depth: int,
 
 def validate_document_path(path: str) -> None:
     if PurePath(path).suffix.lower() not in DOCUMENT_SUFFIXES:
-        raise ValueError("Documents must be Markdown or plain text")
+        raise ValueError("Unsupported text document format")

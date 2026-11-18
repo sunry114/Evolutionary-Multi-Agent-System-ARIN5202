@@ -127,6 +127,66 @@ class C14GatewayTests(unittest.TestCase):
         self.assertEqual(self.provider.calls, [])
         self.assertEqual(self.app.snapshot()["messages"], [])
 
+    def test_created_task_and_imported_roles_feed_the_group_chat(self):
+        roles = [{"name": "analyst", "specialty": "Analyze the task"},
+                 {"name": "writer", "specialty": "Write the result"}]
+        created = self.app.dispatch("create", {"prompt": "Prepare an outline", "agents": roles})
+        task_id = created["task_id"]
+        self.assertEqual(self.app.store.get_task(task_id)["status"], "created")
+        self.assertEqual([item["name"] for item in SQLiteApplication(self.state).snapshot()["agent_details"]],
+                         ["analyst", "writer"])
+        discussion = self.app.dispatch("group", {"message": "Prepare an outline"})
+        self.assertEqual(set(discussion["replies"]), {"analyst", "writer"})
+        self.assertEqual([m["sender"] for m in self.app.snapshot()["messages"]],
+                         ["human", "analyst", "writer"])
+        for payload in ({"prompt": " "}, {"prompt": "x" * 8001},
+                        {"prompt": "Another task", "agents": [{"name": "bad name", "specialty": "x"}]}):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                self.app.dispatch("create", payload)
+        self.assertEqual(len(self.app.snapshot()["tasks"]), 1)
+
+    def test_termination_clears_only_its_messages_and_pending_questions(self):
+        first = self.app.dispatch("create", {"prompt": "First"})["task_id"]
+        second = self.app.dispatch("create", {"prompt": "Second"})["task_id"]
+        self.app.dispatch("group", {"message": "First", "task_id": first})
+        self.app.dispatch("group", {"message": "Second", "task_id": second})
+        self.app.dispatch("dm", {"agent": "builder", "message": "First private", "task_id": first})
+        self.app.dispatch("dm", {"agent": "builder", "message": "Second private", "task_id": second})
+        self.assertNotIn("First private", self.provider.calls[-1][1]["content"])
+        self.app.dispatch("dm", {"agent": "builder", "message": "Independent private"})
+        self.assertNotIn("Second private", self.provider.calls[-1][1]["content"])
+        self.app.approvals.request_clarification(first, "Which file?")
+        self.assertEqual(len(self.app.snapshot()["messages"]), 14)
+        result = self.app.dispatch("terminate", {"task_id": first})
+        self.assertEqual(result["cleared_messages"], 6)
+        self.assertEqual(self.app.store.get_task(first)["status"], "blocked")
+        remaining = self.app.snapshot()["messages"]
+        self.assertEqual(len(remaining), 8)
+        self.assertTrue(all(message["task_id"] != first for message in remaining))
+        self.assertTrue(all(message["created_at"] for message in remaining))
+        self.assertIn("Second private", [message["content"] for message in remaining])
+        self.assertIn("Independent private", [message["content"] for message in remaining])
+        self.assertEqual(self.app.snapshot()["requests"], [])
+        with self.assertRaises(ValueError):
+            self.app.dispatch("terminate", {"task_id": first})
+        with self.assertRaises(ValueError):
+            self.app.dispatch("group", {"message": "Again", "task_id": first})
+
+    def test_clear_finished_board_preserves_trace_and_future_tasks(self):
+        finished = self.app.dispatch("create", {"prompt": "Finished"})["task_id"]
+        active = self.app.dispatch("create", {"prompt": "Active"})["task_id"]
+        self.app.dispatch("terminate", {"task_id": finished})
+        self.assertEqual(self.app.dispatch("clear_finished", {})["cleared_tasks"], 1)
+        self.assertEqual([task["id"] for task in SQLiteApplication(self.state).snapshot()["tasks"]],
+                         [active])
+        self.assertEqual(self.app.store.get_task(finished)["status"], "blocked")
+        self.assertTrue(self.app.store.list_events(finished))
+        self.assertEqual(self.app.dispatch("clear_finished", {})["cleared_tasks"], 0)
+        future = self.app.dispatch("create", {"prompt": "Future"})["task_id"]
+        self.assertEqual({task["id"] for task in self.app.snapshot()["tasks"]}, {active, future})
+        with self.assertRaises(ValueError):
+            self.app.dispatch("clear_finished", {"unexpected": True})
+
     def test_missing_key_is_actionable_and_does_not_save_incoming_message(self):
         app = SQLiteApplication(self.state)
         with patch("evo.adapters.llm.credentials.load_key", side_effect=ValueError("secret")):

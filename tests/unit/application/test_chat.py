@@ -43,6 +43,37 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(len(self.store.list_group_messages()), 4)
         self.assertNotIn("private bid", provider.calls[0][1]["content"])
 
+    def test_agent_mention_routes_a_bounded_reply_in_the_same_task(self):
+        self.store.save_task(Task("task-mention", "Plan"))
+        provider = ScriptedProvider({"reply": "@reviewer Please check this"},
+                                    {"reply": "I will check it"},
+                                    {"reply": "Checked"})
+        service = ChatService(provider, self.store, self.agents)
+        replies = service.group_message("Plan", task_id="task-mention")
+        self.assertEqual(set(replies), {"builder", "reviewer"})
+        self.assertEqual(service.directed_replies,
+                         [{"from": "reviewer", "to": "builder", "reply": "Checked"}])
+        history = [item for item in self.store.list_group_messages()
+                   if item["task_id"] == "task-mention"]
+        self.assertEqual([item["sender"] for item in history],
+                         ["human", "builder", "reviewer", "reviewer"])
+        self.assertIn("addressed by @builder", provider.calls[-1][0]["content"])
+
+    def test_unknown_and_self_mentions_do_not_trigger_more_calls(self):
+        provider = ScriptedProvider({"reply": "@unknown @builder no routing"},
+                                    {"reply": "done"})
+        service = ChatService(provider, self.store, self.agents)
+        service.group_message("Discuss")
+        self.assertEqual(len(provider.calls), 2)
+
+    def test_mutual_mentions_stop_after_each_pair_is_answered(self):
+        provider = ScriptedProvider(*({"reply": "@reviewer check"} if index % 2 == 0
+                                      else {"reply": "@builder revise"} for index in range(4)))
+        service = ChatService(provider, self.store, self.agents)
+        service.group_message("Discuss")
+        self.assertEqual(len(provider.calls), 4)
+        self.assertEqual(len(service.directed_replies), 2)
+
     def test_invalid_input_and_reply(self):
         service = ChatService(ScriptedProvider({"reply": " "}), self.store, self.agents)
         with self.assertRaises(ValueError):

@@ -2,9 +2,12 @@
 
 import hashlib
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from evo.adapters.harness.mcp_bridge import PlatformToolBroker
 from evo.adapters.persistence.sqlite_store import SQLiteStore
@@ -14,6 +17,7 @@ from evo.application.orchestrator import ArtifactCheck, Orchestrator
 from evo.application.planner import Planner
 from evo.domain.models import Agent, Task
 from evo.domain.statuses import TaskStatus
+from evo.interfaces.sqlite_application import SQLiteApplication
 from evo.ports.harness import ArtifactRef, HarnessEvent, ResumeRef, RunHandle, RunResult, ToolCall
 
 
@@ -108,6 +112,80 @@ class CollectiveTaskTests(unittest.TestCase):
         self.assertTrue(all(any(e["event_type"] == "objective_verified"
                                 for e in self.store.list_events(child["id"]))
                             for child in result["subtasks"]))
+
+    def test_final_delivery_only_after_unchecked_subtasks_complete(self):
+        plan = {"subtasks": [
+            {"id": "s1", "description": "Research"},
+            {"id": "s2", "description": "Deliver", "depends_on": ["s1"]}]}
+        self.script = lambda request: ("success", "", "") if request.task_id.endswith("-s1") else (
+            "success", "report.md", "done")
+        result = self.make(plan).run("Goal", final_check=ArtifactCheck("report.md"))
+        self.assertEqual([row["status"] for row in result["subtasks"]], ["success", "success"])
+        self.assertEqual(result["task"]["status"], "success")
+        self.assertTrue(any(event["event_type"] == "objective_verified"
+                            for event in self.store.list_events(result["task"]["id"])))
+        self.assertFalse(any(event["event_type"] == "objective_verified"
+                             for event in self.store.list_events(result["subtasks"][0]["id"])))
+
+    def test_alternative_format_requires_human_acceptance(self):
+        self.script = lambda request: ("success", "report.html", "done")
+        coordinator = self.make({"subtasks": [{"id": "s1", "description": "Deliver"}]})
+        first = coordinator.run("Goal", final_check=ArtifactCheck("report.md", contains="done"))
+        self.assertEqual(first["task"]["status"], "waiting_human")
+        request = self.store.list_pending_requests()[0]
+        self.assertEqual(request["payload"]["actual"], "report.html")
+        with self.assertRaises(ValueError):
+            coordinator.resume(first["task"]["id"])
+        ApprovalService(self.store).answer(request["id"], {"answer": "accept"})
+        final = coordinator.resume(first["task"]["id"])
+        self.assertEqual(final["task"]["status"], "success")
+        self.assertEqual(final["task"]["result"], "Final artifact: report.html")
+
+    def test_web_answer_accepts_format_and_finishes_without_second_click(self):
+        self.script = lambda request: ("success", "report.html", "done")
+        coordinator = self.make({"subtasks": [{"id": "s1", "description": "Deliver"}]})
+        first = coordinator.run("Goal", final_check=ArtifactCheck("report.md"))
+        app = SQLiteApplication(self.root, provider=BidProvider(), agents=self.agents)
+        request = app.snapshot()["requests"][0]
+        with patch.object(app, "_coordinator", return_value=coordinator):
+            with self.assertRaises(ValueError):
+                app.dispatch("answer", {"request_id": request["id"], "answer": "maybe"})
+            result = app.dispatch("answer", {"request_id": request["id"], "answer": "accept"})
+        self.assertEqual(result["task"]["status"], "success")
+        self.assertEqual(app.store.get_task(first["task"]["id"])["status"], "success")
+
+    def test_alternative_format_decline_and_missing_content(self):
+        self.script = lambda request: ("success", "report.html", "done")
+        coordinator = self.make({"subtasks": [{"id": "s1", "description": "Deliver"}]})
+        first = coordinator.run("Goal", final_check=ArtifactCheck("report.md"))
+        request = self.store.list_pending_requests()[0]
+        ApprovalService(self.store).answer(request["id"], {"answer": "decline"})
+        self.assertEqual(coordinator.resume(first["task"]["id"])["task"]["status"], "failed")
+        second = self.make({"subtasks": [{"id": "s1", "description": "Deliver"}]}).run(
+            "Another goal", final_check=ArtifactCheck("report.md", contains="missing"))
+        self.assertEqual(second["task"]["status"], "failed")
+
+    def test_terminating_running_task_cancels_harness(self):
+        waiting, cancelled = threading.Event(), threading.Event()
+        class WaitingHarness(ScriptedHarness):
+            def wait(self, handle, timeout=None):
+                waiting.set()
+                cancelled.wait(timeout)
+                return None
+            def cancel(self, handle):
+                cancelled.set()
+                return RunResult("cancelled")
+        coordinator = self.make({"subtasks": [{"id": "s1", "description": "Write"}]})
+        coordinator.harness_factory = lambda task_id, agent, workspace: WaitingHarness(workspace, self.script)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(coordinator.run, "Goal", checks={"s1": ArtifactCheck("result.md", exact="done")},
+                                 task_id="stop-test")
+            self.assertTrue(waiting.wait(3))
+            self.store.terminate_task("stop-test")
+            result = future.result(timeout=3)
+        self.assertTrue(cancelled.is_set())
+        self.assertEqual(result["task"]["status"], "blocked")
+        self.assertEqual(self.store.get_task("stop-test-s1")["status"], "blocked")
 
     def test_failure_blocks_dependent_task(self):
         self.script = lambda request: ("failed", "", "")

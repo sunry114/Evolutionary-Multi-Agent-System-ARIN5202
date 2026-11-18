@@ -1,6 +1,7 @@
 import unittest
 
-from evo.application.assignment import AssignmentService
+from evo.application.assignment import AssignmentError, AssignmentService
+from evo.adapters.llm.client import ProviderError
 from evo.domain.models import Agent, Subtask
 
 
@@ -57,10 +58,31 @@ class AssignmentTests(unittest.TestCase):
         self.assertTrue(all(b.adjustment == 1 for b in result.bids))
 
     def test_invalid_bid_rejected(self):
-        for score in (-1, 6, True, "5", float("nan")):
+        for score in (-1, 6, True, "nan", float("nan")):
             with self.subTest(score=score), self.assertRaises(ValueError):
-                AssignmentService(Provider({"score": score, "reason": "x"}),
+                AssignmentService(Provider(*([{"score": score, "reason": "x"}] * 2)),
                                   self.agents).assign(Subtask("s1", "Task"))
+
+    def test_invalid_bid_retried_and_numeric_string_accepted(self):
+        events = Events()
+        provider = Provider({"reply": "I can help"},
+                            {"score": "4.5", "reason": "Can implement"},
+                            {"score": 3, "reason": "Can review"})
+        result = AssignmentService(provider, self.agents, events).assign(
+            Subtask("s1", "Implement"), "task-1")
+        self.assertEqual(result.owner, "builder")
+        self.assertEqual(result.bids[0].raw_score, 4.5)
+        self.assertEqual([event["event_type"] for event in events.events],
+                         ["agent_bid_retry", "agent_bid", "agent_bid", "agent_assigned"])
+
+    def test_provider_failure_has_safe_category(self):
+        class FailingProvider:
+            def complete(self, messages, json_object=False):
+                raise ProviderError("provider-secret", code="rate_limit")
+        with self.assertRaises(AssignmentError) as error:
+            AssignmentService(FailingProvider(), self.agents).assign(Subtask("s1", "Task"))
+        self.assertEqual((error.exception.code, error.exception.agent), ("rate_limit", "builder"))
+        self.assertNotIn("provider-secret", str(error.exception))
 
 
 if __name__ == "__main__":
