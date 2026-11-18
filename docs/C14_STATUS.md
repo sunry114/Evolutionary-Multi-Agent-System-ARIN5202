@@ -1,5 +1,11 @@
 # C14 当前实现与验收状态
 
+Current update 2026-11-18: C11/C12/C13 and runtime wiring are merged in main
+204882f. Memory/metrics and Web evaluation entry points are connected in this
+follow-up. See [MID_TEST_RUNBOOK.md](MID_TEST_RUNBOOK.md) for actual dataset
+protocol, private preparation paths, evidence audit and remaining formal evaluation.
+The prior unavailable-backend statements and test counts below are dated history.
+
 更新日期：2026-11-15（Asia/Shanghai）。基于 main 7ee0586，接入 A 的 C06、
 B 的 SQLite 和 C 的 ApprovalService。本次完成这些现有后端对应的 C14 用户入口。
 

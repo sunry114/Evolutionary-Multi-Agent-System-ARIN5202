@@ -49,7 +49,15 @@ def parser():
     command.add_argument("message")
     for name in ("trace", "metrics"):
         commands.add_parser(name).add_argument("task_id")
-    commands.add_parser("memory").add_argument("agent")
+    command = commands.add_parser("memory")
+    command.add_argument("agent")
+    command.add_argument("--query", default="")
+    command = commands.add_parser("prepare-midtest", help="Prepare private sequential scenario workspaces, without executing")
+    command.add_argument("archive")
+    command.add_argument("--output", required=True)
+    command = commands.add_parser("audit-midtest", help="Audit private exported SQLite evidence without inventing scores")
+    command.add_argument("archive")
+    command.add_argument("--output", required=True)
     command = commands.add_parser("eval")
     command.add_argument("dataset")
     command.add_argument("--output", required=True)
@@ -87,6 +95,14 @@ def main(argv=None, application=None):
         root.print_help()
         return 0
     try:
+        if args.command == "prepare-midtest":
+            from evo.interfaces.midtest import prepare_midtest
+            print(json.dumps(prepare_midtest(args.archive, args.output), ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "audit-midtest":
+            from evo.interfaces.midtest import audit_midtest
+            print(json.dumps(audit_midtest(args.archive, args.output), ensure_ascii=False, indent=2))
+            return 0
         if args.command in ("provider-info", "check-provider"):
             from evo.config import ProviderConfig
             from evo.adapters.llm.diagnostics import check_provider, provider_info

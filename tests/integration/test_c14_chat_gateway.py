@@ -183,6 +183,6 @@ class C14GatewayTests(unittest.TestCase):
         self.assertTrue(snapshot["capabilities"]["run"])
         self.assertTrue(snapshot["capabilities"]["eval"])
         for operation in ("memory", "metrics"):
-            self.assertFalse(snapshot["capabilities"][operation])
-            with self.assertRaises(ApplicationUnavailable):
+            self.assertTrue(snapshot["capabilities"][operation])
+            with self.assertRaises(ValueError):
                 self.app.dispatch(operation, {})

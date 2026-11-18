@@ -305,3 +305,18 @@ Automatic goal execution and explicit resume (C11) now use the execution factory
 C12 memory is connected to task execution. C13 `eval` is callable through the
 CLI/Web API; `metrics` remains unavailable. Chat replies are not counted as
 task completion.
+
+
+## Mid Test and current D handoff (2026-11-18)
+
+Start with [MID_TEST_RUNBOOK.md](docs/MID_TEST_RUNBOOK.md). The instructor ZIP uses
+sequential role-based scenarios, not independent JSONL cases. Prepare it privately
+with prepare-midtest; audit exported evidence with audit-midtest. Both commands
+require a new output under ignored .evo and never execute or auto-score tasks.
+
+C11/C12/C13 runtime wiring is now in main. CLI memory supports --query, metrics
+shows stored task timing/completion snapshots, and Web has memory/metrics/JSONL
+evaluation controls. Formal scenario evaluation remains B's C13 responsibility;
+D provides entries and delivery evidence. Chat-only exports cannot establish
+actual execution time or task completion. See the runbook for the Linux/Docker
+prerequisites and the HTML-versus-Markdown/TXT constraint conflict.

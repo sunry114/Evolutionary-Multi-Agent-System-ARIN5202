@@ -86,14 +86,22 @@ async function run() {
   await parent.getByRole('button',{name:'加载 trace',exact:true}).click();
   assert.equal(await parent.locator('pre').count(),1);
   assert.equal(await parent.locator('pre').isVisible(),true);
-  checks.push('Accept, request changes, create linked revision and load persisted trace');
+  await parent.getByRole('button',{name:'查看指标',exact:true}).click();
+  await parent.locator('pre').filter({hasText:'stored_task_state'}).waitFor();
+  checks.push('Accept, revision, persisted trace and stored task metrics');
 
   for(const [label,id] of [['群聊','group'],['私聊','dm'],['记忆','memory']]) {
     await page.getByRole('button',{name:label,exact:true}).click();
     assert.equal(await page.locator('#'+id).isVisible(),true);
     if(id!=='memory')assert.equal(await page.locator('#'+id+'-form button').isEnabled(),true);
   }
-  checks.push('Navigation and live chat controls');
+  await page.locator('#memory-form button').click();await page.locator('#memory-list').getByText(/暂无匹配经验/).waitFor();
+  await page.getByRole('button',{name:'评测',exact:true}).click();
+  await page.locator('#eval-form input[name=dataset]').fill('missing.jsonl');
+  await page.locator('#eval-form input[name=output]').fill('outside/reports.json');
+  await page.locator('#eval-form button').click();
+  await page.waitForFunction(()=>document.querySelector('#status').textContent.includes('Invalid request'));
+  checks.push('Memory query and eval validation; navigation and live chat controls');
   await page.getByRole('button',{name:'群聊',exact:true}).click();
   await page.locator('#group-form textarea').fill('Group fixture input');
   await page.locator('#group-form button').click();

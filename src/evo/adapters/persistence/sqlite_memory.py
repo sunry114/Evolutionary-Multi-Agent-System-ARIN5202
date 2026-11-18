@@ -169,3 +169,13 @@ class SQLiteMemoryStore:
         weights = {TaskStatus.SUCCESS: 0.25, TaskStatus.FAILED: -0.25,
                    TaskStatus.BLOCKED: -0.1}
         return max(-0.75, min(0.75, sum(weights[item.outcome] for item in self.recall(query))))
+
+    def list_recent(self, limit=20):
+        """Bounded human-facing view; does not recall or adjust agent behavior."""
+        if type(limit) is not int or not 1 <= limit <= 50:
+            raise ValueError("Invalid memory list limit")
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT task,outcome,lesson,evidence,failure_category,created_at "
+                "FROM experiences ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(row, agent=self.agent) for row in rows]
