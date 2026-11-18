@@ -13,6 +13,7 @@ from typing import Iterator, Mapping, Optional, Sequence
 
 from evo.domain.models import Message, Task
 from evo.domain.statuses import ReviewStatus, TaskStatus
+from evo.domain.statuses import validate_task_transition
 
 
 class StorageError(RuntimeError):
@@ -278,6 +279,37 @@ class SQLiteStore:
             raise RecordNotFoundError("Task not found")
 
         return dict(row)
+
+    def transition_task(self, task_id: str, status: str, *, expected: str,
+                        owner: Optional[str] = None, result: str = "") -> Mapping[str, object]:
+        """Atomically advance a technical task state and audit the transition."""
+        target = TaskStatus(status).value
+        if not isinstance(result, str) or len(result) > 4000:
+            raise ValueError("Invalid task result")
+        if owner is not None and (not isinstance(owner, str) or not owner.strip()):
+            raise ValueError("Invalid task owner")
+        with self._transaction() as connection:
+            row = connection.execute("SELECT status, owner FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if row is None:
+                raise RecordNotFoundError("Task not found")
+            if row["status"] != expected:
+                raise ConflictError("Task status changed")
+            validate_task_transition(expected, target)
+            if owner is not None and expected != TaskStatus.READY.value:
+                raise ValueError("Owner may only be assigned to a ready task")
+            if target == TaskStatus.ASSIGNED.value and not (owner or row["owner"]):
+                raise ValueError("Assigned task requires an owner")
+            connection.execute(
+                "UPDATE tasks SET status = ?, owner = ?, result = ?, updated_at = ? WHERE id = ?",
+                (target, owner or row["owner"], result, _utc_now(), task_id))
+            if target == TaskStatus.SUCCESS.value:
+                connection.execute(
+                    "INSERT INTO reviews(task_id, status, feedback, created_at, updated_at) "
+                    "VALUES (?, 'pending', '', ?, ?)", (task_id, _utc_now(), _utc_now()))
+            self._insert_event(connection, task_id=task_id, event_type="task_transition",
+                               actor=owner or row["owner"] or "",
+                               payload={"from": expected, "to": target, "result": result[:500]})
+        return self.get_task(task_id)
 
     def list_children(
         self,

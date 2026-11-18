@@ -23,12 +23,12 @@ class ReviewStatus(str, Enum):
 
 
 TASK_TRANSITIONS = {
-    TaskStatus.CREATED: {TaskStatus.PLANNING, TaskStatus.READY, TaskStatus.BLOCKED},
-    TaskStatus.PLANNING: {TaskStatus.READY, TaskStatus.BLOCKED, TaskStatus.FAILED},
-    TaskStatus.READY: {TaskStatus.ASSIGNED, TaskStatus.BLOCKED},
-    TaskStatus.ASSIGNED: {TaskStatus.RUNNING, TaskStatus.BLOCKED},
+    TaskStatus.CREATED: {TaskStatus.PLANNING, TaskStatus.READY, TaskStatus.BLOCKED, TaskStatus.FAILED},
+    TaskStatus.PLANNING: {TaskStatus.READY, TaskStatus.WAITING_HUMAN, TaskStatus.BLOCKED, TaskStatus.FAILED},
+    TaskStatus.READY: {TaskStatus.ASSIGNED, TaskStatus.BLOCKED, TaskStatus.FAILED},
+    TaskStatus.ASSIGNED: {TaskStatus.RUNNING, TaskStatus.BLOCKED, TaskStatus.FAILED},
     TaskStatus.RUNNING: {TaskStatus.WAITING_HUMAN, TaskStatus.SUCCESS, TaskStatus.FAILED, TaskStatus.BLOCKED},
-    TaskStatus.WAITING_HUMAN: {TaskStatus.RUNNING, TaskStatus.BLOCKED},
+    TaskStatus.WAITING_HUMAN: {TaskStatus.PLANNING, TaskStatus.RUNNING, TaskStatus.BLOCKED},
     TaskStatus.SUCCESS: set(),
     TaskStatus.FAILED: set(),
     TaskStatus.BLOCKED: set(),
