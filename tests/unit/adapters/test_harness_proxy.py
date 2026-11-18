@@ -29,7 +29,7 @@ class ProxyTests(unittest.TestCase):
                 self.send_header("Location", "https://unapproved.example/")
                 self.send_header("Set-Cookie", "private=value")
                 self.end_headers()
-                self.wfile.write(b'{"ok":true}')
+                self.wfile.write(json.dumps(getattr(self.server, "reply", {"ok": True})).encode())
 
         self.upstream = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.upstream.redirect = False
@@ -92,4 +92,53 @@ class ProxyTests(unittest.TestCase):
     def test_request_budget_prevents_an_unbounded_cli_loop(self):
         self.proxy.requests = 64
         self.assertEqual(self.request()[0], 502)
+        self.assertEqual(self.received, [])
+
+
+class HKGAIProxyTests(unittest.TestCase):
+    request = ProxyTests.request
+
+    def setUp(self):
+        from types import SimpleNamespace
+        ProxyTests.setUp(self)
+        self.proxy.__exit__(None, None, None)
+        self.path.unlink()
+        model = SimpleNamespace(provider="hkgai", model="permitted",
+                                endpoint=f"http://127.0.0.1:{self.upstream.server_port}/v1")
+        self.proxy = ModelProxy(self.path, model, "fixture-credential", timeout=1)
+        self.proxy.__enter__()
+        self.addCleanup(self.proxy.__exit__, None, None, None)
+        self.upstream.reply = {"id": "fixture", "choices": [{"finish_reason": "stop",
+            "message": {"content": "hello"}}], "usage": {"prompt_tokens": 2, "completion_tokens": 1}}
+
+    def test_chat_route_and_fixed_auth_with_stream_translation(self):
+        status, headers, body = self.request("/v1/messages?beta=true", body={"model": "attacker",
+            "messages": [{"role": "user", "content": "hi"}], "stream": True})
+        self.assertEqual(status, 200)
+        sent = self.received[0]
+        self.assertEqual(sent["path"], "/v1/chat/completions")
+        self.assertEqual(sent["body"]["model"], "permitted")
+        self.assertFalse(sent["body"]["stream"])
+        self.assertEqual(sent["headers"]["Authorization"], "Bearer fixture-credential")
+        self.assertNotIn("x-api-key", sent["headers"])
+        self.assertEqual(headers["Content-Type"], "text/event-stream")
+        self.assertIn(b"event: message_stop", body)
+
+    def test_json_result_and_unsupported_counting(self):
+        status, _, body = self.request()
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["usage"], {"input_tokens": 2, "output_tokens": 1})
+        self.assertEqual(self.request("/v1/messages/count_tokens")[0], 501)
+        self.assertEqual(len(self.received), 1)
+
+    def test_invalid_upstream_does_not_leak_or_fabricate_result(self):
+        self.upstream.reply = {"private": "upstream-private-body"}
+        status, _, body = self.request()
+        self.assertEqual(status, 502)
+        self.assertNotIn(b"upstream-private-body", body)
+        self.assertNotIn(b"fixture-credential", body)
+
+    def test_unsupported_input_never_reaches_upstream(self):
+        status, _, _ = self.request(body={"messages": [{"role": "user", "content": [{"type": "image"}]}]})
+        self.assertEqual(status, 502)
         self.assertEqual(self.received, [])
