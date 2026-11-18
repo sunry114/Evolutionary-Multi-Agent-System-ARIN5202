@@ -38,7 +38,12 @@ This is the C11 application layer. `interfaces/execution_factory.py` now wires
 the default CLI/Web `run` and explicit `resume` operations to the configured
 provider, per-Agent workspace, tool broker, approval service and Harness.
 The caller must provide trusted per-subtask artifact checks; CLI flags support
-one simple `s1` file check, while the Web API accepts a check mapping.
+one simple `s1` file check or a JSON mapping through `--checks-file`, while the
+Web API accepts a check mapping. `agents --file` and the Web role form persist
+1–8 scenario roles in `.evo/agents.json`. Each task saves its own role snapshot
+for resume, even if workspace configuration later changes. `group --execute`
+and the Web group execution option collect the discussion, then start `run`
+with the human goal and objective checks.
 Native Claude CLI and provider credentials are required for a live run.
 HKGAI's Anthropic-wire compatibility has not been verified. C12 private memory is available to callers that
 inject a per-agent memory factory; see [C12](C12_MEMORY.md). C13 objective dataset

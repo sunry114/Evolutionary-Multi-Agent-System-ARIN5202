@@ -37,7 +37,9 @@ policy are recorded. `write_report` checks the report and writes JSON atomically
 not prove that a reported observation was honestly produced; raw run traces and
 environment records remain necessary for formal evaluation.
 
-The default CLI/Web application now has a C11 run factory, but its `eval` route
-remains unavailable until the evaluation gateway is connected. The scripted end-to-end test exercises
+The default CLI/Web application connects `eval` to the C11 execution factory.
+The output must be a `.json` file under the state directory's `reports/` folder.
+For example, run `python -m evo --state .evo eval examples/smoke.jsonl --output .evo/reports/smoke.json`.
+The scripted end-to-end test exercises
 the full C11 planner/bid/Harness/file-check path. Official mid/final scores and
 a controlled memory ablation have not been run.

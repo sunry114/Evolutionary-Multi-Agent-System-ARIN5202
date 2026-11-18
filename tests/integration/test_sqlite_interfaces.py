@@ -102,9 +102,11 @@ class SQLiteInterfaceTests(unittest.TestCase):
 
     def test_unavailable_backends_have_no_side_effects(self):
         before = self.app.snapshot()
-        for op in ("eval", "metrics", "memory"):
+        for op in ("metrics", "memory"):
             with self.subTest(op=op), self.assertRaises(ApplicationUnavailable):
                 self.app.dispatch(op, {"prompt": "x"})
+        with self.assertRaises(ValueError):
+            self.app.dispatch("eval", {"prompt": "x"})
         self.assertEqual(self.app.snapshot(), before)
 
     def test_snapshot_real_records_and_answer_capability(self):

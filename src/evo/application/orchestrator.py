@@ -131,6 +131,8 @@ class Orchestrator:
         self.store.save_task(Task(task_id, goal.strip()))
         self._event(task_id, "run_config", {
             "memory_enabled": memory_enabled,
+            "agents": [{"name": agent.name, "specialty": agent.specialty}
+                       for agent in self.agents.values()],
             "checks": {key: asdict(value) for key, value in checks.items()},
             "actions": {key: [asdict(x) for x in value] for key, value in actions.items()},
         })

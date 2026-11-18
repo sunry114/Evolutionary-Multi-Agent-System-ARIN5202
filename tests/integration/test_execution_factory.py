@@ -7,7 +7,8 @@ from evo.application.orchestrator import ArtifactCheck
 from evo.application.approvals import ApprovalService
 from evo.adapters.tools.docker import DockerPythonRunner
 from evo.config import HarnessConfig
-from evo.domain.models import Agent
+from evo.domain.models import Agent, Task
+from evo.domain.statuses import TaskStatus
 from evo.interfaces.execution_factory import create_orchestrator
 from evo.interfaces.sqlite_application import SQLiteApplication
 from evo.ports.harness import ToolCall
@@ -67,6 +68,7 @@ class ExecutionFactoryTests(unittest.TestCase):
             class Coordinator:
                 def run(self, prompt, *, checks, task_id, memory_enabled):
                     called.append((prompt, checks["s1"].path, memory_enabled))
+                    app.store.save_task(Task(task_id, prompt, status=TaskStatus.WAITING_HUMAN))
                     return {"task": {"id": task_id, "status": "waiting_human"}, "subtasks": []}
                 def resume(self, task_id):
                     called.append(("resume", task_id))
@@ -79,6 +81,105 @@ class ExecutionFactoryTests(unittest.TestCase):
             self.assertEqual(final["status"], "success")
             self.assertEqual(called[0], ("Write report.md", "report.md", False))
             self.assertEqual(called[1], ("resume", first["task"]["id"]))
+
+    def test_four_configured_roles_chat_and_execute_with_objective_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            roles = [{"name": name, "specialty": specialty} for name, specialty in (
+                ("researcher", "research"), ("architect", "design"),
+                ("builder", "documents"), ("reviewer", "testing"))]
+            class TeamProvider(Provider):
+                def complete(self, messages, json_object=False):
+                    if "multi-agent group chat" in messages[0]["content"]:
+                        return {"reply": "Ready to collaborate"}
+                    if "Bid honestly" in messages[0]["content"]:
+                        return {"score": 5, "reason": "Can contribute"}
+                    return super().complete(messages, json_object)
+            app = SQLiteApplication(temp, provider=TeamProvider())
+            self.assertEqual(app.dispatch("agents", {"agents": roles})["agents"],
+                             [item["name"] for item in roles])
+            restored = SQLiteApplication(temp, provider=TeamProvider())
+            self.assertEqual(restored.snapshot()["agent_details"], roles)
+            self.assertEqual(set(restored.dispatch("group", {"message": "Plan report.md"})["replies"]),
+                             {item["name"] for item in roles})
+            with patch.dict("os.environ", {"EVO_HARNESS_ADAPTER": "baseline"}):
+                coordinator = restored._coordinator()
+            result = coordinator.run("Write report.md", checks={
+                "s1": ArtifactCheck("report.md", exact="done")},
+                actions={"s1": (ToolCall("write_file", {"path": "report.md", "content": "done"}),)})
+            self.assertEqual(result["task"]["status"], "success")
+            self.assertEqual(len([event for event in coordinator.store.list_events(result["task"]["id"])
+                                  if event["event_type"] == "agent_bid"]), 4)
+            config = next(event["payload"] for event in coordinator.store.list_events(result["task"]["id"])
+                          if event["event_type"] == "run_config")
+            self.assertEqual(config["agents"], roles)
+
+    def test_group_execute_dispatches_task_after_four_agent_discussion(self):
+        with tempfile.TemporaryDirectory() as temp:
+            class TeamProvider(Provider):
+                def complete(self, messages, json_object=False):
+                    return {"reply": "Agreed"}
+            app = SQLiteApplication(temp, provider=TeamProvider())
+            roles = [{"name": name, "specialty": name} for name in ("a", "b", "c", "d")]
+            app.dispatch("agents", {"agents": roles})
+            class Coordinator:
+                def run(self, prompt, *, checks, task_id, memory_enabled):
+                    self.prompt = prompt
+                    return {"task": {"id": task_id, "status": "waiting_human"}, "subtasks": []}
+            coordinator = Coordinator()
+            with patch.object(app, "_coordinator", return_value=coordinator):
+                result = app.dispatch("group", {"message": "Create report.md", "execute": True,
+                    "checks": {"s1": {"path": "report.md", "exact": "done"}}})
+            self.assertEqual(result["status"], "waiting_human")
+            self.assertEqual(len(result["replies"]), 4)
+            self.assertEqual(coordinator.prompt, "Create report.md")
+
+    def test_resume_uses_task_roles_after_workspace_roles_change(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = SQLiteApplication(temp, provider=Provider())
+            original = [{"name": name, "specialty": name} for name in ("a", "b", "c", "d")]
+            app.store.save_task(Task("saved", "Goal", status=TaskStatus.WAITING_HUMAN))
+            app.store.append_event(task_id="saved", event_type="run_config", actor="orchestrator",
+                                   payload={"agents": original})
+            app.dispatch("agents", {"agents": [{"name": "replacement", "specialty": "new role"}]})
+            class Coordinator:
+                def resume(self, task_id):
+                    return {"task": {"id": task_id, "status": "success"}, "subtasks": []}
+            with patch.object(app, "_coordinator", return_value=Coordinator()) as factory:
+                self.assertEqual(app.dispatch("resume", {"task_id": "saved"})["status"], "success")
+            self.assertEqual([agent.name for agent in factory.call_args.args[0]], ["a", "b", "c", "d"])
+
+    def test_invalid_role_registry_does_not_replace_existing_roles(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = SQLiteApplication(temp, provider=Provider())
+            for roles in ([], [{"name": "a/../b", "specialty": "bad"}],
+                          [{"name": "human", "specialty": "reserved"}],
+                          [{"name": "same", "specialty": "one"},
+                           {"name": "same", "specialty": "two"}]):
+                with self.subTest(roles=roles), self.assertRaises(ValueError):
+                    app.dispatch("agents", {"agents": roles})
+            self.assertEqual(SQLiteApplication(temp).snapshot()["agents"],
+                             [agent.name for agent in app.agents])
+
+    def test_evaluation_gateway_uses_scenario_roles_and_restricted_report_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = SQLiteApplication(temp, provider=Provider())
+            roles = [{"name": name, "specialty": name} for name in ("a", "b", "c", "d")]
+            app.dispatch("agents", {"agents": roles})
+            output = str(Path(temp) / "reports" / "mid.json")
+            with self.assertRaises(ValueError):
+                app.dispatch("eval", {"dataset": "mid.jsonl", "output": str(Path(temp) / "agents.json")})
+            def evaluate(dataset, destination, factory, *, memory_enabled):
+                self.assertEqual(factory(Path(temp) / "case"), "coordinator")
+                self.assertEqual([agent.name for agent in create.call_args.kwargs["agents"]],
+                                 [item["name"] for item in roles])
+                self.assertEqual((dataset, destination, memory_enabled), ("mid.jsonl", Path(output), False))
+                return {"objective_count": 1}
+            with patch("evo.interfaces.execution_factory.create_orchestrator",
+                       return_value="coordinator") as create, patch(
+                       "evo.evaluation.runner.evaluate_jsonl", side_effect=evaluate):
+                report = app.dispatch("eval", {"dataset": "mid.jsonl", "output": output,
+                                                "no_memory": True})
+            self.assertEqual(report, {"objective_count": 1})
 
     def test_invalid_checks_rejected_before_provider_execution(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -17,7 +17,7 @@ durable approval pause/recovery and an isolated native CLI runtime. See
 [C10a API, boundaries and explicit live smoke](docs/C10a_HARNESS.md).
 C11 orchestration, C12 private memory and the C13 evaluation library are now
 implemented. The default application has a C11 execution factory for `run` and
-explicit `resume`; the CLI/Web `eval` gateway and formal results remain pending.
+explicit `resume`, and a C13 `eval` gateway. Formal results remain pending.
 
 ## Install and verify
 
@@ -88,6 +88,31 @@ has not yet been verified. Critical actions still require explicit approval;
 answering does not execute them until `resume` is called. The Web `run` JSON
 payload accepts `checks` keyed by planned subtask ID for multi-step tasks.
 
+Configure scenario roles before a mid-test run. The role list is saved in
+`.evo/agents.json`; each task records its own role snapshot for `resume`.
+
+```json
+[
+  {"name": "researcher", "specialty": "Find and summarize evidence"},
+  {"name": "architect", "specialty": "Design the solution"},
+  {"name": "builder", "specialty": "Create deliverable files"},
+  {"name": "reviewer", "specialty": "Check the deliverables"}
+]
+```
+
+```bash
+python -m evo --state .evo agents --file scenario_agents.json
+python -m evo --state .evo group 'Create report.md containing hello' \
+  --execute --expect-file report.md --expect-text hello
+# For several subtasks, checks.json maps s1..s5 to artifact checks.
+python -m evo --state .evo run 'Create the deliverables' --checks-file checks.json
+```
+
+`group --execute` saves all role replies, then runs the original human goal
+with objective checks. Plain `group` remains a discussion. Formal mid-test
+results still require the released dataset, native Harness runtime, provider
+credentials and an official dataset.
+
 ## Connect a custom backend
 
 A/B/C provide a factory accepting state=Path and returning ApplicationGateway:
@@ -105,11 +130,12 @@ python -m evo review TASK_ID accepted
 python -m evo review TASK_ID changes_requested --feedback 'Fix the output'
 python -m evo revision TASK_ID 'Apply the feedback'
 python -m evo answer REQUEST_ID --deny
-python -m evo eval DATASET.jsonl --output .evo/report.json --no-memory
+python -m evo eval DATASET.jsonl --output .evo/reports/report.json --no-memory
 ```
 
 Without an override, the default SQLite application supplies the real C11
-execution factory. Its `eval` and `metrics` routes remain unavailable. See [SQLite integration](docs/SQLITE_INTERFACE.md). The Web
+execution factory. `eval` writes reports under `.evo/reports/`; `metrics` remains
+unavailable. See [SQLite integration](docs/SQLITE_INTERFACE.md). The Web
 server only binds loopback. Use the printed 127.0.0.1 URL and keep the terminal
 open. Never expose it publicly without a separate reviewed authentication layer.
 
@@ -275,5 +301,7 @@ python -m evo --state .evo group 'Discuss how to divide a review task.'
 python -m evo --state .evo messages --agent builder
 ```
 
-Automatic goal execution/resume (C11), memory (C12) and objective eval/metrics (C13)
-remain unavailable. They cannot be replaced by chat replies or demo successes.
+Automatic goal execution and explicit resume (C11) now use the execution factory.
+C12 memory is connected to task execution. C13 `eval` is callable through the
+CLI/Web API; `metrics` remains unavailable. Chat replies are not counted as
+task completion.
