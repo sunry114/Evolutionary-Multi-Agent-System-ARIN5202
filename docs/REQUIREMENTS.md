@@ -1,5 +1,14 @@
 # Requirements traceability
 
+## C11 service-layer orchestration
+
+The C11 coordinator now persists plans and task transitions, schedules only ready
+subtasks, records all-agent bids, delegates with depth and task-count bounds,
+pauses/resumes through C10a, and requires a verified workspace artifact before
+marking file work successful. Scripted SQLite and real Baseline Harness tests are
+documented in [C11_ORCHESTRATION.md](C11_ORCHESTRATION.md). Default CLI/Web task
+execution and the C12/C13 memory/evaluation pipeline remain integration work.
+
 Latest C14 milestone (2026-11-15): ChatService-backed DM/group chat, persisted
 history and ApprovalService answers are now connected. See [C14_STATUS.md](C14_STATUS.md)
 for current validation, limitations and remaining C11/C12/C13 dependencies.

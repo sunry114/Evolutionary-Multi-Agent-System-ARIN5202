@@ -32,6 +32,8 @@ SCHEMAS = {
     "publish_artifact": schema({"path": S, "recipients": {"type": "array", "items": S}, "purpose": PURPOSE}, ("path", "recipients")),
     "list_artifacts": schema({}),
     "import_artifact": schema({"artifact_id": S, "destination": S}, ("artifact_id", "destination")),
+    "delegate": schema({"agent": S, "description": S, "path": S, "contains": S},
+                       ("agent", "description", "path", "contains")),
 }
 CRITICAL_DISPATCH = frozenset(("run_python", "delete_file", "git_init", "git_status", "git_commit", "git_push"))
 
@@ -47,12 +49,13 @@ def jsonable(value):
 class PlatformToolBroker:
     """Constructed by trusted application code, bound to exactly one agent."""
 
-    def __init__(self, executor, *, web=None, artifacts=None):
+    def __init__(self, executor, *, web=None, artifacts=None, delegation=None):
         self.executor = executor
         self.workspace = executor.workspace
         self.repository = executor.repository
         self.web = web
         self.artifacts = artifacts
+        self.delegation = delegation
 
     def validate(self, request):
         task = self.repository.get_task(request.task_id)
@@ -67,6 +70,8 @@ class PlatformToolBroker:
             names -= {"search", "fetch_url"}
         if self.artifacts is None:
             names -= {"publish_artifact", "list_artifacts", "import_artifact"}
+        if self.delegation is None:
+            names -= {"delegate"}
         return [{"name": name, "description": "Platform " + name + "; critical actions wait for human approval.",
                  "inputSchema": SCHEMAS[name]} for name in sorted(names)]
 
@@ -105,13 +110,21 @@ class PlatformToolBroker:
                              "sha256": hashlib.sha256(content.encode()).hexdigest()}
             elif name in ("search", "fetch_url"):
                 value = getattr(self.web, name)(**arguments)
+            elif name == "delegate":
+                value = self.delegation(task_id, **arguments)
             else:
                 method = {"publish_artifact": "publish", "list_artifacts": "list_available", "import_artifact": "import_artifact"}[name]
                 value = getattr(self.artifacts, method)(**arguments)
                 if name == "import_artifact":
                     value = {"path": arguments["destination"], "purpose": value.purpose, "sha256": value.sha256}
-            self.repository.finish_action(action_id, succeeded=True, result={"status": "success"})
-            return {"status": "success", "action_id": action_id, "result": jsonable(value)}
+            status = "success"
+            if name == "delegate" and value["status"] != "success":
+                # A child approval cannot be replayed as a fresh delegation.
+                # Surface a stopped parent instead of hiding the child failure.
+                status = "blocked" if value["status"] in ("blocked", "waiting_human") else "failed"
+            self.repository.finish_action(action_id, succeeded=status == "success",
+                                          result={"status": status})
+            return {"status": status, "action_id": action_id, "result": jsonable(value)}
         except Exception:
             self.repository.finish_action(action_id, succeeded=False, result={"error": "tool_failed"})
             raise HarnessError("Platform tool failed") from None
