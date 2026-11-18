@@ -76,7 +76,7 @@ python -m evo --state .evo answer REQUEST_ID --text 'Use report.md'
 | C12 记忆 | 只有 SQLite memory schema，没有完整读写/召回实现 | 提供授权 memory 查询，保持各 Agent 隔离 |
 | C13 评测 | 没有实际 evaluation runner | 提供 eval/metrics，明确 passed、完成率分母、耗时与 no-memory |
 
-run/memory/eval/metrics 当前继续返回 unavailable 并在能力字段中标为 false。
+当前分支已接入 run/resume/eval；memory/metrics 路由仍返回 unavailable。
 CLI 和 HTTP 已保留相应入口；不会把占位入口当作真实功能。队友可通过
 EVO_APPLICATION_FACTORY=module:factory 返回完整 ApplicationGateway，
 其操作和 snapshot 必须遵守 [INTEGRATION.md](INTEGRATION.md)。

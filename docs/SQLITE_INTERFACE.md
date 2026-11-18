@@ -20,10 +20,9 @@ Concurrent duplicate revisions conflict, with no extra child or dirty audit even
 
 Since C10, pending approval/clarification requests can be answered through CLI/Web.
 Decisions are atomic and durable; denial blocks the task. Answering does not
-automatically execute a tool or resume a model loop. The UI still disables
-run/chat forms. Execution, Agent replies, memory, metrics and eval
-remain unavailable until the full gateway is integrated. HTTP returns 503 for these
-operations; CLI returns 2. Unsupported calls do not write task or approval state.
+automatically execute a tool or resume a model loop. The current branch
+connects run/resume/chat/eval. Memory and metrics routes remain
+unavailable; HTTP returns 503 and CLI returns 2 for those operations.
 The existing --demo mode stays volatile; EVO_APPLICATION_FACTORY overrides SQLite
 mode for the future full application.
 

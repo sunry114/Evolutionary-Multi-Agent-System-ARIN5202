@@ -45,10 +45,10 @@ async function run() {
   await page.locator('#notice').filter({hasText:'SQLite'}).waitFor();
   const tasks=page.locator('#task-list article');
   assert.equal(await tasks.count(),7);
-  assert.equal(await page.locator('#run-form button').isDisabled(),true);
+  assert.equal(await page.locator('#run-form button').isEnabled(),true);
   assert.equal(await page.locator('img').count(),0);
   assert.equal(await page.evaluate(()=>window.__xss===true),false);
-  checks.push('Real SQLite rendering; XSS text stays inert; run disabled');
+  checks.push('Real SQLite rendering; XSS text stays inert; run control enabled');
   await page.screenshot({path:path.join(output,'desktop.png'),fullPage:true});
 
   await page.getByRole('button',{name:'收件箱',exact:true}).click();

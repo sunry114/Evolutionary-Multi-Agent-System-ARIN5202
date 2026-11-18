@@ -34,7 +34,8 @@ class AssignmentService:
         self.events = events
         self.memory_adjustment = memory_adjustment
 
-    def assign(self, subtask: Subtask, task_id: Optional[str] = None) -> Assignment:
+    def assign(self, subtask: Subtask, task_id: Optional[str] = None,
+               *, memory_enabled: bool = True) -> Assignment:
         bids = []
         for agent in self.agents:
             result = self.provider.complete(
@@ -53,7 +54,7 @@ class AssignmentService:
             if not isinstance(reason, str) or not reason.strip():
                 raise ValueError("Bid reason is required")
             adjustment = 0.0
-            if self.memory_adjustment is not None:
+            if memory_enabled and self.memory_adjustment is not None:
                 adjustment = float(self.memory_adjustment(agent.name, subtask.description))
                 if not math.isfinite(adjustment):
                     raise ValueError("Invalid memory adjustment")

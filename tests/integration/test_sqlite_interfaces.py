@@ -102,9 +102,11 @@ class SQLiteInterfaceTests(unittest.TestCase):
 
     def test_unavailable_backends_have_no_side_effects(self):
         before = self.app.snapshot()
-        for op in ("run", "eval", "metrics", "memory"):
+        for op in ("metrics", "memory"):
             with self.subTest(op=op), self.assertRaises(ApplicationUnavailable):
                 self.app.dispatch(op, {"prompt": "x"})
+        with self.assertRaises(ValueError):
+            self.app.dispatch("eval", {"prompt": "x"})
         self.assertEqual(self.app.snapshot(), before)
 
     def test_snapshot_real_records_and_answer_capability(self):
@@ -115,7 +117,8 @@ class SQLiteInterfaceTests(unittest.TestCase):
         self.assertEqual(snapshot["requests"][0]["id"], "r1")
         self.assertEqual(snapshot["requests"][0]["payload"], {"tool": "run_python"})
         self.assertTrue(snapshot["capabilities"]["answer"])
-        self.assertFalse(snapshot["capabilities"]["run"])
+        self.assertTrue(snapshot["capabilities"]["run"])
+        self.assertTrue(snapshot["capabilities"]["resume"])
 
     def test_task_limit_and_failed_task_query_exit(self):
         self.app.store.save_task(Task("failed", "Failed task", status=TaskStatus.FAILED))
@@ -198,7 +201,7 @@ class SQLiteInterfaceTests(unittest.TestCase):
             ("review", {"task_id": "missing", "decision": "accepted"}, 409),
             ("review", {"task_id": "t1", "decision": "accepted", "feedback": []}, 409),
             ("revision", {"task_id": "t1", "prompt": " "}, 409),
-            ("run", {"prompt": "x"}, 503), ("answer", {"request_id": "r1", "approved": True}, 409),
+            ("run", {"prompt": "x"}, 409), ("answer", {"request_id": "r1", "approved": True}, 409),
         ):
             with self.subTest(op=op):
                 self.assertEqual(self.http(address, "/api/" + op, payload, token)[0], expected)

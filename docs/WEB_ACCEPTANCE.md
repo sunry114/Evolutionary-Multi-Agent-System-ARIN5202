@@ -25,10 +25,10 @@ Desktop viewport: 1280x900; mobile viewport: 390x844.
 
 The browser actually clicks and validates:
 
-1. Stored tasks render, HTML/script-like content remains inert, run is disabled.
+1. Stored tasks render, HTML/script-like content remains inert, run control is enabled.
 2. Invalid review displays an error and allows retry; C10 also persists an explicit approval.
 3. Accept result, request changes, create linked revision and load audit trace.
-4. Task/inbox/group/DM/memory navigation and unavailable chat controls.
+4. Task/inbox/group/DM/memory navigation and live chat controls.
 5. Stop/restart the server process, reload/refresh and recover decisions/revision.
 6. Mobile layout has no horizontal overflow; no uncaught page JavaScript errors.
 

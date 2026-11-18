@@ -139,13 +139,14 @@ class ReviewRepository(Protocol):
 
 
 class MemoryRepository(Protocol):
-    def recall(
-        self,
-        agent: str,
-        query: str,
-        limit: int = 3,
-    ) -> Sequence[Experience]:
+    """An already agent-bound repository; agent selection belongs to the factory."""
+    agent: str
+
+    def recall(self, query: str, limit: int = 3) -> Sequence[Experience]:
         ...
 
     def add(self, experience: Experience) -> None:
+        ...
+
+    def adjustment(self, query: str) -> float:
         ...

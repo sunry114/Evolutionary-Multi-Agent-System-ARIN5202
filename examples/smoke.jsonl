@@ -1,0 +1,1 @@
+{"id":"report","prompt":"Create report.md containing the text done.","subtask_checks":{"s1":{"path":"report.md","exact":"done"}},"expected":[{"kind":"file_contains","agent":"builder","path":"report.md","text":"done"}]}

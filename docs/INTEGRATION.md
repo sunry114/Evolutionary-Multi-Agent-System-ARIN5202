@@ -182,7 +182,7 @@ safe ApplicationFailure (HTTP 502/CLI 1), credential absence returns unavailable
 (HTTP 503/CLI 2), bad input/state returns 409/CLI 2. Human decisions are saved;
 execution resume remains C11's responsibility.
 
-snapshot.capabilities drives disabled controls. Current run/memory/eval/metrics
+snapshot.capabilities drives disabled controls. Current memory/metrics
 remain false. A/B can supply a full factory with those methods; do not mark them
 available until they have real implementations. messages optionally accepts agent
 and returns bounded persisted human-visible history. DM data must not enter group

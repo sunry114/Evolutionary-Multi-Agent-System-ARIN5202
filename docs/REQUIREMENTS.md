@@ -1,5 +1,14 @@
 # Requirements traceability
 
+## C13 objective evaluation
+
+The `evaluation/` package validates JSONL cases, runs each case in an isolated
+state, checks fresh artifacts and stored results, and emits verifiable JSON
+with separate objective denominators and monotonic elapsed time. Scripted C11
+end-to-end and stale-file/failure regressions are covered by
+[`C13_EVALUATION.md`](C13_EVALUATION.md). The default CLI/Web `eval` gateway and
+official dataset results remain pending.
+
 ## C11 service-layer orchestration
 
 The C11 coordinator now persists plans and task transitions, schedules only ready
@@ -7,7 +16,17 @@ subtasks, records all-agent bids, delegates with depth and task-count bounds,
 pauses/resumes through C10a, and requires a verified workspace artifact before
 marking file work successful. Scripted SQLite and real Baseline Harness tests are
 documented in [C11_ORCHESTRATION.md](C11_ORCHESTRATION.md). Default CLI/Web task
-execution and the C12/C13 memory/evaluation pipeline remain integration work.
+execution is now wired by `interfaces/execution_factory.py` with explicit
+objective checks and resume; the `eval` gateway remains integration work.
+
+## C12 private experience memory
+
+Each agent has a separate SQLite memory database. The coordinator recalls only
+the selected agent's relevant experiences, gives bounded adjustments to bids,
+and records outcomes after objective verification. `memory_enabled=False`
+turns off recall, bid adjustment and writes for a task and its resumed work.
+See [C12 memory contracts and tests](C12_MEMORY.md). The memory/no-memory
+performance comparison belongs to C13 and has not yet been measured.
 
 Latest C14 milestone (2026-11-15): ChatService-backed DM/group chat, persisted
 history and ApprovalService answers are now connected. See [C14_STATUS.md](C14_STATUS.md)

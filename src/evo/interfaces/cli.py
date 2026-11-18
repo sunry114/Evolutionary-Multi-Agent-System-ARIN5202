@@ -27,9 +27,23 @@ def parser():
     commands.add_parser("task").add_argument("task_id")
     commands.add_parser("tasks").add_argument("--limit", type=int, default=100)
     commands.add_parser("messages").add_argument("--agent")
+    commands.add_parser("agents").add_argument("--file", required=True,
+                                                help="JSON array of {name,specialty} roles")
     for name in ("run", "group"):
         command = commands.add_parser(name)
         command.add_argument("prompt" if name == "run" else "message")
+        if name == "run":
+            command.add_argument("--no-memory", action="store_true")
+            command.add_argument("--expect-file")
+            command.add_argument("--expect-text")
+            command.add_argument("--checks-file", help="JSON object of s1..s5 artifact checks")
+        else:
+            command.add_argument("--execute", action="store_true", help="Start the discussed task")
+            command.add_argument("--no-memory", action="store_true")
+            command.add_argument("--expect-file")
+            command.add_argument("--expect-text")
+            command.add_argument("--checks-file")
+    commands.add_parser("resume").add_argument("task_id")
     command = commands.add_parser("dm")
     command.add_argument("agent")
     command.add_argument("message")
@@ -96,6 +110,25 @@ def main(argv=None, application=None):
             serve(app, args.port)
             return 0
         payload = {k: v for k, v in vars(args).items() if k not in ("command", "demo", "state")}
+        if args.command == "agents":
+            payload = {"agents": json.loads(Path(args.file).read_text(encoding="utf-8"))}
+        if args.command in ("run", "group") and (args.command == "run" or args.execute):
+            if bool(args.expect_file) != bool(args.expect_text):
+                raise ValueError("Run requires both expected file and text")
+            if args.checks_file and args.expect_file:
+                raise ValueError("Choose checks file or expected file and text")
+            payload = ({"prompt": args.prompt} if args.command == "run"
+                       else {"message": args.message, "execute": True})
+            payload["no_memory"] = args.no_memory
+            if args.checks_file:
+                payload["checks"] = json.loads(Path(args.checks_file).read_text(encoding="utf-8"))
+            elif args.expect_file:
+                payload["checks"] = {"s1": {"path": args.expect_file,
+                                            "contains": args.expect_text}}
+        elif args.command == "group":
+            if args.expect_file or args.expect_text or args.checks_file or args.no_memory:
+                raise ValueError("Group execution flags require --execute")
+            payload = {"message": args.message}
         if args.command == "answer":
             payload = {"request_id": args.request_id}
             payload.update({"answer": args.text} if args.text is not None else {"approved": args.approve})
