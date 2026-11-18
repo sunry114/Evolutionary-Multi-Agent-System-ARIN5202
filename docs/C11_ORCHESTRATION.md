@@ -34,9 +34,13 @@ trace, dependency failure, clarification, delegation, limits and missing evidenc
 `tests/e2e/test_c11_harness_resume.py` uses the real Baseline Harness, C10 approval
 and SQLite to pause and resume an approved Python action.
 
-This is the C11 application layer. The default CLI/Web `run` endpoint still needs
-an application factory wired to the course provider, per-Agent workspace and
-Harness configuration. C12 private memory is now available to callers that
+This is the C11 application layer. `interfaces/execution_factory.py` now wires
+the default CLI/Web `run` and explicit `resume` operations to the configured
+provider, per-Agent workspace, tool broker, approval service and Harness.
+The caller must provide trusted per-subtask artifact checks; CLI flags support
+one simple `s1` file check, while the Web API accepts a check mapping.
+Native Claude CLI and provider credentials are required for a live run.
+HKGAI's Anthropic-wire compatibility has not been verified. C12 private memory is available to callers that
 inject a per-agent memory factory; see [C12](C12_MEMORY.md). C13 objective dataset
 evaluation remains separate work. A file check must come from the trusted task caller or
 evaluation definition, not from the Agent whose work is being assessed.

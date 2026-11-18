@@ -22,8 +22,8 @@ class CliTests(unittest.TestCase):
 
     def test_missing_application_is_actionable(self):
         with tempfile.TemporaryDirectory() as state, patch.dict(os.environ, {"EVO_APPLICATION_FACTORY": ""}), contextlib.redirect_stderr(io.StringIO()) as output:
-            self.assertEqual(main(["--state", state, "run", "hello"]), 2)
-        self.assertIn("backend not connected", output.getvalue())
+            self.assertEqual(main(["--state", state, "run", "hello", "--expect-file", "hello.md", "--expect-text", "hello"]), 2)
+        self.assertIn("Execution needs", output.getvalue())
 
     def test_commands_map_to_backend(self):
         class App:

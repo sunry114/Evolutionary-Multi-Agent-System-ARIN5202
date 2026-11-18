@@ -32,6 +32,9 @@ def parser():
         command.add_argument("prompt" if name == "run" else "message")
         if name == "run":
             command.add_argument("--no-memory", action="store_true")
+            command.add_argument("--expect-file")
+            command.add_argument("--expect-text")
+    commands.add_parser("resume").add_argument("task_id")
     command = commands.add_parser("dm")
     command.add_argument("agent")
     command.add_argument("message")
@@ -98,6 +101,13 @@ def main(argv=None, application=None):
             serve(app, args.port)
             return 0
         payload = {k: v for k, v in vars(args).items() if k not in ("command", "demo", "state")}
+        if args.command == "run":
+            if bool(args.expect_file) != bool(args.expect_text):
+                raise ValueError("Run requires both expected file and text")
+            payload = {"prompt": args.prompt, "no_memory": args.no_memory}
+            if args.expect_file:
+                payload["checks"] = {"s1": {"path": args.expect_file,
+                                            "contains": args.expect_text}}
         if args.command == "answer":
             payload = {"request_id": args.request_id}
             payload.update({"answer": args.text} if args.text is not None else {"approved": args.approve})

@@ -15,8 +15,9 @@ durable approval/single-action execution with container Git tools.
 C10a now adds interchangeable Baseline/Claude Code harnesses, platform MCP tools,
 durable approval pause/recovery and an isolated native CLI runtime. See
 [C10a API, boundaries and explicit live smoke](docs/C10a_HARNESS.md).
-The full orchestration loop, automatic execution resume, memory learning and evaluation
-remain integration milestones. No unavailable baseline is claimed.
+C11 orchestration, C12 private memory and the C13 evaluation library are now
+implemented. The default application has a C11 execution factory for `run` and
+explicit `resume`; the CLI/Web `eval` gateway and formal results remain pending.
 
 ## Install and verify
 
@@ -68,14 +69,33 @@ refuses overwriting an existing key. Alternatively set HKGAI_API_KEY through you
 local environment configuration. No real key is included in this repository.
 See [provider configuration](docs/PROVIDERS.md).
 
-## Connect the team backend
+## Run a verified task
+
+The default application now wires C11 to the permitted provider and a scoped
+Harness. A simple one-subtask CLI run needs a human-supplied objective check:
+
+```bash
+EVO_PROVIDER=deepseek python -m evo run 'Create hello.md containing hello' \
+  --expect-file hello.md --expect-text hello
+python -m evo answer REQUEST_ID --approve
+python -m evo resume TASK_ID
+```
+
+Install the supported native Claude CLI and configure its path with
+`EVO_CLAUDE_CLI` if needed. The configured DeepSeek/HKGAI key must be available
+through the documented credential loader. HKGAI Anthropic-wire compatibility
+has not yet been verified. Critical actions still require explicit approval;
+answering does not execute them until `resume` is called. The Web `run` JSON
+payload accepts `checks` keyed by planned subtask ID for multi-step tasks.
+
+## Connect a custom backend
 
 A/B/C provide a factory accepting state=Path and returning ApplicationGateway:
 
 ```bash
 export EVO_APPLICATION_FACTORY=your_package.bootstrap:create_application
 python -m evo web
-python -m evo run 'Create hello.md and verify contents'
+python -m evo run 'Create hello.md and verify contents' --expect-file hello.md --expect-text hello
 python -m evo dm builder 'Summarize your role'
 python -m evo group 'Discuss how to divide this task'
 python -m evo trace TASK_ID
@@ -88,8 +108,8 @@ python -m evo answer REQUEST_ID --deny
 python -m evo eval DATASET.jsonl --output .evo/report.json --no-memory
 ```
 
-Without a factory, the default is the real SQLite query/review workspace; Agent
-execution commands remain unavailable. See [SQLite integration](docs/SQLITE_INTERFACE.md). The Web
+Without an override, the default SQLite application supplies the real C11
+execution factory. Its `eval` and `metrics` routes remain unavailable. See [SQLite integration](docs/SQLITE_INTERFACE.md). The Web
 server only binds loopback. Use the printed 127.0.0.1 URL and keep the terminal
 open. Never expose it publicly without a separate reviewed authentication layer.
 

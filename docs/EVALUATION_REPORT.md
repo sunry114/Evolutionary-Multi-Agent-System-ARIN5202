@@ -1,5 +1,9 @@
 # Evaluation report — official results pending
 
+The C13 JSONL evaluator and its scripted acceptance tests are documented in
+[C13_EVALUATION.md](C13_EVALUATION.md). They establish the measurement path,
+not official mid/final results or a measured memory benefit.
+
 Updated: 2026-11-08 (Asia/Shanghai).
 
 No official mid/final dataset has been run. No goal/subtask completion percentage,

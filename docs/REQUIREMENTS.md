@@ -1,5 +1,14 @@
 # Requirements traceability
 
+## C13 objective evaluation
+
+The `evaluation/` package validates JSONL cases, runs each case in an isolated
+state, checks fresh artifacts and stored results, and emits verifiable JSON
+with separate objective denominators and monotonic elapsed time. Scripted C11
+end-to-end and stale-file/failure regressions are covered by
+[`C13_EVALUATION.md`](C13_EVALUATION.md). The default CLI/Web `eval` gateway and
+official dataset results remain pending.
+
 ## C11 service-layer orchestration
 
 The C11 coordinator now persists plans and task transitions, schedules only ready
@@ -7,7 +16,8 @@ subtasks, records all-agent bids, delegates with depth and task-count bounds,
 pauses/resumes through C10a, and requires a verified workspace artifact before
 marking file work successful. Scripted SQLite and real Baseline Harness tests are
 documented in [C11_ORCHESTRATION.md](C11_ORCHESTRATION.md). Default CLI/Web task
-execution and C13 dataset evaluation remain integration work.
+execution is now wired by `interfaces/execution_factory.py` with explicit
+objective checks and resume; the `eval` gateway remains integration work.
 
 ## C12 private experience memory
 

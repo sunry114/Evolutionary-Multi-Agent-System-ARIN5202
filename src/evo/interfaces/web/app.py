@@ -7,7 +7,7 @@ from importlib.resources import files
 from evo.interfaces.gateway import ApplicationFailure, ApplicationUnavailable
 
 MAX_BODY = 65536
-OPERATIONS = {"run", "dm", "group", "review", "revision", "answer", "eval", "trace", "metrics", "memory", "task", "tasks", "messages"}
+OPERATIONS = {"run", "resume", "dm", "group", "review", "revision", "answer", "eval", "trace", "metrics", "memory", "task", "tasks", "messages"}
 
 
 def unique_object(pairs):

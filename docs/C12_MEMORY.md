@@ -17,8 +17,7 @@ it does not claim that the model followed them.
 `run(..., memory_enabled=False)` stores the mode in the root task's run
 configuration. The setting survives a clarification or approval resume and
 skips recall, bid adjustment and experience writes. The CLI accepts
-`run <prompt> --no-memory` for the future application gateway; the default
-SQLite gateway still does not execute `run`. C13 will use the mode for a
+`run <prompt> --no-memory` through the default application gateway. C13 uses the mode for a
 controlled memory versus no-memory evaluation. No improvement claim is made
 without that comparison.
 

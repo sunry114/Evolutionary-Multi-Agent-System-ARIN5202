@@ -180,7 +180,8 @@ class C14GatewayTests(unittest.TestCase):
         snapshot = self.app.snapshot()
         for operation in ("dm", "group", "messages", "answer", "review"):
             self.assertTrue(snapshot["capabilities"][operation])
-        for operation in ("run", "memory", "metrics", "eval"):
+        self.assertTrue(snapshot["capabilities"]["run"])
+        for operation in ("memory", "metrics", "eval"):
             self.assertFalse(snapshot["capabilities"][operation])
             with self.assertRaises(ApplicationUnavailable):
                 self.app.dispatch(operation, {})
