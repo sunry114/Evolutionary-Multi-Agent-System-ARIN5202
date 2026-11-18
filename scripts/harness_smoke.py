@@ -9,6 +9,7 @@ from pathlib import Path
 
 from evo.adapters.harness import create_harness
 from evo.adapters.harness.backend import local_claude_backend
+from evo.adapters.llm.credentials import load_key
 from evo.adapters.harness.mcp_bridge import PlatformToolBroker
 from evo.adapters.persistence.sqlite_store import SQLiteStore
 from evo.adapters.tools.docker import DockerPythonRunner
@@ -16,7 +17,7 @@ from evo.adapters.tools.filesystem import WorkspaceFilesystem
 from evo.adapters.tools.git import DockerGitTools
 from evo.application.approvals import ApprovalService
 from evo.application.executor import ActionExecutor
-from evo.config import HarnessConfig
+from evo.config import HarnessConfig, HarnessModelConfig, ProviderConfig
 from evo.domain.models import Task
 from evo.domain.statuses import TaskStatus
 from evo.ports.harness import RunRequest
@@ -28,14 +29,25 @@ SMOKE_CODE = "print('C10A_SMOKE_OK')\n"
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--live", action="store_true", required=True)
-    parser.add_argument("--development", action="store_true", required=True)
+    backend = parser.add_mutually_exclusive_group(required=True)
+    backend.add_argument("--development", action="store_true")
+    backend.add_argument("--hkgai", action="store_true", help="Use permitted HKGAI settings and private credential")
     parser.add_argument("--local-claude-settings", type=Path)
     parser.add_argument("--approve-smoke-code", action="store_true",
                         help="Pre-approve only the exact fixed smoke.py content in this isolated smoke task")
     parser.add_argument("--state", type=Path, default=Path(".evo/harness-smoke"))
     parser.add_argument("--cli", default="claude")
     args = parser.parse_args()
-    model, credential_loader = local_claude_backend(args.local_claude_settings, development=args.development)
+    if args.hkgai:
+        if args.local_claude_settings:
+            parser.error("Local Claude settings require --development")
+        provider = ProviderConfig.from_environment()
+        if provider.provider != "hkgai":
+            parser.error("--hkgai requires EVO_PROVIDER=hkgai")
+        model = HarnessModelConfig(provider="hkgai", endpoint=provider.base_url, model=provider.model)
+        credential_loader = lambda: load_key("hkgai")
+    else:
+        model, credential_loader = local_claude_backend(args.local_claude_settings, development=args.development)
     state = args.state.absolute()
     store = SQLiteStore(state / "events.sqlite3")
     task_id = "smoke-" + uuid.uuid4().hex
@@ -47,7 +59,7 @@ def main():
     broker = PlatformToolBroker(executor)
     adapter = create_harness(HarnessConfig(adapter="claude_code", cli_path=args.cli), state, broker,
                              model=model, credential_loader=credential_loader)
-    request = RunRequest(task_id, task_id, "development-smoke", workspace.workspace,
+    request = RunRequest(task_id, task_id, "installation-smoke", workspace.workspace,
                          "Use the evo platform tools to write hello.md containing exactly C10A_FILE_OK and a newline; "
                          "write smoke.py with exactly this Python source: " + repr(SMOKE_CODE) + ". "
                          "Read hello.md to verify it, then run smoke.py using run_python. "
@@ -101,7 +113,8 @@ def main():
     passed = result is not None and result.status == "success" and all(checks.values())
     report = {"passed": passed, "status": result.status if result else "unknown", "error": result.error if result else "",
               "task_id": task_id, "run_id": handle.run_id, "cli_version": adapter.config.cli_version,
-              "backend": "explicit_local_development", "formal_evaluation": False,
+              "backend": "hkgai_chat_protocol" if args.hkgai else "explicit_local_development",
+              "formal_evaluation": False,
               "initial_run_id": initial_run_id, "checks": checks,
               "artifacts": [asdict(x) for x in result.artifacts] if result else []}
     print(json.dumps(report, indent=2))

@@ -42,7 +42,15 @@ class ModelProxy:
                     if not isinstance(payload, dict):
                         raise ValueError()
                     payload["model"] = model.model
-                    body = json.dumps(payload).encode()
+                    translate = model.provider == "hkgai"
+                    if translate:
+                        if incoming.path.endswith("/count_tokens"):
+                            self.send_error(501, "Upstream token counting is unavailable")
+                            return
+                        from .chat_protocol import to_chat
+                        body = json.dumps(to_chat(payload, model.model)).encode()
+                    else:
+                        body = json.dumps(payload).encode()
                     with proxy.lock:
                         proxy.requests += 1
                         if proxy.requests > 64:
@@ -59,18 +67,38 @@ class ModelProxy:
                     if endpoint.path.rstrip("/").endswith("/v1"):
                         route = route[3:]
                     target = endpoint.path.rstrip("/") + route
-                    if incoming.query:
+                    if translate:
+                        target = (endpoint.path.rstrip("/") or "/v1") + "/chat/completions"
+                    if incoming.query and not translate:
                         target += "?" + incoming.query
-                    headers = {"Content-Type": "application/json", "x-api-key": credential,
-                               "Authorization": "Bearer " + credential, "anthropic-version": "2023-06-01"}
+                    headers = {"Content-Type": "application/json", "Authorization": "Bearer " + credential}
+                    if not translate:
+                        headers.update({"x-api-key": credential, "anthropic-version": "2023-06-01"})
                     beta = self.headers.get("anthropic-beta", "")
-                    if beta and len(beta) < 2048:
+                    if beta and len(beta) < 2048 and not translate:
                         headers["anthropic-beta"] = beta
                     connection.request("POST", target, body, headers)
                     response = connection.getresponse()
                     # Do not follow or relay Location/Set-Cookie/credentials.
                     if 300 <= response.status < 400:
                         self.send_error(502, "Model redirect denied")
+                        return
+                    if translate:
+                        from .chat_protocol import from_chat, as_sse
+                        data = response.read(max_bytes + 1)
+                        if response.status != 200 or len(data) > max_bytes:
+                            raise ValueError()
+                        translated = from_chat(json.loads(data), model.model)
+                        encoded = as_sse(translated) if payload.get("stream") else json.dumps(translated).encode()
+                        with proxy.lock:
+                            proxy.bytes += len(data) + len(encoded)
+                            if proxy.bytes > max_bytes:
+                                raise ValueError()
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/event-stream" if payload.get("stream") else "application/json")
+                        self.send_header("Content-Length", str(len(encoded)))
+                        self.end_headers()
+                        self.wfile.write(encoded)
                         return
                     self.send_response(response.status)
                     self.send_header("Content-Type", response.getheader("Content-Type", "application/json"))

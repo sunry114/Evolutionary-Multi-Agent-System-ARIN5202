@@ -65,7 +65,9 @@ Docker 不可用、镜像缺失、CLI 无法启动、协议错误或资源超限
 `HarnessModelConfig` 单独描述 Anthropic wire protocol 后端：
 
 - 正式模式仅允许明确列出的 DeepSeek/HKGAI endpoint；DeepSeek 的 Harness endpoint
-  为 `https://api.deepseek.com/anthropic`。HKGAI 的该协议兼容性仍需单独真实验证。
+  为 `https://api.deepseek.com/anthropic`。2026-11-18 已验证老师 HKGAI 地址仅支持
+  Chat Completions：固定上游代理增加文本/工具协议转换，真实审批/执行/恢复冒烟通过。
+  HKGAI 不支持 token-count 路由；详见 [本地环境与协议边界](LOCAL_LINUX_SETUP.md)。
 - 第三方或 HTTP endpoint 必须使用 `provider='development', development=True`。
   `evaluation=True` 拒绝开发配置；开发冒烟不属于官方评测结果。
 - 凭据由可信 `credential_loader` 提供，配置对象、命令行、Docker 环境和 checkpoint

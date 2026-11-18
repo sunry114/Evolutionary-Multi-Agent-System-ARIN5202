@@ -53,6 +53,10 @@ python -m evo --demo run 'Create hello.md'
 # Exits 1 with status=blocked because this is not real execution.
 ```
 
+Windows users can run the execution environment in WSL without replacing Windows.
+See [local Linux installation and launch](docs/LOCAL_LINUX_SETUP.md) for the installed
+environment, HKGAI Harness protocol bridge, and real approval/execution smoke check.
+
 ## Configure HKGAI on Linux
 
 The instructor-provided service is https://api1.hkgai.net. The verified API base
