@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -66,7 +67,7 @@ class ExecutionFactoryTests(unittest.TestCase):
             app = SQLiteApplication(temp, provider=Provider(), agents=(Agent("builder", "documents"),))
             called = []
             class Coordinator:
-                def run(self, prompt, *, checks, task_id, memory_enabled):
+                def run(self, prompt, *, checks, task_id, memory_enabled, group_context=None):
                     called.append((prompt, checks["s1"].path, memory_enabled))
                     app.store.save_task(Task(task_id, prompt, status=TaskStatus.WAITING_HUMAN))
                     return {"task": {"id": task_id, "status": "waiting_human"}, "subtasks": []}
@@ -122,7 +123,8 @@ class ExecutionFactoryTests(unittest.TestCase):
             roles = [{"name": name, "specialty": name} for name in ("a", "b", "c", "d")]
             app.dispatch("agents", {"agents": roles})
             class Coordinator:
-                def run(self, prompt, *, checks, task_id, memory_enabled):
+                def run(self, prompt, *, checks, task_id, memory_enabled, group_context):
+                    self.context = group_context
                     self.prompt = prompt
                     return {"task": {"id": task_id, "status": "waiting_human"}, "subtasks": []}
             coordinator = Coordinator()
@@ -131,7 +133,57 @@ class ExecutionFactoryTests(unittest.TestCase):
                     "checks": {"s1": {"path": "report.md", "exact": "done"}}})
             self.assertEqual(result["status"], "waiting_human")
             self.assertEqual(len(result["replies"]), 4)
+            self.assertEqual([row["sender"] for row in coordinator.context], ["human", "a", "b", "c", "d"])
             self.assertEqual(coordinator.prompt, "Create report.md")
+
+    def test_group_clarification_restores_confirmed_requirements_and_builds_slide_plan(self):
+        class DiscussionProvider(Provider):
+            def complete(self, messages, json_object=False):
+                if "Decompose the goal" in messages[0]["content"]:
+                    self.inputs = json.loads(messages[1]["content"])
+                    if "slides.html" not in self.inputs["goal"]:
+                        return {"question": "Which file and title should we use?"}
+                    return {"subtasks": [{"id": "s1", "description": "Present the confirmed risk analysis"}],
+                            "checks": {"s1": {"path": "slides.html", "contains": "Risk analysis"}}}
+                if "Bid honestly" in messages[0]["content"]:
+                    return super().complete(messages, json_object)
+                return {"reply": "Ready"}
+
+        with tempfile.TemporaryDirectory() as temp, patch.dict("os.environ", {"EVO_HARNESS_ADAPTER": "baseline"}):
+            provider = DiscussionProvider()
+            app = SQLiteApplication(temp, provider=provider)
+            app.dispatch("group", {"message": "Confirmed: explain investment risks."})
+            app.dispatch("dm", {"agent": "builder", "message": "private note"})
+            result = app.dispatch("group", {"message": "Prepare the presentation", "execute": True})
+            self.assertEqual(result["status"], "waiting_human")
+            context = provider.inputs["group_history"]
+            self.assertIn({"sender": "human", "content": "Confirmed: explain investment risks."}, context)
+            self.assertNotIn("private note", str(context))
+            root = result["task"]["id"]
+            app.dispatch("group", {"message": "Unrelated later discussion"})
+            app = SQLiteApplication(temp, provider=provider)
+            request = app.store.list_pending_requests()[0]
+            app.dispatch("answer", {"request_id": request["id"], "answer": "slides.html, titled Risk analysis"})
+            app.dispatch("resume", {"task_id": root})
+            self.assertEqual(provider.inputs["group_history"], context)
+            plan = next(e["payload"] for e in app.store.list_events(root) if e["event_type"] == "plan_created")
+            self.assertEqual(plan["checks"]["s1"]["purpose"], "slides")
+            self.assertEqual(plan["checks"]["s1"]["contains"], "Risk analysis")
+
+    def test_slide_artifact_generation_and_objective_verification(self):
+        first = '<section id="intro"><h1>Risk analysis</h1><a href="#risk">Next</a></section>'
+        second = '<section id="risk"><h1>Risk factors</h1></section>'
+        for body, expected in ((first + second, "success"), (first, "failed"),
+                               (first.replace("#risk", "#missing") + second, "failed"),
+                               ("Risk analysis", "failed")):
+            with self.subTest(body=body), tempfile.TemporaryDirectory() as temp:
+                coordinator = create_orchestrator(temp, agents=(Agent("builder", "slides"),),
+                                                  provider=Provider(), harness_config=HarnessConfig(adapter="baseline"))
+                result = coordinator.run("Prepare slides", checks={"s1": ArtifactCheck("slides.html", contains="Risk analysis")},
+                                         actions={"s1": (ToolCall("write_file", {"path": "slides.html", "purpose": "slides",
+                                                                                "content": body}),)})
+                self.assertEqual(result["task"]["status"], expected)
+                self.assertEqual((Path(temp) / "agents/builder/workspace/slides.html").read_text(), body)
 
     def test_resume_uses_task_roles_after_workspace_roles_change(self):
         with tempfile.TemporaryDirectory() as temp:

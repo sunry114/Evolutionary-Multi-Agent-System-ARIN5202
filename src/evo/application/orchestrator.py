@@ -2,42 +2,16 @@
 
 from __future__ import annotations
 
-import hashlib
+import json
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
+
+from evo.application.artifact_checks import ArtifactCheck, SLIDE_FORMAT
 
 from evo.domain.models import Experience, Message, Task
 from evo.domain.statuses import TaskStatus
 from evo.domain.policies import DEFAULT_LIMITS, validate_execution_budget
-from evo.ports.harness import ArtifactRef, ResumeRef, RunRequest, ToolCall, identifier
-
-
-@dataclass(frozen=True)
-class ArtifactCheck:
-    path: str
-    purpose: str = "document"
-    contains: str = ""
-    exact: str | None = None
-
-    def __post_init__(self):
-        if not isinstance(self.path, str) or not self.path or not isinstance(self.contains, str) or (
-                self.exact is not None and not isinstance(self.exact, str)) or (
-                not self.contains and self.exact is None):
-            raise ValueError("Artifact check needs a path and expected content")
-
-    def verify(self, workspace, artifacts: tuple[ArtifactRef, ...]) -> bool:
-        # A pre-existing file and a model-provided evidence string are insufficient.
-        artifact = next((item for item in artifacts
-                         if item.path == self.path and item.purpose == self.purpose), None)
-        if artifact is None:
-            return False
-        try:
-            content = workspace.read_file(self.path, purpose=self.purpose)
-        except (OSError, ValueError):
-            return False
-        return (hashlib.sha256(content.encode("utf-8")).hexdigest() == artifact.sha256
-                and (self.exact is None or content == self.exact)
-                and self.contains in content)
+from evo.ports.harness import ResumeRef, RunRequest, ToolCall, identifier
 
 
 class Orchestrator:
@@ -109,7 +83,7 @@ class Orchestrator:
     def run(self, goal: str, *, checks: dict[str, ArtifactCheck],
             actions: dict[str, tuple[ToolCall, ...]] | None = None,
             required_inputs=None, task_id: str | None = None,
-            memory_enabled: bool = True):
+            memory_enabled: bool = True, group_context=None):
         if not isinstance(goal, str) or not goal.strip():
             raise ValueError("Goal cannot be empty")
         if not isinstance(checks, dict) or not all(
@@ -130,6 +104,7 @@ class Orchestrator:
             raise ValueError("Invalid memory mode")
         self.store.save_task(Task(task_id, goal.strip()))
         self._event(task_id, "run_config", {
+            "group_context": group_context,
             "memory_enabled": memory_enabled,
             "agents": [{"name": agent.name, "specialty": agent.specialty}
                        for agent in self.agents.values()],
@@ -137,11 +112,17 @@ class Orchestrator:
             "actions": {key: [asdict(x) for x in value] for key, value in actions.items()},
         })
         self._move(task_id, "planning")
-        return self._plan(task_id, goal.strip(), checks, actions, required_inputs)
+        return self._plan(task_id, goal.strip(), checks, actions, required_inputs, group_context)
 
-    def _plan(self, root_id, goal, checks, actions, required_inputs=None):
+    def _plan(self, root_id, goal, checks, actions, required_inputs=None, group_context=None):
         try:
-            plan = self.planner.plan(goal, task_id=root_id, required_inputs=required_inputs)
+            options = {}
+            if group_context is not None:
+                options = {"group_context": group_context,
+                           "acceptance": {key: asdict(check) for key, check in checks.items()}}
+            plan = self.planner.plan(goal, task_id=root_id, required_inputs=required_inputs, **options)
+            if group_context is not None and not checks and not plan.question:
+                checks = plan.checks
             if plan.question:
                 self._event(root_id, "clarification_requested",
                             {"request_id": plan.request_id, "question": plan.question})
@@ -188,6 +169,10 @@ class Orchestrator:
         return workspace, request
 
     def _execute(self, task_id, owner, description, check, actions, *, resume=False):
+        if check is not None:
+            description += "\nArtifact acceptance: " + json.dumps(asdict(check), ensure_ascii=False)
+            if check.purpose == "slides":
+                description += "\n" + SLIDE_FORMAT
         workspace, request = self._request(task_id, owner, description, actions)
         validate_execution_budget(0, len(request.actions), 0,
                                   sum(x.name == "search" for x in request.actions), self.limits)
@@ -307,11 +292,18 @@ class Orchestrator:
             if answer["status"] != "answered" or not answer["answer"]:
                 raise ValueError("Clarification has not been answered")
             config = self._last_event(root_id, "run_config")
+            clarified_goal = root["description"]
+            for event in self.store.list_events(root_id):
+                if event["event_type"] == "clarification_requested":
+                    resolved = self.store.get_approval_request(event["payload"]["request_id"])
+                    if resolved["status"] == "answered":
+                        clarified_goal += ("\nPlanner question: " + event["payload"]["question"]
+                                           + "\nClarification: " + resolved["answer"]["answer"])
             self._move(root_id, "planning")
-            return self._plan(root_id, root["description"] + "\nClarification: " +
-                              answer["answer"]["answer"],
+            return self._plan(root_id, clarified_goal,
                               {k: ArtifactCheck(**v) for k, v in config["checks"].items()},
-                              {k: tuple(ToolCall(**x) for x in v) for k, v in config["actions"].items()})
+                              {k: tuple(ToolCall(**x) for x in v) for k, v in config["actions"].items()},
+                              group_context=config.get("group_context"))
         pending = next((row for row in self.store.list_children(root_id)
                         if row["status"] == "waiting_human"), None)
         if pending:

@@ -112,10 +112,21 @@ python -m evo --state .evo group 'Create report.md containing hello' \
 python -m evo --state .evo run 'Create the deliverables' --checks-file checks.json
 ```
 
-`group --execute` saves all role replies, then runs the original human goal
-with objective checks. Plain `group` remains a discussion. Formal mid-test
-results still require the released dataset, native Harness runtime, provider
-credentials and an official dataset.
+`group --execute` plans from the current goal and a snapshot of this state's
+public group discussion. Confirm the deliverable paths and expected content in
+the group. You may omit the check flags (or leave both Web fields blank) to
+derive per-subtask checks from the discussion. Missing criteria can trigger a
+clarification; answer it and resume the root task. Explicit checks take priority.
+
+For a standalone HTML slide deck, confirm the filename and a required title or
+phrase. The executor writes the file with purpose `slides`. Verification checks
+the artifact hash, expected content, and at least two nonempty sections with
+unique IDs and native links to each next section. For example:
+
+```bash
+python -m evo --state .evo group 'Confirmed: deliver slides.html containing Investment risks.'
+python -m evo --state .evo group 'Build the agreed slide deck.' --execute
+```
 
 ## Connect a custom backend
 
@@ -323,4 +334,4 @@ shows stored task timing/completion snapshots, and Web has memory/metrics/JSONL
 evaluation controls. Formal scenario evaluation remains B's C13 responsibility;
 D provides entries and delivery evidence. Chat-only exports cannot establish
 actual execution time or task completion. See the runbook for the Linux/Docker
-prerequisites and the HTML-versus-Markdown/TXT constraint conflict.
+prerequisites and the slide artifact format.

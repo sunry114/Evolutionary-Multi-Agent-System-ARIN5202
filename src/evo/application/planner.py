@@ -3,7 +3,9 @@
 import json
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from evo.application.artifact_checks import parse_checks
 from typing import Optional, Tuple
 
 from evo.domain.models import Agent, Subtask
@@ -15,6 +17,7 @@ class PlanResult:
     subtasks: Tuple[Subtask, ...] = ()
     question: Optional[str] = None
     request_id: Optional[str] = None
+    checks: dict = field(default_factory=dict)
 
 
 class StoredClarificationRequests:
@@ -46,7 +49,7 @@ class Planner:
             raise ValueError("Clarification store did not return a request ID")
         return PlanResult(question=question, request_id=request_id)
 
-    def plan(self, goal, task_id=None, required_inputs=None):
+    def plan(self, goal, task_id=None, required_inputs=None, *, group_context=None, acceptance=None):
         if not isinstance(goal, str) or not goal.strip():
             raise ValueError("Goal cannot be empty")
         # Callers can declare inputs that must exist before planning. None,
@@ -63,6 +66,20 @@ class Planner:
             return self._clarify("Please provide the missing required input(s): "
                                  + ", ".join(missing) + ".", task_id)
         specs = {agent.name: agent.specialty for agent in self.agents}
+        inputs = {"goal": goal, "agents": specs, "required_inputs": required_inputs}
+        instructions = ""
+        if group_context is not None:
+            inputs.update(group_history=group_context, explicit_checks=acceptance)
+            instructions = (" Use the ordered group discussion as context. Apply the human's confirmed "
+                            "requirements and acceptance criteria relevant to the current goal. Agent "
+                            "proposals need human agreement. Carry decisions into subtask descriptions; "
+                            "ask for clarification if relevant decisions conflict or are insufficient.")
+            if acceptance:
+                instructions += " Match the explicit check IDs and delivery criteria."
+            else:
+                instructions += (" Return checks keyed by every subtask ID. Each needs path and contains "
+                                 "or exact text drawn from agreed deliverables. Use purpose slides for "
+                                 ".html, code for .py. Ask the human for missing acceptance details.")
         result = self.provider.complete(
             [{"role": "system", "content":
               "Decompose the goal into 1 to 5 independently verifiable subtasks. "
@@ -71,9 +88,9 @@ class Planner:
               "specific artifact, target or constraint needed to produce a "
               "verifiable result. If it is absent or ambiguous, return one "
               "clarification question instead of inventing it. Return JSON "
-              "{question:null,subtasks:[{id,description,skills,depends_on}]}"},
+              "{question:null,subtasks:[{id,description,skills,depends_on}]}" + instructions},
              {"role": "user", "content": json.dumps(
-                 {"goal": goal, "agents": specs, "required_inputs": required_inputs},
+                 inputs,
                  ensure_ascii=False)}],
             json_object=True)
         if not isinstance(result, dict):
@@ -100,4 +117,12 @@ class Planner:
                 raise ValueError("Invalid subtask ID or description")
             subtasks.append(Subtask(identifier, description, tuple(skills), tuple(dependencies)))
         validate_plan(subtasks)
-        return PlanResult(tuple(subtasks))
+        checks = {}
+        if group_context is not None:
+            try:
+                checks = parse_checks(acceptance or result.get("checks"))
+                if set(checks) != {item.id for item in subtasks}:
+                    raise ValueError("Incomplete plan coverage")
+            except ValueError:
+                return self._clarify("Please confirm the output path and expected content for each subtask.", task_id)
+        return PlanResult(tuple(subtasks), checks=checks)

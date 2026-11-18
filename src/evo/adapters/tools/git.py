@@ -197,7 +197,7 @@ class DockerGitTools(DockerPythonRunner):
             raise ValueError("Commit requires an explicit file list and bounded message")
         for path in paths:
             # Explicit purposes let code/data/config coexist with Markdown reports.
-            purpose = {".py": "code", ".json": "data", ".csv": "data", ".yaml": "config", ".yml": "config"}.get(Path(path).suffix.lower(), "document")
+            purpose = {".html": "slides", ".py": "code", ".json": "data", ".csv": "data", ".yaml": "config", ".yml": "config"}.get(Path(path).suffix.lower(), "document")
             validate_file_path(path, purpose)
             self.filesystem.read_file(path, purpose=purpose)
         if len(set(paths)) != len(paths):

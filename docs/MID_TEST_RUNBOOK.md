@@ -24,9 +24,10 @@ Mid_Test.zip 的 README 要求：3 个场景，各配置 4 个角色；每场景
 应先通过群聊协商验收条件，并记录人类确认，再执行任务。若 planner 拆分与人类
 确认的检查项不一致，应澄清/调整协议，不能把未验证子任务记作成功。
 
-存在明确格式冲突：总要求限制文档为 Markdown/TXT，而场景任务要求 HTML 幻灯片。
-当前 document 工具拒绝 .html。必须由老师确认课程特定任务如何覆盖总限制；
-本次不擅自放宽工具策略，也不把 Markdown 结果伪称已交付 HTML。
+场景 3 的 HTML 幻灯片使用专用 `slides` 用途写入和交换。执行时使用
+`write_file(path="slides.html", purpose="slides", ...)`。每页写成带唯一 ID 的
+非空 section，在前一页内用原生片段链接指向下一页。验收会检查本次产物的
+哈希、约定内容、页数与链接。另用浏览器检查展示效果，结合研究证据评审内容。
 
 ## 3. 本地私有文件位置
 
@@ -74,7 +75,8 @@ python -m evo audit-midtest "D:\Personal\Desktop\mid-test1&2.zip" --output .evo/
    不能直接复制成 Linux 路径。保持每个场景一个 state，两个任务顺序执行。
 3. 使用 python -m evo --state .evo/midtest-new/scenario_1 web。
    核对已配置四角色，先把 task_1.txt 原文发到群聊。根据真实对话回答问题，
-   与团队确认客观验收检查。使用已有 run/group --execute 和 checks-file 执行；
+   与团队确认目标、交付路径及预期内容，再用 group --execute 发起执行。规划器读取该场景
+   的群聊快照，并把协商结果转为子任务及产物检查。也可显式指定 --checks-file；
    经人类审批后显式 resume 根任务。
 4. 保留 Task 1 的数据库、工作区和记忆，在同一 state 执行 Task 2。
    只有切换场景时才使用下一场景 state。禁止将这 6 个开放任务直接塞进
@@ -93,5 +95,5 @@ B 仍需提供实际使用的 Linux/Docker 环境与任务/产物证据。
 ## 6. D 的验收边界
 
 本次补的是可用的评测操作入口、记忆/状态指标展示、私有场景准备和可核对的
-证据审计。正式 Mid Test 跑分、场景 3、HTML 冲突澄清和最终记忆消融尚未完成，
+证据审计。正式 Mid Test 跑分、场景 3 的正式产物和最终记忆消融尚未完成，
 不能把这些标为已验收。浏览器/单元测试使用合成夹具，不能代替老师数据的实际表现。

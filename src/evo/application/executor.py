@@ -47,7 +47,7 @@ class ActionExecutor:
             for path in args["paths"]:
                 # The Git port validates paths; hash through the workspace port.
                 suffix = path.rsplit(".", 1)[-1].lower()
-                purpose = {"py": "code", "json": "data", "csv": "data", "yaml": "config", "yml": "config"}.get(suffix, "document")
+                purpose = {"html": "slides", "py": "code", "json": "data", "csv": "data", "yaml": "config", "yml": "config"}.get(suffix, "document")
                 content = self.workspace.read_file(path, purpose=purpose)
                 payload["sha256"][path] = hashlib.sha256(content.encode("utf-8")).hexdigest()
         if name == "git_push":

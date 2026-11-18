@@ -10,8 +10,7 @@ from evo.application.reviews import ReviewService
 from evo.application.approvals import ApprovalService
 from evo.application.chat import ChatService
 from evo.domain.models import Agent
-from evo.application.orchestrator import ArtifactCheck
-from evo.adapters.tools.filesystem import validate_file_path
+from evo.application.artifact_checks import parse_checks
 from evo.interfaces.gateway import ApplicationFailure, ApplicationUnavailable
 from evo.interfaces.agent_registry import load_agents, parse_agents, save_agents
 
@@ -55,32 +54,15 @@ class SQLiteApplication:
         return create_orchestrator(self.state, agents=agents or self.agents, store=self.store,
                                    provider=self._provider)
 
-    @staticmethod
-    def _checks(value):
-        if not isinstance(value, dict) or not 1 <= len(value) <= 5:
-            raise ValueError("Provide 1 to 5 objective subtask checks")
-        checks = {}
-        for key, raw in value.items():
-            if key not in ("s1", "s2", "s3", "s4", "s5") or not isinstance(raw, dict):
-                raise ValueError("Invalid subtask check")
-            if "path" not in raw or set(raw) - {"path", "purpose", "contains", "exact"}:
-                raise ValueError("Invalid subtask check fields")
-            check = ArtifactCheck(**raw)
-            validate_file_path(check.path, check.purpose)
-            if len(check.contains.encode()) > 8192 or (
-                    check.exact is not None and len(check.exact.encode()) > 8192):
-                raise ValueError("Objective check is oversized")
-            checks[key] = check
-        return checks
-
-    def run_task(self, payload):
+    def run_task(self, payload, *, group_context=None):
         self._refresh_agents()
         if set(payload) - {"prompt", "checks", "no_memory"}:
             raise ValueError("Invalid run fields")
         prompt = required_text(payload, "prompt")
         if type(payload.get("no_memory", False)) is not bool:
             raise ValueError("Invalid memory mode")
-        checks = self._checks(payload.get("checks"))
+        checks = ({} if group_context is not None and "checks" not in payload
+                  else parse_checks(payload.get("checks")))
         try:
             coordinator = self._coordinator()
         except Exception:
@@ -89,7 +71,8 @@ class SQLiteApplication:
         task_id = uuid.uuid4().hex
         try:
             result = coordinator.run(prompt, checks=checks, task_id=task_id,
-                                     memory_enabled=not payload.get("no_memory", False))
+                                     memory_enabled=not payload.get("no_memory", False),
+                                     group_context=group_context)
         except Exception:
             return {"status": "failed", "task_id": task_id,
                     "message": "Task failed; inspect its trace for the recorded state."}
@@ -259,12 +242,18 @@ class SQLiteApplication:
                 if set(payload) - {"message", "execute", "checks", "no_memory"}:
                     raise ValueError("Invalid group execution fields")
                 prompt = required_text(payload, "message")
-                self._checks(payload.get("checks"))
+                if "checks" in payload:
+                    parse_checks(payload["checks"])
                 if type(payload.get("no_memory", False)) is not bool:
                     raise ValueError("Invalid memory mode")
-                discussion = self.chat("group", {"message": prompt})
-                run = self.run_task({"prompt": prompt, "checks": payload["checks"],
-                                     "no_memory": payload.get("no_memory", False)})
+                with self._chat_lock:
+                    discussion = self.chat("group", {"message": prompt})
+                    context = [{k: row[k] for k in ("sender", "content")}
+                               for row in self.store.list_group_messages() if not row.get("task_id")]
+                run_fields = {"prompt": prompt, "no_memory": payload.get("no_memory", False)}
+                if "checks" in payload:
+                    run_fields["checks"] = payload["checks"]
+                run = self.run_task(run_fields, group_context=context)
                 return {**run, "replies": discussion["replies"]}
             if operation == "group" and set(payload) != {"message"}:
                 raise ValueError("Invalid group fields")

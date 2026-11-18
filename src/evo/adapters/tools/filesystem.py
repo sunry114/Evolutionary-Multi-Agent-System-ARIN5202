@@ -18,6 +18,7 @@ MAX_FILE_BYTES = 1024 * 1024
 MAX_DIRECTORY_ENTRIES = 1000
 PURPOSE_SUFFIXES = {
     "document": DOCUMENT_SUFFIXES,
+    "slides": frozenset({".html"}),
     "code": frozenset({".py"}),
     "config": frozenset({".json", ".yaml", ".yml"}),
     "data": frozenset({".json", ".csv"}),

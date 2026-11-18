@@ -17,7 +17,7 @@ def schema(properties, required=()):
 
 
 S = {"type": "string"}
-PURPOSE = {"type": "string", "enum": ["document", "code", "config", "data"]}
+PURPOSE = {"type": "string", "enum": ["document", "code", "config", "data", "slides"]}
 SCHEMAS = {
     "read_file": schema({"path": S, "purpose": PURPOSE}, ("path",)),
     "write_file": schema({"path": S, "content": S, "purpose": PURPOSE, "overwrite": {"type": "boolean"}}, ("path", "content")),

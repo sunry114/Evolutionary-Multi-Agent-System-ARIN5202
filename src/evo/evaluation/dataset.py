@@ -53,7 +53,9 @@ def _check(raw: object) -> dict:
     check = dict(raw)
     if kind.startswith("file_"):
         validate_agent(check["agent"])
-        check["purpose"] = check.get("purpose", "document")
+        if not isinstance(check["path"], str):
+            raise ValueError("Expected a file path")
+        check.setdefault("purpose", "slides" if check["path"].lower().endswith(".html") else "document")
         validate_file_path(check["path"], check["purpose"])
     elif kind == "test":
         if not isinstance(check["name"], str) or not _IDENTIFIER.fullmatch(check["name"]):
