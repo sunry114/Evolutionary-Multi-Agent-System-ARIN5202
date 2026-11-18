@@ -32,6 +32,8 @@ class CliTests(unittest.TestCase):
                 return {"status": "success"}
         app = App()
         commands = [
+            (["run", "Python report", "--no-memory"], "run",
+             {"prompt": "Python report", "no_memory": True}),
             (["dm", "builder", "hello"], "dm", {"agent": "builder", "message": "hello"}),
             (["answer", "r1", "--deny"], "answer", {"request_id": "r1", "approved": False}),
             (["revision", "t1", "fix"], "revision", {"task_id": "t1", "prompt": "fix"}),

@@ -36,6 +36,7 @@ and SQLite to pause and resume an approved Python action.
 
 This is the C11 application layer. The default CLI/Web `run` endpoint still needs
 an application factory wired to the course provider, per-Agent workspace and
-Harness configuration. C12 memory recall and C13 objective dataset evaluation
-remain separate work. A file check must come from the trusted task caller or
+Harness configuration. C12 private memory is now available to callers that
+inject a per-agent memory factory; see [C12](C12_MEMORY.md). C13 objective dataset
+evaluation remains separate work. A file check must come from the trusted task caller or
 evaluation definition, not from the Agent whose work is being assessed.

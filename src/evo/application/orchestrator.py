@@ -6,7 +6,8 @@ import hashlib
 import uuid
 from dataclasses import asdict, dataclass
 
-from evo.domain.models import Message, Task
+from evo.domain.models import Experience, Message, Task
+from evo.domain.statuses import TaskStatus
 from evo.domain.policies import DEFAULT_LIMITS, validate_execution_budget
 from evo.ports.harness import ArtifactRef, ResumeRef, RunRequest, ToolCall, identifier
 
@@ -43,7 +44,7 @@ class Orchestrator:
     """Persist task states; call one scoped Harness per ready subtask."""
 
     def __init__(self, store, planner, assignment, harness_factory, workspace_factory,
-                 *, agents, limits=DEFAULT_LIMITS):
+                 *, agents, limits=DEFAULT_LIMITS, memory_factory=None):
         self.store = store
         self.planner = planner
         self.assignment = assignment
@@ -54,6 +55,42 @@ class Orchestrator:
         if not self.agents or len(self.agents) != len(agents):
             raise ValueError("Agent registry must be nonempty and unique")
         self.limits = limits
+        self.memory_factory = memory_factory
+        if memory_factory is not None:
+            self.assignment.memory_adjustment = lambda agent, query: self._memory_store(agent).adjustment(query)
+
+    def _memory_store(self, owner):
+        memory = self.memory_factory(owner)
+        if memory.agent != owner:
+            raise ValueError("Memory repository agent scope mismatch")
+        return memory
+
+    def _memory_enabled(self, task_id):
+        task = self.store.get_task(task_id)
+        while task["parent_id"]:
+            task = self.store.get_task(task["parent_id"])
+        config = self._last_event(task["id"], "run_config")
+        return self.memory_factory is not None and (config is None or config.get("memory_enabled", True))
+
+    def _remember(self, task_id):
+        task = self.store.get_task(task_id)
+        if (not self._memory_enabled(task_id) or task["owner"] not in self.agents
+                or task["status"] not in ("success", "failed", "blocked")
+                or self._last_event(task_id, "memory_recorded") is not None):
+            return
+        verified = self._last_event(task_id, "objective_verified")
+        status = TaskStatus(task["status"])
+        evidence = verified["path"] if verified else ""
+        if status == TaskStatus.SUCCESS:
+            lesson = "Verified artifact at " + evidence
+            category = None
+        else:
+            category = "verification" if task["result"] == "Objective evidence missing" else (
+                "approval" if status == TaskStatus.BLOCKED else "execution")
+            lesson = "Caution: " + category + " failure; verify the task and its evidence before retrying."
+        self._memory_store(task["owner"]).add(Experience(
+            task["owner"], task["description"], status, lesson, evidence, category))
+        self._event(task_id, "memory_recorded", {"outcome": status.value, "failure_category": category})
 
     def _event(self, task_id, kind, payload):
         self.store.append_event(task_id=task_id, event_type=kind, actor="orchestrator",
@@ -71,7 +108,8 @@ class Orchestrator:
 
     def run(self, goal: str, *, checks: dict[str, ArtifactCheck],
             actions: dict[str, tuple[ToolCall, ...]] | None = None,
-            required_inputs=None, task_id: str | None = None):
+            required_inputs=None, task_id: str | None = None,
+            memory_enabled: bool = True):
         if not isinstance(goal, str) or not goal.strip():
             raise ValueError("Goal cannot be empty")
         if not isinstance(checks, dict) or not all(
@@ -88,8 +126,11 @@ class Orchestrator:
         identifier(task_id)
         if len(task_id) > 110:
             raise ValueError("Task identifier is too long for subtasks")
+        if type(memory_enabled) is not bool:
+            raise ValueError("Invalid memory mode")
         self.store.save_task(Task(task_id, goal.strip()))
         self._event(task_id, "run_config", {
+            "memory_enabled": memory_enabled,
             "checks": {key: asdict(value) for key, value in checks.items()},
             "actions": {key: [asdict(x) for x in value] for key, value in actions.items()},
         })
@@ -125,8 +166,22 @@ class Orchestrator:
 
     def _request(self, task_id, owner, description, actions):
         workspace = self.workspace_factory(owner)
+        memory = ()
+        if self._memory_enabled(task_id):
+            saved = self._last_event(task_id, "memory_context")
+            if saved is not None:
+                memory = tuple(saved["lessons"])
+            else:
+                recalled = self._memory_store(owner).recall(description)
+                memory = tuple(("Prior verified success: " if item.outcome == TaskStatus.SUCCESS
+                                else "Caution from prior " + item.outcome.value + ": ") + item.lesson
+                               for item in recalled)
+                self._event(task_id, "memory_context", {"count": len(memory),
+                                                          "outcomes": [item.outcome.value for item in recalled],
+                                                          "lessons": list(memory)})
         request = RunRequest(task_id, owner, task_id, workspace.workspace,
                              description, role=self.agents[owner].specialty,
+                             memory=memory,
                              actions=tuple(ToolCall(**item) for item in actions))
         return workspace, request
 
@@ -205,7 +260,8 @@ class Orchestrator:
                     self._move(child_id, "ready")
                     owner = self.assignment.assign(
                         Subtask(item["id"], item["description"], tuple(item["skills"]),
-                                tuple(item["depends_on"])), root_id).owner
+                                tuple(item["depends_on"])), root_id,
+                        memory_enabled=self._memory_enabled(root_id)).owner
                     if owner not in self.agents:
                         raise ValueError("Assignment selected unknown agent")
                     self._move(child_id, "assigned", owner=owner)
@@ -229,6 +285,7 @@ class Orchestrator:
                 self._event(child_id, "orchestration_error", {"code": "execution_failed"})
                 if self.store.get_task(child_id)["status"] not in ("failed", "blocked"):
                     self._move(child_id, "failed", result="Execution failed")
+            self._remember(child_id)
             if self.store.get_task(child_id)["status"] == "waiting_human":
                 self._move(root_id, "waiting_human")
                 return self.snapshot(root_id)
@@ -299,6 +356,7 @@ class Orchestrator:
         except Exception:
             if self.store.get_task(child_id)["status"] == "running":
                 self._move(child_id, "failed", result="Delegated execution failed")
+        self._remember(child_id)
         outcome = self.store.get_task(child_id)
         self.store.save_message(Message(uuid.uuid4().hex, "agent", target,
                                         outcome["status"] + ": " + outcome["result"][:1000],

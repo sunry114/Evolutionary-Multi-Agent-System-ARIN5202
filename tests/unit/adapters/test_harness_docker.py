@@ -19,6 +19,14 @@ class DockerHarnessCommandTests(unittest.TestCase):
         self.workspace = WorkspaceFilesystem(self.state, "alice")
         self.transport = DockerCLITransport(self.workspace, HarnessConfig(adapter="claude_code", cli_path="/usr/bin/true"))
         self.result = ExecutionResult(0, "", "")
+        # Command-construction tests use a native fixture binary and mock Docker;
+        # they must not depend on the host's Docker install or caller UID.
+        for target, value in (("evo.adapters.harness.docker_cli.shutil.which", "/usr/bin/true"),
+                              ("evo.adapters.harness.docker_cli.os.getuid", 1000),
+                              ("evo.adapters.harness.docker_cli.os.getgid", 1000)):
+            patcher = patch(target, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     @patch("evo.adapters.harness.docker_cli.capture", return_value=ProcessOutcome(0))
     @patch("evo.adapters.harness.docker_cli.subprocess.Popen")

@@ -30,6 +30,8 @@ def parser():
     for name in ("run", "group"):
         command = commands.add_parser(name)
         command.add_argument("prompt" if name == "run" else "message")
+        if name == "run":
+            command.add_argument("--no-memory", action="store_true")
     command = commands.add_parser("dm")
     command.add_argument("agent")
     command.add_argument("message")
