@@ -5,8 +5,19 @@
 ## 准备与执行
 
 1. 运行 `python -m evo prepare-midtest Mid_Test.zip --output .evo/midtest`，使用新的输出目录。查看生成的 manifest、各场景角色与任务原文。
-2. 为每个场景选用独立的 `--state`。使用 `agents --file` 加载该场景的角色，通过群聊确认交付路径和验收条件，再用 `group --execute` 开始。第二个任务沿用同一个状态目录。
-3. 按实际对话回答澄清、决定审批，保存工单 ID、对话、运行事件和产物。用 `metrics TASK_ID` 查看耗时与状态；质量评审需结合实际产物和任务说明。
+2. 为每个场景使用生成的独立 `--state`。准备命令已保存角色和名为 `default` 的 Squad。用 `create PROMPT --squad default` 建单，再用 `group MESSAGE --task ISSUE_ID` 确认交付路径和验收条件，最后用 `start ISSUE_ID` 启动。第二个任务沿用同一个状态目录，另建一张工单记录本次讨论。
+3. 按实际对话回答澄清、决定审批，保存工单 ID、对话、运行事件和产物。用 `answer ISSUE_ID REQUEST_ID` 记录决定，用 `metrics TASK_ID` 查看耗时与状态。质量评审需结合实际产物和任务说明。
 4. 审计导出包时使用 `python -m evo audit-midtest EXPORT.zip --output .evo/mid-audit`，指定新的输出目录。该命令只读取并整理证据。
 
-独立 JSONL 案例可使用 `python -m evo eval examples/smoke.jsonl --output .evo/reports/smoke.json`。评测器对每个案例使用新的临时状态。跨任务记忆效果应通过同场景连续任务记录。[评测实现](../src/evo/evaluation/runner.py)
+## Squad 私有记忆对照
+
+配置包含 `builder` 的 Squad 后，在同一状态目录运行以下命令。
+
+```bash
+python -m evo eval examples/memory_sequence.jsonl --compare-memory \
+  --output .evo/reports/squad-memory.json
+```
+
+指定其他 `--state` 时，报告路径要在该状态目录的 `reports` 下。两组按 JSONL 顺序执行，模型、角色、验收条件及审批策略相同。两组各自从空记忆开始，每个案例另建任务库和工作区。开启组只把个人经验带入下一案例。评测自动拒绝关键操作审批，澄清停在等待人工的状态。单独运行一组时可用 `--no-memory` 关闭记忆，关键审批停在待处理状态。
+
+报告统计目标、所有层级的子任务和客观验收完成率、耗时、失败类别，以及规划、提名和应答发起的模型调用总数。跨工单检索按协商和执行分别计数，依据经验记录的来源工单 ID。[评测实现](../src/evo/evaluation/runner.py)
