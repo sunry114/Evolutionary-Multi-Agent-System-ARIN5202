@@ -101,6 +101,29 @@ class C14GatewayTests(unittest.TestCase):
             self.assertEqual(main(["messages", "--agent", "reviewer"], self.app), 0)
         self.assertNotIn("Private build request", output.getvalue())
 
+    def test_same_agent_chats_keep_independent_histories_and_default_cli_chat(self):
+        first = self.app.dispatch("new-chat", {"agent": "builder"})["chat"]["id"]
+        second = self.app.dispatch("new-chat", {"agent": "builder"})["chat"]["id"]
+        self.assertNotEqual(first, second)
+        self.assertEqual(self.app.dispatch("messages", {"chat_id": second})["messages"], [])
+        for chat_id, message in ((first, "First thread"), (second, "Second thread"), (first, "Follow-up")):
+            self.app.dispatch("dm", {"chat_id": chat_id, "message": message})
+        self.app.dispatch("dm", {"agent": "builder", "message": "Default thread"})
+        for call, expected in zip(self.provider.calls, (
+                ["First thread"], ["Second thread"], ["First thread", "Follow-up"], ["Default thread"])):
+            context = json.loads(call[1]["content"])
+            earlier = [row["content"] for row in context["history"] if row["sender"] == "human"]
+            self.assertEqual(earlier, expected[:-1])
+            self.assertEqual(context["latest_message"], {"sender": "human", "content": expected[-1]})
+
+        restored = SQLiteApplication(self.state)
+        default, latest, other = restored.dispatch("chat-threads", {})["chats"]
+        self.assertEqual((default["title"], latest["id"], other["id"]), ("Default thread", first, second))
+        self.assertEqual([row["content"] for row in restored.dispatch("messages", {"chat_id": second})["messages"]],
+                         ["Second thread", "Persisted agent reply"])
+        self.assertEqual([row["content"] for row in restored.messages(agent="builder") if row["sender"] == "human"],
+                         ["Default thread"])
+
     def test_group_has_three_real_service_replies_and_excludes_dm_and_task_logs(self):
         self.app.dispatch("dm", {"agent": "builder", "message": "Private input"})
         self.app.store.save_task(Task("task", "Fixture"))
@@ -114,12 +137,45 @@ class C14GatewayTests(unittest.TestCase):
         history = SQLiteApplication(self.state).dispatch("messages", {})["messages"]
         self.assertEqual(sum(m["kind"] == "group" for m in history), 4)
         self.assertNotIn("private task bid", json.dumps(history))
+        scoped = self.app.dispatch("messages", {"scope": "group"})["messages"]
+        self.assertEqual([m for m in history if m["kind"] == "group"], scoped)
+
+    def test_named_groups_keep_members_and_history_separate_from_other_chats(self):
+        first = self.app.dispatch("new-group", {"name": "设计讨论", "members": ["reviewer", "builder"]})["group"]
+        second = self.app.dispatch("new-group", {"name": "交付讨论", "members": ["builder"]})["group"]
+        default = self.app.dispatch("group", {"message": "Default group context"})
+        self.assertEqual(set(default["replies"]), {"researcher", "builder", "reviewer"})
+        for room, message in ((first, "First group context"), (second, "Second group context"),
+                              (first, "First group follow-up")):
+            reply = self.app.dispatch("group", {"group_id": room["id"], "message": message})
+            self.assertEqual(list(reply["replies"]), room["members"])
+        contexts = [json.loads(call[1]["content"]) for call in self.provider.calls[3:]]
+        self.assertEqual(
+            [[row["content"] for row in context["history"] if row["sender"] == "human"] for context in contexts],
+            [[], [], [], ["First group context"], ["First group context"]])
+
+        issue = self.app.dispatch("create", {"prompt": "Work from the workspace group", "from_group": True})
+        archived = self.app.store.list_group_messages(task_id=issue["task"]["id"])
+        self.assertEqual([row["content"] for row in archived if row["sender"] == "human"], ["Default group context"])
+        restored = SQLiteApplication(self.state)
+        self.assertEqual(restored.dispatch("messages", {"scope": "group"})["messages"], [])
+        groups = restored.dispatch("chat-threads", {})["groups"]
+        self.assertEqual([(room["id"], room["name"], room["members"]) for room in groups],
+                         [(first["id"], "设计讨论", ["reviewer", "builder"]), (second["id"], "交付讨论", ["builder"])])
+        history = restored.dispatch("messages", {"group_id": second["id"]})["messages"]
+        self.assertEqual([(row["sender"], row["content"]) for row in history],
+                         [("human", "Second group context"), ("builder", "Persisted agent reply")])
 
     def test_invalid_chat_never_calls_provider_or_saves(self):
         for op, payload in (
             ("dm", {"agent": "unknown", "message": "hello"}),
             ("dm", {"agent": "builder", "message": " "}),
             ("group", {"message": []}), ("group", {"message": "x" * 8001}),
+            ("group", {"message": "hello", "task_id": "other", "group_id": "unknown"}),
+            ("new-group", {"name": "讨论", "members": []}),
+            ("new-group", {"name": "讨论", "members": ["builder", "builder"]}),
+            ("new-group", {"name": "讨论", "members": ["unknown"]}),
+            ("new-group", {"name": " ", "members": ["builder"]}),
             ("messages", {"agent": "unknown"}),
         ):
             with self.subTest(op=op), self.assertRaises(ValueError):

@@ -60,6 +60,28 @@ class SQLiteInterfaceTests(unittest.TestCase):
             items = self.app.dispatch("tasks", {"owner": "reports", "owner_type": kind})["tasks"]
             self.assertEqual([item["id"] for item in items], [expected["id"]])
 
+    def test_partial_workspace_saves_merge_across_applications(self):
+        applications = [SQLiteApplication(self.state) for _ in range(3)]
+        squad = {"name": "小队1", "lead": "reviewer", "members": ["reviewer", "builder"]}
+        builder = {"name": "builder", "specialty": "编写测试文档"}
+        reviewer = {"name": "reviewer", "specialty": "检查测试覆盖范围"}
+        requests = ({"squad": squad}, {"agent": builder}, {"agent": reviewer})
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            results = [pool.submit(app.dispatch, "configure", payload) for app, payload in zip(applications, requests)]
+            for result in results:
+                self.assertEqual(result.result()["status"], "success")
+
+        restored = SQLiteApplication(self.state)
+        snapshot = restored.snapshot()
+        self.assertEqual(snapshot["squad"], squad)
+        self.assertEqual(snapshot["agent_details"][1:], [builder, reviewer])
+        for invalid in ({"agent": {"name": "unknown", "specialty": "New role"}},
+                        {"agent": {"name": "builder", "specialty": " "}},
+                        {"squad": {**squad, "members": ["builder"]}}):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                restored.dispatch("configure", invalid)
+        self.assertEqual(restored.snapshot(), snapshot)
+
     def test_cli_review_trace_and_revision_across_processes(self):
         accepted = self.command("review", "t1", "accepted")
         self.assertEqual(accepted.returncode, 0, accepted.stderr)

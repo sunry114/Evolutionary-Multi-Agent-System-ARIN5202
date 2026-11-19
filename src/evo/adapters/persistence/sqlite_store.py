@@ -29,7 +29,7 @@ class ConflictError(StorageError, ValueError):
 
 
 MIGRATIONS = ("0001_initial", "0002_issues", "0003_routing", "0004_delegations", "0005_workbench",
-              "0006_squad_routing")
+              "0006_squad_routing", "0007_issue_runs", "0008_chat_threads", "0009_group_chats")
 
 ANCESTORS = """
     WITH RECURSIVE chain AS (
@@ -214,18 +214,20 @@ class SQLiteStore:
     # ------------------------------------------------------------------
 
     def save_task(self, task: Task, *, issue_config: Optional[Mapping[str, object]] = None,
-                  from_group: bool = False) -> None:
+                  from_group: bool = False, after_insert=None) -> None:
         with self._transaction() as connection:
             self._insert_task(connection, task)
             if issue_config is not None:
                 if from_group:
                     updated = connection.execute(
-                        "UPDATE messages SET task_id = ? WHERE kind = 'group' AND task_id IS NULL",
+                        "UPDATE messages SET task_id = ? WHERE kind = 'group' AND task_id IS NULL AND group_id IS NULL",
                         (task.id,))
                     if updated.rowcount == 0:
                         raise ValueError("No unassigned group discussion")
                 self._insert_event(connection, task_id=task.id, event_type="issue_config",
                                    actor="human", payload=issue_config)
+            if after_insert:
+                after_insert(connection, task.id)
 
     def _insert_task(self, connection, task):
         now = _utc_now()
@@ -316,6 +318,7 @@ class SQLiteStore:
                     t.assignee_type,
                     t.assignee_id,
                     t.routing_mode,
+                    t.issue_status,
                     r.status AS review_status,
                     r.feedback AS review_feedback,
                     r.revision_task_id
@@ -532,7 +535,7 @@ class SQLiteStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def list_issues(self, limit=100, *, owner=None, owner_type=None):
+    def list_issues(self, limit=100, *, owner=None, owner_type=None, squad_name=None):
         if type(limit) is not int or not 1 <= limit <= 500:
             raise ValueError("Issue limit must be between 1 and 500")
         with self._connect() as connection:
@@ -554,18 +557,21 @@ class SQLiteStore:
                     SELECT workers.issue_id, t.id FROM workers JOIN tasks t ON t.parent_id = workers.id
                 )
                 SELECT original.id, original.description AS prompt, latest.id AS current_task_id,
-                       latest.status, latest.result, latest.assignee_id, latest.assignee_type,
-                       latest.routing_mode, latest.updated_at, r.status AS review_status
+                       latest.status, latest.result, latest.assignee_type,
+                       CASE WHEN latest.assignee_type = 'squad' THEN COALESCE(:squad_name, latest.assignee_id)
+                            ELSE latest.assignee_id END AS assignee_id,
+                       latest.routing_mode, latest.updated_at, r.status AS review_status, original.issue_status
                 FROM current JOIN tasks original ON original.id = current.issue_id
                 JOIN tasks latest ON latest.id = current.id LEFT JOIN reviews r ON r.task_id = latest.id
                 WHERE :owner IS NULL
-                    OR (latest.assignee_id = :owner AND (:owner_type IS NULL OR latest.assignee_type = :owner_type))
+                    OR ((latest.assignee_id = :owner OR (latest.assignee_type = 'squad' AND :squad_name = :owner))
+                        AND (:owner_type IS NULL OR latest.assignee_type = :owner_type))
                     OR (COALESCE(:owner_type, 'agent') = 'agent' AND EXISTS (
                         SELECT 1 FROM workers JOIN tasks worker ON worker.id = workers.id
                         WHERE workers.issue_id = original.id AND worker.owner = :owner
                     ))
                 ORDER BY latest.updated_at DESC, original.id DESC LIMIT :limit
-                """, {"owner": owner, "owner_type": owner_type, "limit": limit}).fetchall()
+                """, {"owner": owner, "owner_type": owner_type, "limit": limit, "squad_name": squad_name}).fetchall()
         return [dict(row) for row in rows]
 
     @staticmethod
@@ -633,58 +639,140 @@ class SQLiteStore:
     # Messages
     # ------------------------------------------------------------------
 
-    def save_message(self, message: Message) -> None:
+    def save_message(self, message: Message, *, chat_id=None, group_id=None) -> None:
         try:
             with self._transaction() as connection:
-                self._insert_message(connection, message)
+                self._insert_message(connection, message, chat_id=chat_id, group_id=group_id)
         except sqlite3.IntegrityError as exc:
             raise ConflictError("Message could not be created") from exc
 
-    def _insert_message(self, connection, message):
+    def _insert_message(self, connection, message, *, chat_id=None, group_id=None):
+        now = _utc_now()
+        if chat_id is not None:
+            chat = connection.execute("SELECT agent FROM chat_threads WHERE id = ?", (chat_id,)).fetchone()
+            if chat is None or {message.sender, message.recipient} != {"human", chat["agent"]}:
+                raise ConflictError("Message participants do not match the chat")
+        if group_id is not None and message.sender != "human":
+            member = connection.execute(
+                "SELECT 1 FROM group_chat_members WHERE group_id = ? AND agent = ?", (group_id, message.sender)
+            ).fetchone()
+            if member is None:
+                raise ConflictError("Message sender is not in the group")
         connection.execute(
-            "INSERT INTO messages(id, kind, sender, recipient, task_id, content, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO messages(id, kind, sender, recipient, task_id, content, created_at, chat_id, group_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (message.id, message.kind, message.sender, message.recipient,
-             message.task_id, message.content, _utc_now()))
+             message.task_id, message.content, now, chat_id, group_id))
+        if chat_id is not None:
+            connection.execute("UPDATE chat_threads SET updated_at = ? WHERE id = ?", (now, chat_id))
+        if group_id is not None:
+            connection.execute("UPDATE group_chats SET updated_at = ? WHERE id = ?", (now, group_id))
         if message.task_id:
             self._insert_event(connection, task_id=message.task_id, event_type="message_created",
                                actor=message.sender, payload={"message_id": message.id, "kind": message.kind,
                                                               "recipient": message.recipient})
 
+    def create_chat(self, agent, *, default=False):
+        with self._transaction() as connection:
+            if default:
+                existing = connection.execute(
+                    "SELECT * FROM chat_threads WHERE agent = ? AND is_default = 1", (agent,)).fetchone()
+                if existing:
+                    return dict(existing)
+            chat_id = uuid.uuid4().hex
+            now = _utc_now()
+            connection.execute("INSERT INTO chat_threads VALUES (?, ?, ?, ?, ?)", (chat_id, agent, int(default), now, now))
+            return {"id": chat_id, "agent": agent, "is_default": int(default), "created_at": now, "updated_at": now}
+
+    def get_chat(self, chat_id):
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM chat_threads WHERE id = ?", (chat_id,)).fetchone()
+        if row is None:
+            raise RecordNotFoundError("Chat not found")
+        return dict(row)
+
+    def list_chats(self):
+        with self._connect() as connection:
+            return [dict(row) for row in connection.execute("""
+                SELECT c.id, c.agent, c.created_at, c.updated_at, (
+                    SELECT substr(m.content, 1, 100) FROM messages m
+                    WHERE m.chat_id = c.id AND m.sender = 'human' ORDER BY m.created_at, m.id LIMIT 1
+                ) AS title
+                FROM chat_threads c ORDER BY c.updated_at DESC, c.id
+            """)]
+
+    def create_group_chat(self, name, members):
+        group_id = uuid.uuid4().hex
+        now = _utc_now()
+        with self._transaction() as connection:
+            connection.execute(
+                "INSERT INTO group_chats(id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (group_id, name, now, now))
+            connection.executemany(
+                "INSERT INTO group_chat_members(group_id, agent, position) VALUES (?, ?, ?)",
+                [(group_id, agent, position) for position, agent in enumerate(members)])
+        return {"id": group_id, "name": name, "members": list(members), "created_at": now, "updated_at": now}
+
+    def get_group_chat(self, group_id):
+        groups = self.list_group_chats(group_id=group_id)
+        if not groups:
+            raise RecordNotFoundError("Group chat not found")
+        return groups[0]
+
+    def list_group_chats(self, *, group_id=None):
+        groups = {}
+        with self._connect() as connection:
+            rows = connection.execute("""
+                SELECT g.*, m.agent FROM group_chats g JOIN group_chat_members m ON m.group_id = g.id
+                WHERE ? IS NULL OR g.id = ?
+                ORDER BY g.updated_at DESC, g.id, m.position
+            """, (group_id, group_id))
+            for row in rows:
+                group = groups.get(row["id"])
+                if group is None:
+                    group = dict(row)
+                    del group["agent"]
+                    group["members"] = []
+                    groups[group["id"]] = group
+                group["members"].append(row["agent"])
+        return list(groups.values())
+
     def list_direct_messages(
         self,
         human: str,
         agent: str,
+        *, chat_id=None,
     ) -> Sequence[Mapping[str, object]]:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT *
-                FROM messages
-                WHERE kind = 'dm'
+                SELECT m.*
+                FROM messages m LEFT JOIN chat_threads c ON c.id = m.chat_id
+                WHERE m.kind = 'dm'
                   AND (
                       (sender = ? AND recipient = ?)
                       OR
                       (sender = ? AND recipient = ?)
                   )
-                ORDER BY created_at, id
+                  AND ((? IS NULL AND (m.chat_id IS NULL OR c.is_default = 1)) OR m.chat_id = ?)
+                ORDER BY m.created_at, m.id
                 """,
-                (human, agent, agent, human),
+                (human, agent, agent, human, chat_id, chat_id),
             ).fetchall()
 
         return [dict(row) for row in rows]
 
     def list_group_messages(
-        self, *, task_id=None,
+        self, *, task_id=None, group_id=None,
     ) -> Sequence[Mapping[str, object]]:
         with self._connect() as connection:
             rows = connection.execute(
                 """
                 SELECT *
                 FROM messages
-                WHERE kind = 'group' AND task_id IS ?
+                WHERE kind = 'group' AND task_id IS ? AND group_id IS ?
                 ORDER BY created_at, id
-                """, (task_id,)
+                """, (task_id, group_id)
             ).fetchall()
 
         return [dict(row) for row in rows]

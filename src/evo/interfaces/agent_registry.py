@@ -8,8 +8,12 @@ from dataclasses import asdict, dataclass
 from fcntl import LOCK_EX, flock
 from pathlib import Path
 
-from evo.adapters.tools.filesystem import validate_agent
+from evo.adapters.tools.filesystem import PathPolicyError, validate_agent
 from evo.domain.models import Agent, Squad
+
+
+class RegistryValidationError(ValueError):
+    """A configuration validation error safe to show to the user."""
 
 
 @dataclass(frozen=True)
@@ -24,21 +28,24 @@ class WorkspaceRegistry:
 
 def parse_agents(value):
     if not isinstance(value, list) or not 1 <= len(value) <= 8:
-        raise ValueError("Provide 1 to 8 agent roles")
+        raise RegistryValidationError("请配置 1 至 8 个 Agent。")
     agents = []
     for item in value:
         if not isinstance(item, dict) or set(item) != {"name", "specialty"}:
-            raise ValueError("Each agent needs a name and specialty")
+            raise RegistryValidationError("每个 Agent 都需要 name 和 specialty 字段。")
         name, specialty = item["name"], item["specialty"]
-        validate_agent(name)
+        try:
+            validate_agent(name)
+        except PathPolicyError:
+            raise RegistryValidationError("Agent 名称须为 1 至 64 个英文字母、数字、下划线或连字符。") from None
         if name in {"human", "collective", "planner", "orchestrator"}:
-            raise ValueError("Agent name is reserved")
+            raise RegistryValidationError("该 Agent 名称为系统保留名称。")
         if (not isinstance(specialty, str) or not specialty.strip()
                 or len(specialty.encode("utf-8")) > 1000):
-            raise ValueError("Invalid agent specialty")
+            raise RegistryValidationError("Agent 专长不能为空，且长度不能超过 1000 字节。")
         agents.append(Agent(name, specialty.strip()))
     if len({agent.name for agent in agents}) != len(agents):
-        raise ValueError("Agent names must be unique")
+        raise RegistryValidationError("Agent 名称不能重复。")
     return tuple(agents)
 
 
@@ -52,19 +59,21 @@ def default_registry(agents):
 
 def parse_registry(value):
     if not isinstance(value, dict) or set(value) != {"agents", "squad"}:
-        raise ValueError("Provide agents and one Squad")
+        raise RegistryValidationError("配置须包含 agents 和一个 squad。")
     agents = parse_agents(value["agents"])
     squad = value["squad"]
     if not isinstance(squad, dict) or set(squad) != {"name", "lead", "members"}:
-        raise ValueError("Squad requires a name, lead and members")
-    validate_agent(squad["name"])
+        raise RegistryValidationError("小队须包含 name、lead 和 members 字段。")
+    name = squad["name"].strip() if isinstance(squad["name"], str) else ""
+    if not 1 <= len(name) <= 64 or any(not (char.isalnum() or char in " _-") for char in name):
+        raise RegistryValidationError("小队名称须为 1 至 64 个字符，支持中文等文字、数字、空格、下划线和连字符。")
     members = squad["members"]
     names = {agent.name for agent in agents}
     if (not isinstance(members, list) or not members
             or any(not isinstance(member, str) or member not in names for member in members)
             or len(members) != len(set(members)) or squad["lead"] not in members):
-        raise ValueError("Squad members must be unique registered agents and include the lead")
-    return WorkspaceRegistry(agents, Squad(squad["name"], squad["lead"], tuple(members)))
+        raise RegistryValidationError("小队成员须为已配置的 Agent，不能重复，并且必须包含队长。")
+    return WorkspaceRegistry(agents, Squad(name, squad["lead"], tuple(members)))
 
 
 def load_registry(state, default):
@@ -94,6 +103,24 @@ def migrate_registry(state):
 def save_registry(state, registry):
     with _registry_write(state) as path:
         _write_registry(path, registry)
+
+
+def update_registry(state, default, payload):
+    with _registry_write(state) as path:
+        if set(payload) == {"squad"}:
+            current = load_registry(state, default).payload()
+            registry = parse_registry({**current, "squad": payload["squad"]})
+        elif set(payload) == {"agent"}:
+            agent, = parse_agents([payload["agent"]])
+            current = load_registry(state, default)
+            if agent.name not in {item.name for item in current.agents}:
+                raise RegistryValidationError("该 Agent 已不在工作区，请刷新后重试。")
+            registry = WorkspaceRegistry(
+                tuple(agent if item.name == agent.name else item for item in current.agents), current.squad)
+        else:
+            registry = parse_registry(payload)
+        _write_registry(path, registry)
+        return registry
 
 
 def _write_registry(path, registry):

@@ -26,7 +26,8 @@ class FixtureProvider:
                 return {"decision": "revise", "reason": "报告需要独立复核", "scope": "附上独立证据"}
             return {"decision": "accept", "reason": "可以独立复核并交付报告"}
         agent = re.search(r"You are ([^,]+),", system).group(1)
-        human_messages = [row["content"] for row in context if row["sender"] == "human"]
+        human_messages = [row["content"] for row in context.get("history", []) if row["sender"] == "human"]
+        human_messages.append(context["latest_message"]["content"])
         return {"reply": agent + " 回复 " + " / ".join(human_messages)}
 
 

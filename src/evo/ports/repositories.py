@@ -29,17 +29,18 @@ class TaskRepository(Protocol):
 
 
 class MessageRepository(Protocol):
-    def save_message(self, message: Message) -> None:
+    def save_message(self, message: Message, *, chat_id: str | None = None, group_id: str | None = None) -> None:
         ...
 
     def list_direct_messages(
         self,
         human: str,
         agent: str,
+        *, chat_id: str | None = None,
     ) -> Sequence[Record]:
         ...
 
-    def list_group_messages(self, *, task_id: str | None = None) -> Sequence[Record]:
+    def list_group_messages(self, *, task_id: str | None = None, group_id: str | None = None) -> Sequence[Record]:
         ...
 
 

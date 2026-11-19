@@ -4,12 +4,13 @@ import os
 import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
+from evo.interfaces.agent_registry import RegistryValidationError
 from evo.interfaces.gateway import ApplicationFailure, ApplicationUnavailable
 
 MAX_BODY = 65536
 OPERATIONS = {"create", "start", "resume", "configure", "dm", "group", "review", "revision",
               "answer", "eval", "trace", "metrics", "memory", "task", "tasks", "messages",
-              "assign", "comment", "artifact"}
+              "assign", "comment", "artifact", "chat-threads", "new-chat", "new-group"}
 
 
 def unique_object(pairs):
@@ -120,6 +121,8 @@ def make_server(application, port=8768):
                 return self.reply(503, {"error": str(error)})
             except ApplicationFailure as error:
                 return self.reply(502, {"error": str(error)})
+            except RegistryValidationError as error:
+                return self.reply(409, {"error": str(error)})
             except (ValueError, KeyError):
                 return self.reply(409, {"error": "Invalid request or state conflict"})
             except Exception:

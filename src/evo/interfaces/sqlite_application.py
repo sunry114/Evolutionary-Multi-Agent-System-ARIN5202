@@ -8,15 +8,13 @@ from dataclasses import asdict
 from evo.adapters.persistence.sqlite_store import SQLiteStore
 from evo.application.reviews import ReviewService
 from evo.application.approvals import ApprovalService
-from evo.application.chat import ChatService
+from evo.application.chat import ChatService, parse_group_chat
 from evo.application.issues import IssueService
 from evo.domain.models import Agent, Task
 from evo.application.artifact_checks import parse_checks
 from evo.domain.routing import issue_route
 from evo.interfaces.gateway import ApplicationFailure, ApplicationUnavailable
-from evo.interfaces.agent_registry import (
-    default_registry, load_registry, migrate_registry, parse_agents, parse_registry, save_registry,
-)
+from evo.interfaces.agent_registry import default_registry, load_registry, migrate_registry, parse_agents, update_registry
 
 DEFAULT_AGENTS = (
     Agent("researcher", "Research and gather evidence"),
@@ -27,7 +25,8 @@ DEFAULT_AGENTS = (
 CAPABILITIES = {name: True
                 for name in ("tasks", "task", "trace", "review", "revision",
                              "create", "start", "resume", "dm", "group", "answer", "memory",
-                             "eval", "metrics", "messages", "configure", "assign", "comment", "artifact")}
+                             "eval", "metrics", "messages", "configure", "assign", "comment", "artifact",
+                             "chat-threads", "new-chat", "new-group")}
 
 
 def required_text(payload, name):
@@ -66,13 +65,14 @@ class SQLiteApplication:
             raise ApplicationUnavailable(
                 "Execution needs a permitted provider, credential, and configured Harness runtime.") from None
 
-    def _participants(self, assignee_type, assignee_id):
+    def _participants(self, assignee_type, assignee_id, *, check_squad_name=False):
         self._refresh_registry()
         registry = self.registry
         if assignee_type == "agent":
             if any(agent.name == assignee_id for agent in registry.agents):
                 return registry.agents, None
-        elif assignee_type == "squad" and registry.squad.name == assignee_id:
+        # An existing issue points to the workspace's only squad, whose label can change.
+        elif assignee_type == "squad" and (not check_squad_name or registry.squad.name == assignee_id):
             return (tuple(agent for agent in registry.agents if agent.name in registry.squad.members),
                     registry.payload()["squad"])
         raise ValueError("Unknown issue assignee")
@@ -86,10 +86,10 @@ class SQLiteApplication:
         assignee_type = assignee.pop()
         assignee_id = required_text(payload, assignee_type)
         mode = issue_route(assignee_type)
-        self._participants(assignee_type, assignee_id)
+        self._participants(assignee_type, assignee_id, check_squad_name=True)
         return assignee_type, assignee_id, mode.value
 
-    def create_task(self, payload):
+    def create_task(self, payload, *, after_insert=None):
         if set(payload) - {"prompt", "agent", "squad", "checks", "no_memory", "from_group"}:
             raise ValueError("Invalid issue fields")
         prompt = required_text(payload, "prompt")
@@ -105,7 +105,7 @@ class SQLiteApplication:
         with self._chat_lock:
             self.store.save_task(Task(task_id, prompt, assignee_type=assignee_type,
                                       assignee_id=assignee_id, routing_mode=mode),
-                                 issue_config=config, from_group=from_group)
+                                 issue_config=config, from_group=from_group, after_insert=after_insert)
         return {"status": "created", "task": self.store.get_task(task_id)}
 
     def start_task(self, task_id):
@@ -233,15 +233,24 @@ class SQLiteApplication:
                 "note": "Stored task wall time and direct-child states; not an official dataset quality score."}
 
     def chat(self, operation, payload):
-        self._refresh_registry()
         message = required_text(payload, "message")
         if len(message) > 8000:
             raise ValueError("Message is too long")
-        agent = required_text(payload, "agent") if operation == "dm" else None
+        chat = self.store.get_chat(required_text(payload, "chat_id")) if "chat_id" in payload else None
+        agent = (chat["agent"] if chat else required_text(payload, "agent")) if operation == "dm" else None
         task_id = self.store.issue_id(required_text(payload, "task_id")) if "task_id" in payload else None
-        if agent is not None and agent not in {item.name for item in self.agents}:
-            raise ValueError("Unknown agent")
+        group_id = required_text(payload, "group_id") if "group_id" in payload else None
         with self._chat_lock:
+            self._refresh_registry()
+            agents = {item.name: item for item in self.agents}
+            if agent is not None and agent not in agents:
+                raise ValueError("Unknown agent")
+            participants = tuple(agents.values())
+            if group_id is not None:
+                group = self.store.get_group_chat(group_id)
+                participants = tuple(agents[name] for name in group["members"] if name in agents)
+                if not participants:
+                    raise ValueError("No group members are available")
             if self._provider is None:
                 from evo.adapters.llm.credentials import CredentialError, load_key
                 from evo.adapters.llm.factory import create_provider
@@ -253,9 +262,13 @@ class SQLiteApplication:
                         "Chat requires valid provider configuration and credentials; use provider-info and setup-key.") from None
             else:
                 provider = self._provider
-            service = ChatService(provider, self.store, self.agents)
+            service = ChatService(provider, self.store, participants)
             try:
-                reply = service.direct_message(agent, message) if agent else service.group_message(message, task_id=task_id)
+                if agent:
+                    chat_id = chat["id"] if chat else self.store.create_chat(agent, default=True)["id"]
+                    reply = service.direct_message(agent, message, chat_id=chat_id)
+                else:
+                    reply = service.group_message(message, task_id=task_id, group_id=group_id)
             except Exception:
                 raise ApplicationFailure(
                     "Agent reply failed; the message and any completed replies may already be saved. Refresh history before retrying.") from None
@@ -267,7 +280,7 @@ class SQLiteApplication:
         return {
             "mode": "本地工作区 · SQLite",
             "capabilities": dict(CAPABILITIES),
-            "tasks": self.issues.list(),
+            "tasks": self.issues.list(squad_name=registry["squad"]["name"]),
             "agents": [agent["name"] for agent in registry["agents"]],
             "agent_details": registry["agents"],
             "squad": registry["squad"],
@@ -296,26 +309,50 @@ class SQLiteApplication:
         if operation == "metrics":
             return self.metrics(required_text(payload, "task_id"))
         if operation == "configure":
-            registry = parse_registry(payload)
             with self._chat_lock:
-                save_registry(self.state, registry)
+                registry = update_registry(self.state, self._default_registry, payload)
                 self.registry = registry
             return {"status": "success", **registry.payload()}
         if operation == "resume":
             return self.resume_task(required_text(payload, "task_id"))
         if operation in ("dm", "group"):
-            allowed = {"message", "task_id"} if operation == "group" else {"message", "agent"}
-            if set(payload) - allowed:
+            valid = (set(payload) in ({"message"}, {"message", "task_id"}, {"message", "group_id"}) if operation == "group"
+                     else set(payload) in ({"message", "agent"}, {"message", "chat_id"}))
+            if not valid:
                 raise ValueError("Invalid chat fields")
             return self.chat(operation, payload)
+        if operation == "chat-threads" and not payload:
+            return {"chats": self.store.list_chats(), "groups": self.store.list_group_chats()}
+        if operation == "new-chat" and set(payload) == {"agent"}:
+            self._refresh_registry()
+            agent = required_text(payload, "agent")
+            if agent not in {item.name for item in self.agents}:
+                raise ValueError("Unknown agent")
+            return {"chat": self.store.create_chat(agent)}
+        if operation == "new-group":
+            self._refresh_registry()
+            name, members = parse_group_chat(payload, {agent.name for agent in self.agents})
+            return {"group": self.store.create_group_chat(name, members)}
         if operation == "messages":
-            return {"messages": self.messages(agent=payload.get("agent"))}
+            if set(payload) == {"chat_id"}:
+                chat = self.store.get_chat(required_text(payload, "chat_id"))
+                return {"messages": self.store.list_direct_messages("human", chat["agent"], chat_id=chat["id"])[-100:]}
+            if payload == {"scope": "group"}:
+                return {"messages": self.store.list_group_messages()[-100:]}
+            if set(payload) == {"group_id"}:
+                group = self.store.get_group_chat(required_text(payload, "group_id"))
+                return {"messages": self.store.list_group_messages(group_id=group["id"])[-100:]}
+            if set(payload) <= {"agent"}:
+                return {"messages": self.messages(agent=payload.get("agent"))}
+            raise ValueError("Invalid message scope")
         if operation == "tasks":
             owner = required_text(payload, "owner") if "owner" in payload else None
             owner_type = required_text(payload, "owner_type") if "owner_type" in payload else None
             if owner_type is not None and (owner is None or owner_type not in ("squad", "agent")):
                 raise ValueError("Owner type requires a named agent or Squad")
-            return {"tasks": self.issues.list(payload.get("limit", 100), owner=owner, owner_type=owner_type)}
+            self._refresh_registry()
+            return {"tasks": self.issues.list(payload.get("limit", 100), owner=owner, owner_type=owner_type,
+                                             squad_name=self.registry.squad.name)}
         if operation == "answer":
             if set(payload) not in ({"task_id", "request_id", "approved"}, {"task_id", "request_id", "answer"}):
                 raise ValueError("Invalid human response")
@@ -332,7 +369,8 @@ class SQLiteApplication:
             return result
         task_id = required_text(payload, "task_id")
         if operation == "task":
-            return self.issues.detail(task_id)
+            self._refresh_registry()
+            return self.issues.detail(task_id, squad_name=self.registry.squad.name)
         if operation == "comment":
             content = required_text(payload, "message")
             if set(payload) != {"task_id", "message"} or len(content) > 8000:

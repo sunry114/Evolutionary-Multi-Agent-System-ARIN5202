@@ -22,8 +22,8 @@ class IssueService:
     def __init__(self, store):
         self.store = store
 
-    def list(self, limit=100, *, owner=None, owner_type=None):
-        issues = self.store.list_issues(limit, owner=owner, owner_type=owner_type)
+    def list(self, limit=100, *, owner=None, owner_type=None, squad_name=None):
+        issues = self.store.list_issues(limit, owner=owner, owner_type=owner_type, squad_name=squad_name)
         return [{**row, "lane": issue_lane(row)} for row in issues]
 
     @staticmethod
@@ -34,8 +34,12 @@ class IssueService:
             return "start" if current["assignee_id"] else "assign"
         return {"review": "review", "changes": "revision"}.get(issue_lane(current))
 
-    def detail(self, task_id):
+    def detail(self, task_id, *, squad_name=None):
         issue_id, tasks, events, messages, approvals = self.store.issue_records(task_id)
+        if squad_name is not None:
+            for task in tasks:
+                if task["assignee_type"] == "squad":
+                    task["assignee_id"] = squad_name
         by_id = {task["id"]: task for task in tasks}
         issue = by_id[issue_id]
         runs = [issue]

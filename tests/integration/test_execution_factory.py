@@ -252,7 +252,7 @@ class ExecutionFactoryTests(unittest.TestCase):
 
             provider = HistoricalProvider()
             app = SQLiteApplication(temp, provider=provider)
-            self.assertEqual(app.store.schema_version(), 6)
+            self.assertEqual(app.store.schema_version(), 9)
             self.assertEqual(json.loads((root / "agents.json").read_text()), registry_for(original))
             self.assertEqual(app.dispatch("task", {"task_id": "saved"})["task"]["id"], "saved")
             self.assertEqual(app.store.latest_event_payload("saved", "run_config"),
