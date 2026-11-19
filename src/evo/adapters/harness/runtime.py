@@ -13,7 +13,7 @@ from pathlib import Path
 from evo.adapters.tools.filesystem import _directory, _read_at, _write_at
 from evo.config import HarnessConfig
 from evo.ports.harness import (ArtifactRef, HarnessCleanupError, HarnessError, HarnessEvent, ResumeRef,
-                               RunHandle, RunRequest, RunResult, identifier)
+                               RunHandle, RunRequest, RunResult, ToolInputError, identifier)
 
 
 def request_record(request):
@@ -225,6 +225,8 @@ class ManagedHarness:
                 self._event(control, "tool_call", {"name": name})
             try:
                 result = self.broker.call(request.task_id, name, arguments, request_id=request_id)
+            except ToolInputError as error:
+                result = {"status": "failed", "error": "invalid_tool_input", "message": str(error)}
             except Exception:
                 control.failure = "platform_tool_error"
                 control.stop.set()

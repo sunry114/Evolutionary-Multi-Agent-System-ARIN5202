@@ -8,7 +8,7 @@ import socketserver
 import threading
 from dataclasses import asdict, is_dataclass
 
-from evo.ports.harness import HarnessError
+from evo.ports.harness import HarnessError, ToolInputError
 
 
 def schema(properties, required=()):
@@ -20,7 +20,7 @@ S = {"type": "string"}
 PURPOSE = {"type": "string", "enum": ["document", "code", "config", "data", "slides"]}
 SCHEMAS = {
     "read_file": schema({"path": S, "purpose": PURPOSE}, ("path",)),
-    "write_file": schema({"path": S, "content": S, "purpose": PURPOSE, "overwrite": {"type": "boolean"}}, ("path", "content")),
+    "write_file": schema({"path": S, "content": {"type": "string", "description": "Required: complete UTF-8 file contents to write."}, "purpose": PURPOSE, "overwrite": {"type": "boolean"}}, ("path", "content")),
     "list_files": schema({"path": S}),
     "run_python": schema({"path": S}, ("path",)),
     "delete_file": schema({"path": S, "purpose": PURPOSE}, ("path",)),
@@ -80,8 +80,11 @@ class PlatformToolBroker:
         if name not in allowed or not isinstance(arguments, dict):
             raise HarnessError("Unsupported platform tool")
         spec = SCHEMAS[name]
-        if set(arguments) - set(spec["properties"]) or set(spec["required"]) - set(arguments):
-            raise HarnessError("Invalid platform tool arguments")
+        missing = sorted(set(spec["required"]) - set(arguments))
+        if missing:
+            raise ToolInputError("Missing required fields: " + ", ".join(missing))
+        if set(arguments) - set(spec["properties"]):
+            raise ToolInputError("Unexpected field; use only the declared tool parameters")
         for key, value in arguments.items():
             rule = spec["properties"][key]
             typ = rule["type"]
@@ -90,7 +93,7 @@ class PlatformToolBroker:
                     or (typ == "array" and (not isinstance(value, list) or len(value) > 64
                                             or any(not isinstance(x, str) for x in value)))
                     or ("enum" in rule and value not in rule["enum"])):
-                raise HarnessError("Invalid platform tool argument type")
+                raise ToolInputError("Invalid value for declared field: " + key)
         task = self.repository.get_task(task_id)
         if task["owner"] != self.executor.agent:
             raise HarnessError("Tool task ownership mismatch")

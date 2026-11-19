@@ -12,6 +12,10 @@ class HarnessError(RuntimeError):
     """Safe-to-report lifecycle, configuration or protocol failure."""
 
 
+class ToolInputError(HarnessError):
+    """Correctable schema error detected before a tool has any side effects."""
+
+
 class HarnessCleanupError(HarnessError):
     """The runtime may still exist; quarantine the task until operator reconciliation."""
 

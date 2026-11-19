@@ -49,6 +49,11 @@ def main():
                 with channel.makefile("rb") as reader:
                     call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                             "params": {"name": "write_file", "arguments": {"path": "fake.md", "content": "from MCP"}}}
+                    invalid = {**call, "params": {"name": "write_file", "arguments": {"path": "booking.py", "purpose": "code"}}}
+                    channel.sendall(json.dumps(invalid).encode() + b"\n")
+                    rejection = json.loads(reader.readline())["result"]
+                    assert rejection["isError"]
+                    assert "Missing required fields: content" in rejection["content"][0]["text"]
                     channel.sendall(json.dumps(call).encode() + b"\n")
                     result = json.loads(reader.readline())
                     assert not result["result"]["isError"]
