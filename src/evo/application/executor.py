@@ -5,7 +5,7 @@ from dataclasses import asdict
 from typing import Mapping
 
 from evo.domain.policies import CRITICAL_TOOLS
-from evo.ports.tools import ExecutionResult, ToolError
+from evo.ports.tools import ExecutionResult, GitRepositoryMissing, ToolError
 
 
 class ActionExecutor:
@@ -91,7 +91,13 @@ class ActionExecutor:
             elif name == "git_init":
                 result = self.git.init()
             elif name == "git_status":
-                result = self.git.status()
+                try:
+                    result = self.git.status()
+                except GitRepositoryMissing:
+                    summary = {"error": "git_repository_missing",
+                               "message": "此工作区尚未初始化 Git 仓库。文件任务可以继续。"}
+                    self.repository.finish_action(action_id, succeeded=False, result=summary, fail_task=False)
+                    return {"status": "failed", "action_id": action_id, "result": None, **summary}
             elif name == "git_commit":
                 result = self.git.commit(args["paths"], args["message"])
             else:

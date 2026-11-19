@@ -1,5 +1,6 @@
 """Executable protocol fixture, never a production harness transport."""
 
+import base64
 import json
 import os
 import subprocess
@@ -125,7 +126,8 @@ def main():
         return 7
     if mode == "wrong_session":
         session = "other-session"
-    print(json.dumps({"type": "system", "subtype": "init", "session_id": session, "tools": [],
+    builtins = ["Bash", "Read", "Write"] if mode.startswith("native_issue") else []
+    print(json.dumps({"type": "system", "subtype": "init", "session_id": session, "tools": builtins,
                       "mcp_servers": [{"name": "evo", "status": "connected"}]}), flush=True)
     if mode == "blocked_native":
         print(json.dumps({"type": "system", "subtype": "init", "session_id": session, "tools": ["Bash"]}), flush=True)
@@ -137,14 +139,30 @@ def main():
             status = json.dumps({"type": "system", "subtype": "status", "session_id": session})
             for _ in range(520):
                 print(status)
+        if builtins:
+            for item in prompt.get("archived_inputs", []):
+                fixture = Path(os.environ["FAKE_MCP_SOCKET"]).parent / item["path"].removeprefix("/broker/")
+                assert fixture.read_text() == "Previous output"
+            for name in ("Bash", "Write", "Read"):
+                tool_id = "test_" + name
+                print(json.dumps({"type": "assistant", "session_id": session, "message": {"content": [
+                    {"type": "tool_use", "name": name, "id": tool_id, "input": {}}]}}), flush=True)
+                print(json.dumps({"type": "user", "session_id": session, "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": tool_id, "content": "fixture result"}]}}), flush=True)
         if mode.startswith("fixture-delegation-") or mode.partition("\n")[0] in (INCIDENT_REPORT, INCIDENT_REVIEW):
             delegation_scenario(prompt)
-        if mode == "mcp":
+        if mode in ("mcp", "missing_git_repository"):
             with socket.socket(socket.AF_UNIX) as channel:
                 channel.connect(os.environ["FAKE_MCP_SOCKET"])
                 with channel.makefile("rb") as reader:
                     call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                             "params": {"name": "write_file", "arguments": {"path": "fake.md", "content": "from MCP"}}}
+                    if mode == "missing_git_repository":
+                        status = {**call, "params": {"name": "git_status"}}
+                        channel.sendall(json.dumps(status).encode() + b"\n")
+                        probe = json.loads(reader.readline())["result"]
+                        assert probe["isError"]
+                        assert json.loads(probe["content"][0]["text"])["error"] == "git_repository_missing"
                     invalid = {**call, "params": {"name": "write_file", "arguments": {"path": "booking.py", "purpose": "code"}}}
                     channel.sendall(json.dumps(invalid).encode() + b"\n")
                     rejection = json.loads(reader.readline())["result"]
@@ -157,6 +175,10 @@ def main():
                           "message": {"content": [{"type": "text", "text": "fixture response"}]}}), flush=True)
         print(json.dumps({"type": "result", "session_id": session, "is_error": mode == "error_result",
                           "result": "fixture-credential" if mode == "secret" else "fixture success"}), flush=True)
+        if builtins:
+            path = "../outside.md" if mode == "native_issue_bad_export" else "hello-world.md"
+            print(json.dumps({"type": "evo_artifact", "path": path,
+                              "content": base64.b64encode(b"# Hello World\n").decode("ascii")}), flush=True)
     return 0
 
 

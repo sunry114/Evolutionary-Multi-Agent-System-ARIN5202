@@ -156,13 +156,16 @@ class ArtifactExchange:
         return artifact
 
     def preview(self, artifact_id: str, digest: str) -> dict:
+        artifact, data = self.read_snapshot(artifact_id, digest)
+        return {"name": artifact.name, "content": data[:65536].decode("utf-8", errors="replace"),
+                "truncated": len(data) > 65536}
+
+    def read_snapshot(self, artifact_id: str, digest: str):
         artifact = self._load(artifact_id)
         self._authorize(artifact)
         if artifact.sha256 != digest:
             raise PathPolicyError("Artifact does not match the verified snapshot")
-        data = self._content(artifact)
-        return {"name": artifact.name, "content": data[:65536].decode("utf-8", errors="replace"),
-                "truncated": len(data) > 65536}
+        return artifact, self._content(artifact)
 
     def _content(self, artifact):
         with _directory(self._root / artifact.id) as directory:

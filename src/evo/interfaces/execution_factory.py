@@ -24,6 +24,24 @@ from evo.config import HarnessConfig, HarnessModelConfig, ProviderConfig
 from evo.ports.harness import ToolInputError
 
 
+def create_issue_harness(state, store, run, *, comment, change_status, issue_artifacts=()):
+    provider = ProviderConfig.from_environment()
+    adapter = os.environ.get("EVO_HARNESS_ADAPTER", "claude_code")
+    config = HarnessConfig(adapter=adapter, cli_path=os.environ.get("EVO_CLAUDE_CLI", "claude"),
+                           native_issue_tools=adapter == "claude_code")
+    endpoint = "https://api.deepseek.com/anthropic" if provider.provider == "deepseek" else provider.base_url
+    model = HarnessModelConfig(provider=provider.provider, endpoint=endpoint, model=provider.model)
+    workspace = WorkspaceFilesystem(state, run["agent"], run_id=run["id"] if config.native_issue_tools else None)
+    executor = ActionExecutor(store, ApprovalService(store), agent=run["agent"], workspace=workspace,
+                              python=DockerPythonRunner(workspace), git=DockerGitTools(workspace))
+    broker = PlatformToolBroker(executor, web=WebTools(run["id"]), artifacts=ArtifactExchange(workspace),
+                                issue_comment=comment, issue_status=change_status, allow_approval_tools=False,
+                                issue_controls_only=config.native_issue_tools)
+    return workspace, create_harness(config, state, broker, model=model,
+                                     credential_loader=lambda: load_key(provider.provider),
+                                     issue_artifacts=issue_artifacts)
+
+
 def create_orchestrator(state, *, agents, squad=None, direct_assignee=None, store=None, provider=None,
                         harness_config=None, model=None, credential_loader=None, memory_state=None,
                         provider_config=None):

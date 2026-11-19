@@ -144,7 +144,7 @@ class WorkspaceFilesystem:
     """
 
     def __init__(self, state_root: Path | str, agent: str, *,
-                 max_file_bytes: int = MAX_FILE_BYTES):
+                 max_file_bytes: int = MAX_FILE_BYTES, run_id: str | None = None):
         if sys.platform != "linux":
             raise RuntimeError("Workspace tools require Linux")
         if type(max_file_bytes) is not int or not 0 < max_file_bytes <= MAX_FILE_BYTES:
@@ -152,7 +152,8 @@ class WorkspaceFilesystem:
         self.agent = validate_agent(agent)
         self.max_file_bytes = max_file_bytes
         self._state_root = Path(os.path.abspath(state_root))
-        self.workspace = self._state_root / "agents" / self.agent / "workspace"
+        self.workspace = (self._state_root / "issue-workspaces" / validate_agent(run_id)
+                          if run_id is not None else self._state_root / "agents" / self.agent / "workspace")
         with _directory(self.workspace, create=True):
             pass
 

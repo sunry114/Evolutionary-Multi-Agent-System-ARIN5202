@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 
 from evo.adapters.tools.docker import DockerPythonRunner
+from evo.adapters.tools.filesystem import PURPOSE_SUFFIXES
 from evo.adapters.tools.linux import DEFAULT_IMAGE
 from evo.ports.harness import HarnessCleanupError, HarnessError
 
@@ -40,6 +41,10 @@ class DockerCLITransport:
             raise HarnessError("Pinned local Python image/Docker daemon is unavailable")
         name = "evo-harness-" + uuid.uuid4().hex
         client = Path(__file__).with_name("container_client.py").resolve()
+        native = []
+        if self.config.native_issue_tools:
+            suffixes = sorted(set().union(*PURPOSE_SUFFIXES.values()))
+            native = ["--env", "EVO_ARTIFACT_SUFFIXES=" + ",".join(suffixes)]
         command = base + ["create", "--name", name, "--pull", "never", "--interactive", "--network", "none",
                           "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                           "--user", f"{os.getuid()}:{os.getgid()}", "--cpus", "1", "--memory", "1g",
@@ -55,7 +60,7 @@ class DockerCLITransport:
                           "--env", "ANTHROPIC_API_KEY=evo-broker-placeholder",
                           "--env", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
                           "--env", "DISABLE_AUTOUPDATER=1", "--env", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1",
-                          "--env", "EVO_CLI_VERSION=" + self.config.cli_version,
+                          "--env", "EVO_CLI_VERSION=" + self.config.cli_version] + native + [
                           "--workdir", "/workspace", "--log-driver", "none", image_id,
                           "python", "/opt/container_client.py", "launch"] + args
         try:
@@ -68,7 +73,8 @@ class DockerCLITransport:
                                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                            env=env, start_new_session=True)
                 outcome = capture(process, prompt, timeout=self.config.timeout,
-                                  limit=self.config.max_output_bytes, stop=stop, on_line=on_line)
+                                  limit=self.config.max_output_bytes, stop=stop, on_line=on_line,
+                                  max_line_bytes=2 * 1024 * 1024 if native else 1024 * 1024)
             if outcome.reason:
                 return outcome
             state = self.helper._capture(base + ["inspect", "--format", "{{.State.Status}} {{.State.ExitCode}}", name], 10, 4096)

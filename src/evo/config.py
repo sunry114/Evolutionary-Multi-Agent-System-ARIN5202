@@ -63,6 +63,7 @@ class HarnessConfig:
     timeout: float = 180
     max_output_bytes: int = 4 * 1024 * 1024
     max_tool_calls: int = 20
+    native_issue_tools: bool = False
 
     def __post_init__(self):
         if self.adapter not in ("baseline", "claude_code", "pi", "custom"):
@@ -72,7 +73,9 @@ class HarnessConfig:
                 or type(self.timeout) not in (int, float) or not math.isfinite(self.timeout)
                 or not 0 < self.timeout <= 600
                 or type(self.max_output_bytes) is not int or not 1024 <= self.max_output_bytes <= 8 * 1024 * 1024
-                or type(self.max_tool_calls) is not int or not 1 <= self.max_tool_calls <= 20):
+                or type(self.max_tool_calls) is not int or not 1 <= self.max_tool_calls <= 20
+                or type(self.native_issue_tools) is not bool
+                or (self.native_issue_tools and self.adapter != "claude_code")):
             raise ValueError("Invalid harness resource limits or CLI version")
 
 

@@ -7,6 +7,7 @@ import json
 import os
 import threading
 import uuid
+from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
 
@@ -172,6 +173,11 @@ class ManagedHarness:
     def events(self, handle, after=0):
         if type(after) is not int or after < 0:
             raise HarnessError("Invalid event cursor")
+        with self._lock:
+            control = self._active.get(handle.run_id)
+        if control is not None:
+            with control.lock:
+                return tuple(HarnessEvent(**deepcopy(event)) for event in control.record["events"][after:])
         record = self._load(handle.run_id)
         return tuple(HarnessEvent(**event) for event in record["events"] if event["sequence"] > after)
 

@@ -1,8 +1,10 @@
+import base64
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from evo.adapters.harness.container_client import export_artifacts
 from evo.adapters.harness.docker_cli import DockerCLITransport
 from evo.adapters.harness.process import ProcessOutcome
 from evo.adapters.tools.filesystem import WorkspaceFilesystem
@@ -56,6 +58,17 @@ class DockerHarnessCommandTests(unittest.TestCase):
             with self.assertRaises(HarnessError):
                 self.transport.run([], "", self.state, stop=lambda: "", on_line=lambda x: None)
             process.assert_not_called()
+
+    def test_docker_artifact_export_selects_regular_text_under_output_root(self):
+        output = self.state / "output"
+        output.mkdir()
+        (output / "reports").mkdir()
+        (output / "reports" / "hello.md").write_text("# Hello World\n")
+        (output / "foreign.md").symlink_to(output / "reports" / "hello.md")
+        (output / "other.bin").write_bytes(b"other")
+        frames = list(export_artifacts(output, {".md"}))
+        self.assertEqual([frame["path"] for frame in frames], ["reports/hello.md"])
+        self.assertEqual(base64.b64decode(frames[0]["content"]), b"# Hello World\n")
 
     def test_unverified_image_never_starts_a_container(self):
         self.transport.helper._capture = Mock(return_value=ExecutionResult(0, "not-an-image-id", ""))

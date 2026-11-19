@@ -14,7 +14,7 @@ class ProcessOutcome:
     reason: str = ""
 
 
-def capture(process, prompt, *, timeout, limit, stop, on_line):
+def capture(process, prompt, *, timeout, limit, stop, on_line, max_line_bytes=1024 * 1024):
     deadline = time.monotonic() + timeout
     incoming = bytearray()
     written = total = 0
@@ -59,7 +59,7 @@ def capture(process, prompt, *, timeout, limit, stop, on_line):
                     if name == "stderr":
                         continue  # Drain, count, and discard; never log raw diagnostics.
                     incoming.extend(chunk)
-                    if len(incoming) > 1024 * 1024:
+                    if len(incoming) > max_line_bytes:
                         reason = "protocol_error"
                         break
                     while b"\n" in incoming:

@@ -62,7 +62,7 @@ class ActionRepository(Protocol):
     def start_action(self, task_id: str, agent: str, tool_name: str, arguments: Record) -> str:
         ...
 
-    def finish_action(self, action_id: str, *, succeeded: bool, result: Record) -> None:
+    def finish_action(self, action_id: str, *, succeeded: bool, result: Record, fail_task: bool = True) -> None:
         ...
 
     def get_action(self, action_id: str) -> Record:

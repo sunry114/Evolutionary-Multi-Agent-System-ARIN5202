@@ -34,6 +34,9 @@ SCHEMAS = {
     "import_artifact": schema({"artifact_id": S, "destination": S}, ("artifact_id", "destination")),
     "delegate": schema({"agent": S, "description": S, "path": S, "contains": S},
                        ("agent", "description", "path", "contains")),
+    "post_issue_comment": schema({"content": S}, ("content",)),
+    "set_issue_status": schema({"status": {"type": "string", "enum": ["in_progress", "in_review", "blocked"]}},
+                               ("status",)),
 }
 CRITICAL_DISPATCH = frozenset(("run_python", "delete_file", "git_init", "git_status", "git_commit", "git_push"))
 
@@ -49,13 +52,18 @@ def jsonable(value):
 class PlatformToolBroker:
     """Constructed by trusted application code, bound to exactly one agent."""
 
-    def __init__(self, executor, *, web=None, artifacts=None, delegation=None):
+    def __init__(self, executor, *, web=None, artifacts=None, delegation=None,
+                 issue_comment=None, issue_status=None, allow_approval_tools=True, issue_controls_only=False):
         self.executor = executor
         self.workspace = executor.workspace
         self.repository = executor.repository
         self.web = web
         self.artifacts = artifacts
         self.delegation = delegation
+        self.issue_comment = issue_comment
+        self.issue_status = issue_status
+        self.allow_approval_tools = allow_approval_tools
+        self.issue_controls_only = issue_controls_only
 
     def validate(self, request):
         task = self.repository.get_task(request.task_id)
@@ -65,14 +73,24 @@ class PlatformToolBroker:
             raise HarnessError("Harness request does not match the bound task/workspace")
 
     def tools(self):
-        names = set(SCHEMAS)
+        names = {"post_issue_comment", "set_issue_status"} if self.issue_controls_only else set(SCHEMAS)
         if self.web is None:
             names -= {"search", "fetch_url"}
         if self.artifacts is None:
             names -= {"publish_artifact", "list_artifacts", "import_artifact"}
         if self.delegation is None:
             names -= {"delegate"}
-        return [{"name": name, "description": "Platform " + name + "; critical actions wait for human approval.",
+        if self.issue_comment is None:
+            names.discard("post_issue_comment")
+        if self.issue_status is None:
+            names.discard("set_issue_status")
+        if not self.allow_approval_tools:
+            from evo.domain.policies import CRITICAL_TOOLS
+            names -= CRITICAL_TOOLS
+        descriptions = {"git_status": "Inspect an initialized Git repository. Use list_files for ordinary workspace files.",
+                        "post_issue_comment": "Post on this issue. Use @agent to request a separate run.",
+                        "set_issue_status": "Set the assigned issue's status. Review requests apply after successful execution and archiving. Read issue_status for the current status."}
+        return [{"name": name, "description": descriptions.get(name, "Platform " + name),
                  "inputSchema": SCHEMAS[name]} for name in sorted(names)]
 
     def call(self, task_id, name, arguments, *, request_id=None):
@@ -103,6 +121,10 @@ class PlatformToolBroker:
             return self.executor.execute(task_id, name, arguments, request_id=request_id)
         if request_id is not None or task["status"] != "running":
             raise HarnessError("Task is not ready for platform tools")
+        if name == "post_issue_comment":
+            return {"status": "success", "result": self.issue_comment(**arguments)}
+        if name == "set_issue_status":
+            return {"status": "success", "result": self.issue_status(**arguments)}
         # Content is private workspace data, not durable audit metadata.
         summary = {key: value for key, value in arguments.items() if key not in ("content", "query", "url")}
         action_id = self.repository.start_action(task_id, self.executor.agent, name, summary)

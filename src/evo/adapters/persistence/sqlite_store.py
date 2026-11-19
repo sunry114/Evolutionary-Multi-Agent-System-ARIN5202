@@ -1065,7 +1065,7 @@ class SQLiteStore:
                                payload={"action_id": action_id, "tool_name": tool_name, "arguments": arguments})
         return action_id
 
-    def finish_action(self, action_id, *, succeeded, result):
+    def finish_action(self, action_id, *, succeeded, result, fail_task=True):
         with self._transaction() as connection:
             row = connection.execute("SELECT * FROM actions WHERE id=?", (action_id,)).fetchone()
             if row is None or row["status"] != "running":
@@ -1074,7 +1074,7 @@ class SQLiteStore:
             now = _utc_now()
             connection.execute("UPDATE actions SET status=?,result_json=?,completed_at=? WHERE id=?",
                                (status, _json_object(result), now, action_id))
-            if not succeeded:
+            if not succeeded and fail_task:
                 connection.execute("UPDATE tasks SET status='failed',updated_at=? WHERE id=?", (now, row["task_id"]))
             self._insert_event(connection, task_id=row["task_id"], event_type="action_completed", actor=row["agent"],
                                payload={"action_id": action_id, "status": status, "result": result})

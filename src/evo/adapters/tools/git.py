@@ -12,7 +12,7 @@ import uuid
 from evo.adapters.tools.docker import DockerPythonRunner
 from evo.adapters.tools.filesystem import _directory, _read_at, validate_file_path
 from evo.adapters.tools.linux import isolation_arguments
-from evo.ports.tools import ExecutionResult, ToolError
+from evo.ports.tools import ExecutionResult, GitRepositoryMissing, ToolError
 
 DEFAULT_GIT_IMAGE = (
     "alpine/git:2.49.1@sha256:"
@@ -171,6 +171,10 @@ class DockerGitTools(DockerPythonRunner):
         return self._run(["init", "--initial-branch=main", "--template="])
 
     def status(self):
+        try:
+            (self.filesystem.workspace / ".git").lstat()
+        except FileNotFoundError:
+            raise GitRepositoryMissing("No Git repository in this workspace") from None
         self.validate_local_repository()
         return self._run(["status", "--porcelain=v1", "--untracked-files=normal"])
 

@@ -86,6 +86,10 @@ class ToolError(RuntimeError):
     """Safe-to-report tool infrastructure or policy failure."""
 
 
+class GitRepositoryMissing(ToolError):
+    """A workspace has no local Git repository to inspect."""
+
+
 @dataclass(frozen=True)
 class ExecutionResult:
     exit_code: int
