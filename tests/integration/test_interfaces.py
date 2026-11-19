@@ -24,19 +24,22 @@ class CliTests(unittest.TestCase):
             self.assertEqual(main(["start", issue_id], app), 1)
         self.assertEqual(json.loads(output.getvalue())["status"], "blocked")
 
-    def test_missing_application_is_actionable(self):
+    def test_cli_can_queue_before_the_worker_is_running(self):
         with tempfile.TemporaryDirectory() as state, \
                 patch.dict(os.environ, {"EVO_APPLICATION_FACTORY": ""}), \
                 patch("evo.interfaces.execution_factory.load_key", side_effect=ValueError("missing credential")):
             with contextlib.redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(main(["--state", state, "create", "hello", "--agent", "builder"]), 0)
-            issue_id = json.loads(output.getvalue())["task"]["id"]
-            with contextlib.redirect_stderr(io.StringIO()) as error:
-                self.assertEqual(main(["--state", state, "start", issue_id]), 2)
-            self.assertIn("Execution needs", error.getvalue())
+            issue = json.loads(output.getvalue())
+            issue_id = issue["task"]["id"]
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(main(["--state", state, "start", issue_id]), 0)
+            self.assertEqual(json.loads(output.getvalue())["run_id"], issue["run_id"])
             with contextlib.redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(main(["--state", state, "task", issue_id]), 0)
-            self.assertEqual(json.loads(output.getvalue())["task"]["status"], "created")
+            detail = json.loads(output.getvalue())
+            self.assertEqual(detail["task"]["status"], "created")
+            self.assertEqual(detail["executions"][0]["status"], "queued")
 
     def test_commands_map_to_backend(self):
         class App:

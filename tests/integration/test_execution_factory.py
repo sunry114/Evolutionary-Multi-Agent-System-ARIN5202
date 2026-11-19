@@ -87,7 +87,7 @@ class ExecutionFactoryTests(unittest.TestCase):
 
             def command(*args, application=None):
                 with contextlib.redirect_stdout(io.StringIO()) as output:
-                    self.assertEqual(main(["--state", temp, *args], application), 0)
+                    self.assertEqual(main(["--state", temp, *args], application or SQLiteApplication(temp)), 0)
                 return json.loads(output.getvalue())
 
             with patch("evo.interfaces.execution_factory.load_key", side_effect=AssertionError) as load_key:

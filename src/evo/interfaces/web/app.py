@@ -8,9 +8,9 @@ from evo.interfaces.agent_registry import RegistryValidationError
 from evo.interfaces.gateway import ApplicationFailure, ApplicationUnavailable
 
 MAX_BODY = 65536
-OPERATIONS = {"create", "start", "resume", "configure", "dm", "group", "review", "revision",
-              "answer", "eval", "trace", "metrics", "memory", "task", "tasks", "messages",
-              "assign", "comment", "artifact", "chat-threads", "new-chat", "new-group"}
+OPERATIONS = {"create", "start", "configure", "dm", "group",
+              "eval", "trace", "metrics", "memory", "task", "tasks", "messages",
+              "assign", "comment", "artifact", "issue-status", "stop-run", "retry-run", "chat-threads", "new-chat", "new-group"}
 
 
 def unique_object(pairs):
@@ -42,6 +42,12 @@ def redact(value):
 
 
 def make_server(application, port=8768):
+    from evo.interfaces.sqlite_application import SQLiteApplication
+    from evo.interfaces.workbench import Workbench
+
+    workbench = Workbench(application) if isinstance(application, SQLiteApplication) else None
+    if workbench:
+        application = workbench
     token = secrets.token_urlsafe(32)
 
     class Handler(BaseHTTPRequestHandler):
@@ -130,6 +136,13 @@ def make_server(application, port=8768):
 
     class Server(ThreadingHTTPServer):
         daemon_threads = True
+
+        def serve_forever(self, poll_interval=0.5):
+            if workbench:
+                with workbench.worker():
+                    return super().serve_forever(poll_interval)
+            return super().serve_forever(poll_interval)
+
         def get_request(self):
             connection, address = super().get_request()
             connection.settimeout(10)

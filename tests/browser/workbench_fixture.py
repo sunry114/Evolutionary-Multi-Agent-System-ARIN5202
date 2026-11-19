@@ -33,6 +33,19 @@ class FixtureProvider:
 
 class FixtureHarness(BaselineHarnessAdapter):
     def _execute(self, control, request):
+        if self.broker.issue_comment:
+            with self.broker.repository._connect() as connection:
+                run = connection.execute("SELECT kind,retry_of FROM issue_runs WHERE id=?", (request.task_id,)).fetchone()
+            self._event(control, "assistant", {"text": "正在处理 " + request.agent})
+            if "慢速工单" in request.prompt and not run["retry_of"] and control.stop.wait(12):
+                return "cancelled", "", "", None
+            if request.agent == "researcher" and run["kind"] == "assignment":
+                self._call(control, request, "post_issue_comment", {"content": "@reviewer 独立核对证据"})
+                return "success", "已发给复核员", "", 0
+            if request.agent == "reviewer" and run["kind"] == "mention":
+                return "success", "已独立核对证据", "", 0
+            self._call(control, request, "write_file", {"path": "report.md", "content": "verified local report"})
+            return "success", "已完成本轮执行", "", 0
         revised = "Review feedback:" in request.prompt
         prepare = []
         if not revised:

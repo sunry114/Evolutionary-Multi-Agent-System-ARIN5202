@@ -4,27 +4,48 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="__TOKEN__">
-  <title>Evo · 工单协作工作台</title>
+  <title>Evo · 协作工作台</title>
   <style nonce="__TOKEN__">__STYLES__</style>
 </head>
 <body>
   <div class="shell">
     <aside class="sidebar">
-      <a class="brand" href="#issues"><span class="brand-mark">E</span><span>Evo<small>协作工作台</small></span></a>
+      <a class="brand" href="#issues" aria-label="Evo 工作台"><span class="brand-mark" aria-hidden="true">E</span></a>
       <nav aria-label="主导航" class="nav">
-        <a href="#issues" data-route="issues"><span aria-hidden="true">▤</span>工单列表</a>
-        <a href="#attention" data-route="attention"><span aria-hidden="true">◷</span>待我处理</a>
-        <a href="#workspace" data-route="workspace"><span aria-hidden="true">⚙</span>工作区</a>
+        <a href="#chat" data-route="chat"><span class="rail-icon chat-icon" aria-hidden="true"></span>聊天</a>
+        <a href="#issues" data-route="issues"><span class="rail-icon issues-icon" aria-hidden="true"></span>工单</a>
+        <a href="#workspace" data-route="workspace"><span class="rail-icon workspace-icon" aria-hidden="true">⚙</span>工作区</a>
       </nav>
-      <div class="sidebar-owners">
+    </aside>
+
+    <aside class="section-nav" id="section-nav" aria-label="当前区域导航">
+      <div class="issue-navigation" id="issue-navigation">
+        <nav class="section-links" aria-label="工单视图">
+          <a href="#issues" data-issue-route="issues">工单列表</a>
+          <a href="#attention" data-issue-route="attention">待我处理</a>
+        </nav>
         <h2>按负责人查看</h2>
-        <nav id="owner-nav" class="nav" aria-label="负责人"></nav>
+        <nav id="owner-nav" class="section-links" aria-label="负责人"></nav>
+      </div>
+      <div class="chat-navigation" id="chat-navigation" hidden>
+        <div class="section-heading">
+          <h2>会话</h2>
+          <div class="chat-actions">
+            <button id="new-chat" type="button" class="button quiet chat-add"><span aria-hidden="true">＋</span>新建聊天</button>
+            <button id="new-group" type="button" class="button quiet chat-add"><span aria-hidden="true">＋</span>新建群聊</button>
+          </div>
+        </div>
+        <nav class="section-links group-links" aria-label="群聊">
+          <a href="#chat/group" id="chat-group"><span class="chat-avatar chat-avatar-group" aria-hidden="true">群</span>工作区群聊</a>
+          <div id="group-list"></div>
+        </nav>
+        <nav id="chat-list" class="section-links chat-list" aria-label="私聊会话"></nav>
       </div>
       <div class="workspace-indicator" id="notice">正在连接</div>
     </aside>
 
     <main tabindex="-1">
-      <header class="topbar">
+      <header class="topbar" id="topbar">
         <div class="crumb" id="breadcrumb"><span>工作台</span><span aria-hidden="true">/</span><strong>工单</strong></div>
         <div class="top-actions">
           <button class="button quiet" id="refresh" type="button">刷新</button>
@@ -56,33 +77,52 @@
         </div>
       </section>
 
+      <section id="chat-view" class="chat-view" hidden aria-labelledby="chat-title">
+        <header class="chat-header">
+          <div id="chat-avatar" class="chat-avatar" aria-hidden="true"></div>
+          <div class="chat-header-text">
+            <h1 id="chat-title">聊天</h1>
+            <p id="chat-caption" class="muted"></p>
+          </div>
+        </header>
+        <div class="chat-transcript" id="chat-transcript">
+          <div id="chat-messages" class="chat-messages" role="log" aria-label="聊天记录"></div>
+        </div>
+        <form id="chat-form" class="chat-composer">
+          <p id="chat-feedback" class="form-error" role="alert" hidden></p>
+          <div class="chat-input">
+            <textarea name="message" aria-label="聊天消息" rows="2" required maxlength="8000"></textarea>
+            <button class="button primary" type="submit">发送消息</button>
+          </div>
+        </form>
+      </section>
+
       <section id="workspace-view" class="view" hidden aria-labelledby="workspace-title">
         <div class="page-heading"><h1 id="workspace-title">工作区</h1></div>
         <div class="settings-grid">
-          <details class="card setting">
-            <summary>配置成员和 Squad</summary>
+          <section class="card setting workspace-setting" aria-labelledby="squad-settings-title">
+            <h2 id="squad-settings-title">小队配置</h2>
             <form id="configure-form" class="stack">
-              <label>工作区配置（JSON）<textarea name="registry" rows="9" required spellcheck="false"></textarea></label>
-              <button class="button primary" type="submit">保存配置</button>
+              <fieldset id="squad-fields" class="stack settings-fields" disabled>
+                <div class="squad-identity">
+                  <label>小队名称<input name="squad_name" type="text" maxlength="64" required></label>
+                  <div class="squad-field"><label for="squad-lead">队长</label><select id="squad-lead" name="lead" required></select></div>
+                </div>
+                <fieldset class="settings-fields squad-member-field" aria-describedby="squad-member-hint">
+                  <legend>成员</legend>
+                  <p id="squad-member-hint" class="muted">队长自动计入成员。</p>
+                  <div id="squad-members" class="member-options"></div>
+                </fieldset>
+                <button class="button primary" type="submit">保存小队配置</button>
+              </fieldset>
+              <p id="squad-feedback" class="config-feedback" role="status" hidden></p>
             </form>
-          </details>
-          <details class="card setting">
-            <summary>工作区群聊</summary>
-            <form id="group-form" class="stack">
-              <label>群聊消息<textarea name="message" rows="2" required maxlength="8000"></textarea></label>
-              <button class="button" type="submit">发送群聊</button>
-            </form>
-            <div id="group-list" class="workspace-messages"></div>
-          </details>
-          <details class="card setting">
-            <summary>成员私聊</summary>
-            <form id="dm-form" class="stack">
-              <label>私聊成员<select name="agent" required></select></label>
-              <label>私聊消息<textarea name="message" rows="2" required maxlength="8000"></textarea></label>
-              <button class="button" type="submit">发送私聊</button>
-            </form>
-            <div id="dm-list" class="workspace-messages"></div>
-          </details>
+          </section>
+          <section class="card setting workspace-setting" aria-labelledby="agent-settings-title">
+            <h2 id="agent-settings-title">Agent 专长</h2>
+            <ul id="agent-profiles" class="agent-profiles"></ul>
+            <p id="agent-feedback" class="config-feedback" role="status" hidden></p>
+          </section>
           <details class="card setting">
             <summary>成员私有记忆</summary>
             <form id="memory-form" class="stack">
@@ -113,14 +153,49 @@
     <form id="create-form" class="stack">
       <div class="dialog-header"><h2 id="create-title">新建工单</h2><button id="close-create" class="button quiet" type="button" aria-label="关闭新建窗口">×</button></div>
       <label>目标与要求<textarea name="prompt" required rows="4" placeholder="描述要完成的工作和交付要求"></textarea></label>
-      <div class="field-grid">
-        <label>验收文件<input name="expected_path" placeholder="report.md"></label>
-        <label>文件应包含<input name="expected_text" placeholder="预期内容"></label>
-      </div>
+      <label>指派给<select name="assignee"></select></label>
       <label class="check"><input type="checkbox" name="from_group">关联工作区待归档的群聊</label>
       <label class="check"><input type="checkbox" name="no_memory">关闭本工单的个人记忆</label>
       <p id="create-error" class="form-error" role="alert" hidden></p>
       <div class="form-actions"><button class="button primary" type="submit">创建工单</button></div>
+    </form>
+  </dialog>
+  <dialog id="agent-dialog" aria-labelledby="agent-edit-title">
+    <form id="agent-form" class="stack">
+      <div class="dialog-header"><h2 id="agent-edit-title">编辑专长</h2><button id="close-agent" class="button quiet" type="button" aria-label="关闭编辑窗口">×</button></div>
+      <fieldset id="agent-edit-fields" class="stack settings-fields">
+        <label>专长<textarea name="specialty" rows="5" required autofocus></textarea></label>
+        <p id="agent-edit-error" class="form-error" role="alert" hidden></p>
+        <div class="form-actions">
+          <button class="button primary" type="submit">保存专长</button>
+          <button id="cancel-agent" class="button quiet" type="button">取消</button>
+        </div>
+      </fieldset>
+    </form>
+  </dialog>
+  <dialog id="chat-dialog" aria-labelledby="chat-dialog-title">
+    <div class="dialog-header">
+      <h2 id="chat-dialog-title">选择聊天 Agent</h2>
+      <form method="dialog"><button class="button quiet" type="submit" aria-label="关闭新建聊天">×</button></form>
+    </div>
+    <div id="chat-agent-picker" class="chat-agent-picker"></div>
+    <p id="chat-create-error" class="form-error" role="alert" hidden></p>
+  </dialog>
+  <dialog id="group-dialog" aria-labelledby="group-dialog-title">
+    <form id="group-form" class="stack">
+      <div class="dialog-header">
+        <h2 id="group-dialog-title">新建群聊</h2>
+        <button id="close-group" class="button quiet" type="button" aria-label="关闭新建群聊">×</button>
+      </div>
+      <fieldset id="group-fields" class="stack settings-fields">
+        <label>群聊名称<input name="group_name" type="text" maxlength="80" required autofocus></label>
+        <fieldset class="settings-fields member-field">
+          <legend>选择 Agent</legend>
+          <div id="group-members" class="member-options"></div>
+        </fieldset>
+        <p id="group-create-error" class="form-error" role="alert" hidden></p>
+        <div class="form-actions"><button class="button primary" type="submit">创建群聊</button></div>
+      </fieldset>
     </form>
   </dialog>
   <script nonce="__TOKEN__">__SCRIPT__</script>

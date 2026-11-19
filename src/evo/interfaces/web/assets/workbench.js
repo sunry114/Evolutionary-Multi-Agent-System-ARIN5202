@@ -3,18 +3,19 @@
 const el = id => document.getElementById(id);
 const token = document.querySelector('meta[name="csrf-token"]').content;
 const laneNames = {
-  needs_action: "待人工处理", review: "待验收", changes: "待修订", draft: "待启动",
-  in_progress: "执行中", blocked: "已阻塞", done: "已验收",
+  backlog: "待办池", todo: "待处理", in_progress: "进行中", in_review: "待审查",
+  blocked: "已阻塞", done: "已完成", cancelled: "已取消",
 };
-const executionNames = {
-  created: "待启动", planning: "规划中", ready: "待分派", assigned: "已分派", running: "执行中",
-  waiting_human: "等待人工", success: "执行成功", failed: "执行失败", blocked: "已阻塞",
-};
-const requestNames = {pending: "待处理", approved: "已批准", denied: "已拒绝", answered: "已回复", expired: "已过期"};
-const reviewNames = {pending: "待验收", accepted: "已接受", changes_requested: "已退回", revising: "修订中"};
-const routingNames = {squad: "队长协商", direct: "指定成员"};
-const tabNames = {discussion: "讨论", negotiation: "分派协商", logs: "运行记录", artifacts: "产物", decisions: "审批与审查", revisions: "修订"};
+const runNames = {queued: "已排队", running: "运行中", stopping: "正在停止", stopped: "已停止",
+  completed: "已完成", failed: "执行失败", interrupted: "执行中断"};
+const runKinds = {assignment: "工单指派", mention: "评论提及", handoff: "成员回报"};
+const activeRun = run => ["queued", "running", "stopping"].includes(run.status);
+const routingNames = {squad: "队长协调", direct: "指定成员"};
+const tabNames = {discussion: "讨论", logs: "运行记录", artifacts: "产物"};
 const eventNames = {
+  issue_run_queued: "运行入队", issue_run_started: "运行开始", issue_run_stop_requested: "请求停止",
+  issue_run_finished: "运行结束", issue_run_output: "Agent 进度", issue_run_tool: "Claude Code 原生工具",
+  issue_status_changed: "工单状态变更", issue_review_requested: "请求转待审查",
   issue_assigned: "更新负责人", plan_created: "生成执行计划", task_created: "创建任务", task_transition: "更新状态",
   routing_call: "路由模型调用", memory_recorded: "记录个人经验",
   harness_started: "启动执行器", harness_paused: "执行暂停", harness_finished: "执行结束", action_started: "工具启动",
@@ -23,7 +24,8 @@ const eventNames = {
   request_created: "发起人工请求", request_answered: "人工请求已处理", request_expired: "请求过期",
   review_decided: "人审决定", revision_linked: "创建修订", clarification_requested: "请求澄清",
 };
-const state = {workspace: null, detail: null, issues: [], messages: [], tab: "discussion", generation: 0};
+const state = {workspace: null, detail: null, issues: [], tab: "discussion", generation: 0,
+  chats: [], groups: [], chatKey: null, messages: [], drafts: new Map(), pending: new Map(), chatErrors: new Map()};
 
 function node(tag, value, parent, className) {
   const item = document.createElement(tag);
@@ -84,6 +86,11 @@ async function api(operation, payload) {
 function route() {
   const [view, key, name] = location.hash.slice(1).split("/");
   try {
+    if (view === "chat" && key === "group" && name) {
+      const groupId = decodeURIComponent(name);
+      return {view, key: "group/" + groupId, groupId};
+    }
+    if (view === "chat") return {view, key: key ? decodeURIComponent(key) : "group"};
     if (view === "issue" && key) return {view, key: decodeURIComponent(key)};
     if (view === "owner" && ["agent", "squad"].includes(key) && name) {
       return {view, type: key, key: decodeURIComponent(name)};
@@ -95,6 +102,8 @@ function route() {
 }
 
 function issueUrl(id) { return "#issue/" + encodeURIComponent(id); }
+function chatUrl(id) { return "#chat/" + encodeURIComponent(id); }
+function groupChatUrl(id) { return "#chat/group/" + encodeURIComponent(id); }
 function ownerUrl(name, type) { return name ? "#owner/" + type + "/" + encodeURIComponent(name) : "#issues"; }
 function issueKey(id) { return "EVO-" + id.slice(-7).toUpperCase(); }
 function title(task) { return task.prompt.split("\n")[0]; }
@@ -128,8 +137,14 @@ function renderNavigation(active) {
   if (squad) add(squad.name, "squad");
   agents.forEach(name => add(name, "agent"));
   select.value = active.view === "owner" ? active.type + ":" + active.key : "";
+  const section = ["chat", "workspace"].includes(active.view) ? active.view : "issues";
   for (const item of document.querySelectorAll("[data-route]")) {
-    if (item.dataset.route === (active.view === "issue" || active.view === "owner" ? "issues" : active.view)) {
+    if (item.dataset.route === section) {
+      item.setAttribute("aria-current", "page");
+    } else item.removeAttribute("aria-current");
+  }
+  for (const item of document.querySelectorAll("[data-issue-route]")) {
+    if (section === "issues" && item.dataset.issueRoute === (active.view === "attention" ? "attention" : "issues")) {
       item.setAttribute("aria-current", "page");
     } else item.removeAttribute("aria-current");
   }
@@ -142,7 +157,7 @@ function renderList() {
     current.view === "attention" ? "待我处理" : "工单";
   const query = el("search").value.trim().toLowerCase();
   const filter = el("status-filter").value;
-  const needsAttention = ["needs_action", "review", "changes"];
+  const needsAttention = ["in_review", "blocked"];
   const issues = state.issues.filter(issue =>
     (!filter || issue.lane === filter) &&
     (current.view !== "attention" || needsAttention.includes(issue.lane)) &&
@@ -221,30 +236,38 @@ function assignmentForm(parent, task) {
 function renderInspector(detail) {
   const parent = el("inspector");
   parent.replaceChildren();
-  const current = detail.current;
+  const current = detail.issue;
+  const runs = detail.executions || [];
   const next = node("section", "", parent, "card next");
-  node("h2", "下一步", next);
-  const action = detail.next_action;
-  if (action === "assign") {
-    assignmentForm(next, current);
-  } else if (action === "start" || action === "resume") {
-    const label = action === "resume" ? "继续执行" : (detail.runs.length > 1 ? "启动修订" : "启动工单");
-    button(next, label, control => mutate(control, action, {task_id: current.id},
-      action === "resume" ? "已处理恢复请求" : "已处理启动请求"), "primary");
-    if (action === "start") {
-      const edit = node("details", "", next);
-      node("summary", "更改负责人", edit);
-      assignmentForm(edit, current);
+  node("h2", "工单状态", next);
+  if (state.workspace.capabilities?.issue_runs) {
+    const form = node("form", "", next, "stack");
+    const status = field(form, "状态", "select", "status");
+    for (const [value, label] of Object.entries(laneNames)) {
+      option(status, label, value);
     }
-  } else if (action) {
-    const labels = {answer: "处理审批或澄清", review: "验收交付", revision: "创建修订"};
-    button(next, labels[action], () => openTab(action === "revision" ? "revisions" : "decisions"), "primary");
-  } else if (detail.lane === "blocked") {
-    button(next, "查看运行记录", () => openTab("logs"));
-  } else {
-    node("p", detail.lane === "done" ? "交付已验收" : "等待执行更新", next, "muted");
+    status.value = detail.lane;
+    const apply = formButton(form, "更新状态", "", "primary");
+    form.onsubmit = event => {
+      event.preventDefault();
+      void mutate(apply, "issue-status", {task_id: current.id, status: status.value}, "已更新状态");
+    };
   }
-  if (current.result) node("p", current.result, next, "result-text");
+  if (!current.assignee_id) {
+    assignmentForm(next, current);
+  } else {
+    const edit = node("details", "", next);
+    node("summary", "更改负责人", edit);
+    assignmentForm(edit, current);
+    if (detail.lane === "todo" && !runs.some(run => run.kind === "assignment")) {
+      button(next, "启动工单", control => mutate(control, "start", {task_id: current.id}, "已提交运行", "logs"));
+    }
+  }
+  const active = runs.find(activeRun);
+  if (active) {
+    node("p", `${active.agent} · ${runNames[active.status]}`, next, "muted");
+    button(next, "查看运行", () => openTab("logs"));
+  }
 
   const props = node("section", "", parent, "card");
   node("h2", "工单属性", props);
@@ -267,7 +290,6 @@ function renderInspector(detail) {
     });
   }
   property("工单 ID", detail.issue.id);
-  if (detail.runs.length > 1) property("当前运行", current.id);
 }
 
 function feedItem(parent, heading, metadata, body) {
@@ -291,7 +313,15 @@ function discussion(panel, detail) {
   const message = field(form, "工单讨论", "textarea", "message");
   message.required = true;
   message.maxLength = 8000;
-  message.placeholder = "留言或与成员讨论这张工单";
+  message.placeholder = "留言，或用 @Agent 名称请成员执行";
+  if (state.workspace.capabilities?.issue_runs) {
+    const mentions = node("div", "", form, "form-actions");
+    for (const agent of state.workspace.agents) button(mentions, "@" + agent, () => {
+      const prefix = message.value && !/\s$/.test(message.value) ? " " : "";
+      message.value += prefix + "@" + agent + " ";
+      message.focus();
+    }, "quiet");
+  }
   const actions = node("div", "", form, "form-actions");
   const post = formButton(actions, "发表评论", "comment", "primary");
   formButton(actions, "发送工单群聊", "group");
@@ -303,36 +333,30 @@ function discussion(panel, detail) {
   };
 }
 
-function negotiation(panel, detail) {
-  const labels = {
-    assignment_proposed: "提名", assignment_reply: "成员回复", assignment_confirmed: "确认负责人",
-    assignment_blocked: "协商阻塞", assignment_question: "请求澄清", assignment_clarification_requested: "等待澄清",
-  };
-  const decisions = {revise: "反提议", recommend: "推荐同伴", blocked: "报告阻塞", accept: "接受"};
-  const feed = node("div", "", panel, "feed");
-  if (!detail.negotiations.length) empty(feed, "暂无分派记录");
-  for (const event of detail.negotiations) {
-    const payload = event.payload;
-    const sender = payload.from || event.actor;
-    const recipient = payload.to || payload.owner;
-    const heading = (decisions[payload.decision] || labels[event.event_type] || event.event_type) +
-      " · " + sender + (recipient && sender !== recipient ? " → " + recipient : "");
-    const item = feedItem(feed, heading, [payload.subtask_id, payload.round ? "第 " + payload.round + " 轮" : "",
-      when(event.created_at)].filter(Boolean).join(" · "), payload.reason || payload.question);
-    if (payload.scope) node("p", "职责调整 · " + payload.scope, item, "feed-content");
-    if (payload.member) node("p", "推荐 · " + payload.member, item, "feed-content");
-    if (payload.description) node("p", "最终职责 · " + payload.description, item, "feed-content");
-  }
-}
-
 function logs(panel, detail) {
+  const executions = node("div", "", panel, "feed");
+  for (const run of detail.executions || []) {
+    const card = feedItem(executions, `${run.agent} · ${runNames[run.status]}`,
+      [runKinds[run.kind], when(run.created_at), run.retry_of ? "重试" : ""].filter(Boolean).join(" · "), run.result);
+    const controls = node("div", "", card, "form-actions");
+    const payload = {task_id: detail.issue.id, run_id: run.id};
+    if (["queued", "running"].includes(run.status)) {
+      button(controls, "停止运行", control => mutate(control, "stop-run", payload, "已提交停止请求", "logs"), "danger");
+    }
+    if (run.latest_attempt && ["failed", "stopped"].includes(run.status)) {
+      button(controls, "重试运行", control => mutate(control, "retry-run", payload, "重试已入队", "logs"));
+    }
+  }
   const feed = node("div", "", panel, "feed");
   if (!detail.logs.length) empty(feed, "暂无运行记录");
-  for (const event of [...detail.logs].reverse()) {
+  for (const event of [...detail.logs, ...detail.negotiations].sort((a, b) => b.id - a.id)) {
     const payload = event.payload;
+    const toolStatus = {started: "开始", completed: "完成", failed: "失败"};
+    const text = event.event_type === "issue_run_tool" ? payload.name + " · " + toolStatus[payload.status]
+      : payload.reason || (typeof payload.result === "string" ? payload.result : payload.result?.message);
     const item = feedItem(feed, eventNames[event.event_type] || event.event_type,
       [event.actor, issueKey(event.task_id), when(event.created_at)].filter(Boolean).join(" · "),
-      payload.reason || (typeof payload.result === "string" ? payload.result : null));
+      text);
     const expand = node("details", "", item);
     node("summary", "查看事件详情", expand);
     node("pre", JSON.stringify(payload, null, 2), expand, "output");
@@ -364,86 +388,7 @@ function artifacts(panel, detail) {
   }
 }
 
-function decisions(panel, detail) {
-  node("h2", "审批与澄清", panel);
-  const feed = node("div", "", panel, "feed");
-  if (!detail.approvals.length) empty(feed, "暂无审批或澄清");
-  for (const request of detail.approvals) {
-    const clarification = request.kind === "clarification";
-    const argumentsText = request.payload.arguments ? JSON.stringify(request.payload.arguments) : "";
-    const item = feedItem(feed, clarification ? "澄清" : request.action || "审批",
-      [request.agent, requestNames[request.status], when(request.created_at)].filter(Boolean).join(" · "),
-      clarification ? request.payload.question : argumentsText);
-    if (request.answer && request.answer.answer) node("p", request.answer.answer, item, "feed-content");
-    if (!request.actionable) continue;
-    const payload = {task_id: detail.issue.id, request_id: request.id};
-    if (clarification) {
-      const form = node("form", "", item, "stack");
-      const text = field(form, "澄清回答", "textarea", "answer");
-      text.required = true;
-      const submit = formButton(form, "保存回答", "", "primary");
-      form.onsubmit = event => {
-        event.preventDefault();
-        void mutate(submit, "answer", {...payload, answer: text.value}, "回答已保存", "decisions");
-      };
-    } else {
-      const actions = node("div", "", item, "form-actions");
-      button(actions, "批准", control => mutate(control, "answer", {...payload, approved: true}, "已批准", "decisions"), "primary");
-      button(actions, "拒绝", control => mutate(control, "answer", {...payload, approved: false}, "已拒绝", "decisions"), "danger");
-    }
-  }
-
-  node("h2", "交付审查", panel);
-  const reviews = node("div", "", panel, "feed");
-  for (const [index, run] of detail.runs.entries()) {
-    if (!run.review_status) continue;
-    feedItem(reviews, index ? "修订 " + index : "初次交付", reviewNames[run.review_status], run.review_feedback);
-  }
-  if (detail.next_action !== "review") {
-    if (!reviews.children.length) empty(reviews, "交付完成后进入审查");
-    return;
-  }
-  const form = node("form", "", panel, "stack");
-  const feedback = field(form, "审查意见", "textarea", "feedback");
-  feedback.placeholder = "退回时填写修改意见";
-  const actions = node("div", "", form, "form-actions");
-  const accept = formButton(actions, "接受交付", "accepted", "primary");
-  formButton(actions, "退回修改", "changes_requested", "danger");
-  form.onsubmit = event => {
-    event.preventDefault();
-    const submitter = event.submitter || accept;
-    const changed = submitter.value === "changes_requested";
-    if (changed && !feedback.value.trim()) {
-      notice("请填写退回修改的原因", true);
-      feedback.focus();
-      return;
-    }
-    void mutate(submitter, "review", {task_id: detail.current.id, decision: submitter.value, feedback: feedback.value},
-      changed ? "已退回，等待修订" : "交付已接受", changed ? "revisions" : "decisions");
-  };
-}
-
-function revisions(panel, detail) {
-  const feed = node("div", "", panel, "feed");
-  for (const [index, run] of detail.runs.entries()) {
-    const metadata = [executionNames[run.status], reviewNames[run.review_status]].filter(Boolean).join(" · ");
-    const item = feedItem(feed, index ? "修订 " + index : "初次运行", metadata, run.review_feedback);
-    if (index) node("p", run.prompt.split("\n").at(-1), item, "feed-content");
-  }
-  if (detail.next_action !== "revision") return;
-  const form = node("form", "", panel, "stack");
-  const prompt = field(form, "修订要求", "textarea", "prompt");
-  prompt.value = detail.current.review_feedback || "";
-  prompt.required = true;
-  const submit = formButton(form, "创建修订", "", "primary");
-  form.onsubmit = event => {
-    event.preventDefault();
-    void mutate(submit, "revision", {task_id: detail.current.id, prompt: prompt.value},
-      "修订已创建", "revisions");
-  };
-}
-
-const renderers = {discussion, negotiation, logs, artifacts, decisions, revisions};
+const renderers = {discussion, logs, artifacts};
 function renderActivity() {
   const detail = state.detail;
   if (!detail) return;
@@ -473,35 +418,198 @@ function renderDetail(detail) {
   renderInspector(detail);
 }
 
-function renderWorkspace() {
-  const {agents, agent_details: roles, squad, capabilities} = state.workspace;
-  el("configure-form").elements.registry.value = JSON.stringify({agents: roles || [], squad}, null, 2);
-  for (const name of ["dm", "memory"]) {
-    const select = el(name + "-form").elements.agent;
-    const previous = select.value;
-    select.replaceChildren();
-    for (const agent of agents) option(select, agent, agent);
-    if (agents.includes(previous)) select.value = previous;
-  }
-  for (const name of ["configure", "eval"]) {
-    for (const control of el(name + "-form").elements) control.disabled = capabilities?.[name] === false;
-  }
-  const groupList = el("group-list");
-  groupList.replaceChildren();
-  for (const item of state.messages.filter(item => item.kind === "group")) {
-    feedItem(groupList, item.sender, when(item.created_at), item.content);
-  }
-  renderPrivate();
+const squadForm = el("configure-form");
+const squadFields = el("squad-fields");
+const squadMembers = el("squad-members");
+const agentDialog = el("agent-dialog");
+const agentForm = el("agent-form");
+const agentEditFields = el("agent-edit-fields");
+
+function configFeedback(id, message = "", error = false) {
+  const feedback = el(id);
+  feedback.textContent = message;
+  feedback.classList.toggle("form-error", error);
+  feedback.hidden = !message;
 }
 
-function renderPrivate() {
-  const parent = el("dm-list");
-  parent.replaceChildren();
-  const agent = el("dm-form").elements.agent.value;
-  for (const item of state.messages.filter(item => item.kind === "dm" &&
-      (item.sender === agent || item.recipient === agent || item.agent === agent))) {
-    feedItem(parent, item.sender, when(item.created_at), item.content);
+function syncSquadLead() {
+  for (const checkbox of squadMembers.querySelectorAll("input")) {
+    checkbox.disabled = checkbox.value === squadForm.elements.lead.value;
+    if (checkbox.disabled) checkbox.checked = true;
   }
+}
+
+function renderMemberOptions(parent, agents, selected = []) {
+  parent.replaceChildren();
+  for (const name of agents) {
+    const label = node("label", "", parent, "check");
+    const checkbox = node("input", "", label);
+    checkbox.type = "checkbox";
+    checkbox.value = name;
+    checkbox.checked = selected.includes(name);
+    node("span", name, label);
+  }
+}
+
+function checkedMembers(parent) {
+  return [...parent.querySelectorAll("input:checked")].map(input => input.value);
+}
+
+function renderSquadSettings() {
+  const {agents, squad, capabilities} = state.workspace;
+  const lead = squadForm.elements.lead;
+  squadForm.elements.squad_name.value = squad?.name || "";
+  lead.replaceChildren();
+  for (const name of agents) option(lead, name, name);
+  renderMemberOptions(squadMembers, agents, squad?.members);
+  lead.value = squad?.lead || "";
+  syncSquadLead();
+  squadFields.disabled = !squad || capabilities?.configure === false;
+}
+
+function renderAgentProfiles() {
+  const {agents, agent_details: roles, capabilities} = state.workspace;
+  const list = el("agent-profiles");
+  list.replaceChildren();
+  for (const agent of roles || agents.map(name => ({name, specialty: ""}))) {
+    const row = node("li", "", list, "agent-profile");
+    avatar(row, agent.name);
+    const text = node("div", "", row);
+    node("h3", agent.name, text);
+    if (agent.specialty) node("p", agent.specialty, text, "muted");
+    const edit = button(row, "编辑专长", () => {
+      agentForm.dataset.agent = agent.name;
+      el("agent-edit-title").textContent = `编辑 ${agent.name} 的专长`;
+      agentForm.elements.specialty.value = agent.specialty;
+      configFeedback("agent-edit-error");
+      configFeedback("agent-feedback");
+      agentDialog.showModal();
+    }, "quiet");
+    edit.id = "edit-agent-" + agent.name;
+    edit.setAttribute("aria-label", `编辑 ${agent.name} 的专长`);
+    edit.disabled = capabilities?.configure === false;
+  }
+}
+
+function renderWorkspace() {
+  const {agents, capabilities} = state.workspace;
+  renderSquadSettings();
+  renderAgentProfiles();
+  configFeedback("squad-feedback");
+  configFeedback("agent-feedback");
+  const select = el("memory-form").elements.agent;
+  const previous = select.value;
+  select.replaceChildren();
+  for (const agent of agents) option(select, agent, agent);
+  if (agents.includes(previous)) select.value = previous;
+  for (const control of el("eval-form").elements) control.disabled = capabilities?.eval === false;
+}
+
+const chatForm = el("chat-form");
+const chatInput = chatForm.elements.message;
+const chatDialog = el("chat-dialog");
+
+function avatar(parent, name, style = "") {
+  const [initial = ""] = name;
+  const item = node("span", initial.toUpperCase(), parent, `chat-avatar ${style}`.trim());
+  item.setAttribute("aria-hidden", "true");
+}
+
+function renderChatNavigation(key) {
+  const group = el("chat-group");
+  if (key === "group") group.setAttribute("aria-current", "page");
+  else group.removeAttribute("aria-current");
+  const groupList = el("group-list");
+  groupList.replaceChildren();
+  for (const room of state.groups) {
+    const entry = link(groupList, "", groupChatUrl(room.id));
+    if (key === "group/" + room.id) entry.setAttribute("aria-current", "page");
+    avatar(entry, room.name, "chat-avatar-group");
+    const title = node("span", room.name, entry, "chat-link-title");
+    title.title = room.name;
+  }
+  const list = el("chat-list");
+  list.replaceChildren();
+  for (const chat of state.chats) {
+    const label = chat.title?.trim().split("\n")[0];
+    const entry = link(list, "", chatUrl(chat.id));
+    if (key === chat.id) entry.setAttribute("aria-current", "page");
+    avatar(entry, chat.agent);
+    const info = node("span", "", entry, "chat-link-info");
+    const heading = node("span", label || `与 ${chat.agent} 的聊天`, info, "chat-link-title");
+    heading.title = heading.textContent;
+    node("small", [label && chat.agent, when(chat.updated_at)].filter(Boolean).join(" · "), info);
+  }
+}
+
+function chatMessage(parent, message) {
+  const human = message.sender === "human";
+  const sender = human ? "你" : message.sender;
+  const row = node("article", "", parent, human ? "chat-message chat-message-human" : "chat-message");
+  avatar(row, sender, human ? "chat-avatar-human" : "");
+  const body = node("div", "", row, "chat-message-body");
+  const meta = node("div", "", body, "chat-message-meta");
+  node("strong", sender, meta);
+  if (message.created_at) {
+    node("time", when(message.created_at), meta).dateTime = message.created_at;
+  }
+  node("p", message.content, body, "chat-bubble");
+}
+
+function hasPosted(messages, pending) {
+  return messages.some(row => row.sender === "human" && row.content === pending.message && !pending.before.has(row.id));
+}
+
+function renderChat(active, loading = false) {
+  const workspaceGroup = active.key === "group";
+  const group = workspaceGroup || Boolean(active.groupId);
+  const room = state.groups.find(item => item.id === active.groupId);
+  const chat = state.chats.find(item => item.id === active.key);
+  const name = workspaceGroup ? "工作区群聊" : (room?.name || chat?.agent || "聊天");
+  const icon = el("chat-avatar");
+  icon.classList.toggle("chat-avatar-group", group);
+  icon.textContent = group ? "群" : name.slice(0, 1).toUpperCase();
+  el("chat-title").textContent = name;
+  const agents = state.workspace?.agents || [];
+  const members = room?.members || agents;
+  const available = members.some(member => agents.includes(member));
+  const removed = chat && !agents.includes(chat.agent);
+  el("chat-caption").textContent = group
+    ? members.map(member => agents.includes(member) ? member : member + "（已移出工作区）").join(" · ")
+    : removed ? "该 Agent 已移出工作区" : "私聊";
+  renderChatNavigation(active.key);
+  const messages = el("chat-messages");
+  messages.replaceChildren();
+  const pending = state.pending.get(active.key);
+  if (loading) {
+    empty(messages, "正在读取聊天");
+  } else if (!state.messages.length && !pending) {
+    const placeholder = node("div", "", messages, "chat-conversation-empty");
+    avatar(placeholder, group ? "群" : name, group ? "chat-avatar-group" : "");
+    const description = group && !available ? "群聊暂无可回复的 Agent" : `向 ${name} 发送第一条消息`;
+    node("p", description, placeholder);
+  } else {
+    for (const message of state.messages) chatMessage(messages, message);
+    if (pending) {
+      if (!hasPosted(state.messages, pending)) chatMessage(messages, {sender: "human", content: pending.message});
+      node("p", group ? "成员正在回复…" : `${name} 正在回复…`, messages, "chat-pending");
+    }
+  }
+  chatForm.hidden = !workspaceGroup && !room && !chat;
+  chatInput.value = state.drafts.get(active.key) || "";
+  chatInput.disabled = Boolean(removed || loading || pending || (group && !available));
+  chatInput.placeholder = group ? `发消息到 ${name}` : `发消息给 ${name}`;
+  chatForm.querySelector("button[type=submit]").disabled = chatInput.disabled;
+  const feedback = state.chatErrors.get(active.key);
+  el("chat-feedback").textContent = feedback || "";
+  el("chat-feedback").hidden = !feedback;
+  const transcript = el("chat-transcript");
+  transcript.scrollTop = transcript.scrollHeight;
+}
+
+function chatMessageScope(active) {
+  if (active.groupId) return {group_id: active.groupId};
+  return active.key === "group" ? {scope: "group"} : {chat_id: active.key};
 }
 
 async function load() {
@@ -509,9 +617,24 @@ async function load() {
   const generation = ++state.generation;
   const detail = active.view === "issue";
   const workspace = active.view === "workspace";
-  el("list-view").hidden = detail || workspace;
+  const chatting = active.view === "chat";
+  el("list-view").hidden = detail || workspace || chatting;
   el("detail-view").hidden = !detail;
   el("workspace-view").hidden = !workspace;
+  el("chat-view").hidden = !chatting;
+  el("topbar").hidden = chatting;
+  el("new-issue").hidden = workspace;
+  el("section-nav").hidden = workspace;
+  el("chat-navigation").hidden = !chatting;
+  el("issue-navigation").hidden = chatting;
+  const shellLayout = document.querySelector(".shell").classList;
+  shellLayout.toggle("without-section", workspace);
+  shellLayout.toggle("is-chat", chatting);
+  if (chatting && state.chatKey !== active.key) {
+    state.chatKey = active.key;
+    state.messages = [];
+    renderChat(active, true);
+  }
   const crumb = el("breadcrumb");
   crumb.replaceChildren();
   link(crumb, "工单", "#issues");
@@ -533,6 +656,10 @@ async function load() {
     const summary = await shell.json();
     if (generation !== state.generation) return;
     state.workspace = summary;
+    if (active.view === "owner" && active.type === "squad" && summary.squad && active.key !== summary.squad.name) {
+      location.replace(ownerUrl(summary.squad.name, "squad"));
+      return;
+    }
     renderNavigation(active);
     if (detail) {
       const records = await api("task", {task_id: active.key});
@@ -543,10 +670,23 @@ async function load() {
       }
       state.detail = records;
       renderDetail(records);
-    } else if (workspace) {
-      const data = await api("messages", {});
+    } else if (chatting) {
+      const index = await api("chat-threads", {});
       if (generation !== state.generation) return;
-      state.messages = data.messages;
+      state.chats = index.chats;
+      state.groups = index.groups || [];
+      const exists = active.groupId
+        ? state.groups.some(group => group.id === active.groupId)
+        : active.key === "group" || state.chats.some(chat => chat.id === active.key);
+      if (!exists) {
+        location.replace(chatUrl("group"));
+        return;
+      }
+      const history = await api("messages", chatMessageScope(active));
+      if (generation !== state.generation) return;
+      state.messages = history.messages;
+      renderChat(active);
+    } else if (workspace) {
       renderWorkspace();
     } else {
       const response = active.view === "owner" ?
@@ -571,7 +711,6 @@ el("owner-filter").onchange = event => {
 el("search").oninput = renderList;
 el("status-filter").onchange = renderList;
 el("refresh").onclick = () => { notice(); void load(); };
-el("dm-form").elements.agent.onchange = renderPrivate;
 window.addEventListener("hashchange", () => {
   state.tab = "discussion";
   notice();
@@ -579,10 +718,120 @@ window.addEventListener("hashchange", () => {
   void load();
 });
 
+let creatingChat = false;
+el("new-chat").onclick = () => {
+  const picker = el("chat-agent-picker");
+  picker.replaceChildren();
+  el("chat-create-error").hidden = true;
+  for (const agent of state.workspace?.agents || []) {
+    const choice = button(picker, "", async control => {
+      if (creatingChat) return;
+      creatingChat = true;
+      control.disabled = true;
+      el("chat-create-error").hidden = true;
+      try {
+        const {chat} = await api("new-chat", {agent});
+        if (chatDialog.open) {
+          chatDialog.close();
+          location.hash = chatUrl(chat.id);
+        }
+      } catch (error) {
+        const feedback = el("chat-create-error");
+        feedback.textContent = error.message;
+        feedback.hidden = false;
+      } finally {
+        control.disabled = false;
+        creatingChat = false;
+      }
+    }, "quiet");
+    avatar(choice, agent);
+    const info = node("span", "", choice, "chat-agent-info");
+    node("span", agent, info);
+    const specialty = state.workspace.agent_details?.find(item => item.name === agent)?.specialty;
+    if (specialty) node("small", specialty, info);
+  }
+  if (!picker.children.length) empty(picker, "工作区暂无 Agent");
+  chatDialog.showModal();
+};
+
+const groupDialog = el("group-dialog");
+const groupForm = el("group-form");
+const groupFields = el("group-fields");
+const groupMembers = el("group-members");
+groupForm.oninput = () => configFeedback("group-create-error");
+el("new-group").onclick = () => {
+  groupForm.reset();
+  renderMemberOptions(groupMembers, state.workspace?.agents || []);
+  configFeedback("group-create-error");
+  groupDialog.showModal();
+};
+el("close-group").onclick = () => groupDialog.close();
+groupDialog.oncancel = event => {
+  if (groupFields.disabled) event.preventDefault();
+};
+groupForm.onsubmit = async event => {
+  event.preventDefault();
+  if (groupFields.disabled) return;
+  const name = groupForm.elements.group_name.value.trim();
+  const members = checkedMembers(groupMembers);
+  if (!name || !members.length) {
+    configFeedback("group-create-error", !name ? "请输入群聊名称" : "请选择至少一个 Agent", true);
+    return;
+  }
+  groupFields.disabled = el("close-group").disabled = true;
+  configFeedback("group-create-error");
+  try {
+    const {group} = await api("new-group", {name, members});
+    groupDialog.close();
+    location.hash = groupChatUrl(group.id);
+  } catch (error) {
+    configFeedback("group-create-error", error.message, true);
+  } finally {
+    groupFields.disabled = el("close-group").disabled = false;
+  }
+};
+
+chatInput.oninput = () => state.drafts.set(state.chatKey, chatInput.value);
+chatForm.onsubmit = async event => {
+  event.preventDefault();
+  const active = route();
+  const message = chatInput.value.trim();
+  if (active.view !== "chat" || state.chatKey !== active.key || !message || state.pending.has(active.key)) return;
+  const pending = {message, before: new Set(state.messages.map(row => row.id))};
+  state.pending.set(active.key, pending);
+  state.drafts.delete(active.key);
+  state.chatErrors.delete(active.key);
+  renderChat(active);
+  try {
+    if (active.groupId) await api("group", {group_id: active.groupId, message});
+    else if (active.key === "group") await api("group", {message});
+    else await api("dm", {chat_id: active.key, message});
+  } catch (error) {
+    state.chatErrors.set(active.key, error.message);
+    try {
+      const history = await api("messages", chatMessageScope(active));
+      if (!hasPosted(history.messages, pending)) state.drafts.set(active.key, message);
+    } catch {
+      state.drafts.set(active.key, message);
+    }
+  } finally {
+    state.pending.delete(active.key);
+    if (route().view === "chat") {
+      await load();
+      if (route().key === active.key && !chatInput.disabled) chatInput.focus();
+    }
+  }
+};
+
 const dialog = el("create-dialog");
 const form = el("create-form");
 el("new-issue").onclick = () => {
   form.reset();
+  const select = form.elements.assignee;
+  select.replaceChildren();
+  option(select, "先不指派", "");
+  if (state.workspace?.squad) option(select, "Squad · " + state.workspace.squad.name, "squad:" + state.workspace.squad.name);
+  for (const agent of state.workspace?.agents || []) option(select, "Agent · " + agent, "agent:" + agent);
   el("create-error").hidden = true;
   dialog.showModal();
 };
@@ -590,14 +839,17 @@ el("close-create").onclick = () => dialog.close();
 form.onsubmit = async event => {
   event.preventDefault();
   const submit = form.querySelector('button[type="submit"]');
-  const {prompt, expected_path, expected_text, from_group, no_memory} = Object.fromEntries(new FormData(form));
+  const {prompt, assignee, from_group, no_memory} = Object.fromEntries(new FormData(form));
   const error = el("create-error");
   submit.disabled = true;
   error.hidden = true;
   try {
-    const payload = {prompt, from_group: Boolean(from_group), no_memory: Boolean(no_memory)};
-    if (Boolean(expected_path) !== Boolean(expected_text)) throw Error("请同时填写验收文件和预期内容");
-    if (expected_path) payload.checks = {s1: {path: expected_path, contains: expected_text}};
+    const payload = {prompt, from_group: Boolean(from_group)};
+    if (no_memory) payload.no_memory = true;
+    if (assignee) {
+      const [type, id] = assignee.split(":");
+      payload[type] = id;
+    }
     const result = await api("create", payload);
     dialog.close();
     location.hash = issueUrl(result.task.id);
@@ -607,17 +859,71 @@ form.onsubmit = async event => {
   } finally { submit.disabled = false; }
 };
 
-for (const operation of ["configure", "group", "dm", "memory", "eval"]) {
+squadForm.elements.lead.onchange = syncSquadLead;
+squadForm.oninput = () => configFeedback("squad-feedback");
+squadForm.onsubmit = async event => {
+  event.preventDefault();
+  if (squadFields.disabled) return;
+  const {squad_name, lead} = squadForm.elements;
+  const checked = new Set(checkedMembers(squadMembers));
+  const members = state.workspace.squad.members.filter(name => checked.delete(name)).concat([...checked]);
+  squadFields.disabled = true;
+  configFeedback("squad-feedback");
+  try {
+    const {squad} = await api("configure", {squad: {name: squad_name.value, lead: lead.value, members}});
+    if (route().view === "workspace") {
+      state.workspace.squad = squad;
+      renderSquadSettings();
+      configFeedback("squad-feedback", "小队配置已保存");
+    }
+  } catch (error) {
+    if (route().view === "workspace") configFeedback("squad-feedback", error.message, true);
+  } finally {
+    squadFields.disabled = !state.workspace?.squad || state.workspace.capabilities?.configure === false;
+  }
+};
+
+el("close-agent").onclick = el("cancel-agent").onclick = () => {
+  if (!agentEditFields.disabled) agentDialog.close();
+};
+agentDialog.oncancel = event => {
+  if (agentEditFields.disabled) event.preventDefault();
+};
+agentForm.onsubmit = async event => {
+  event.preventDefault();
+  if (agentEditFields.disabled) return;
+  const name = agentForm.dataset.agent;
+  const specialty = agentForm.elements.specialty.value;
+  agentEditFields.disabled = el("close-agent").disabled = true;
+  configFeedback("agent-edit-error");
+  try {
+    const {agents} = await api("configure", {agent: {name, specialty}});
+    const saved = agents.find(item => item.name === name);
+    agentDialog.close();
+    if (route().view === "workspace") {
+      const profiles = state.workspace.agent_details || agents;
+      state.workspace.agent_details = profiles.map(agent => agent.name === name ? saved : agent);
+      renderAgentProfiles();
+      configFeedback("agent-feedback", `${name} 的专长已保存`);
+      el("edit-agent-" + name)?.focus();
+    }
+  } catch (error) {
+    configFeedback("agent-edit-error", error.message, true);
+  } finally {
+    agentEditFields.disabled = el("close-agent").disabled = false;
+  }
+};
+
+for (const operation of ["memory", "eval"]) {
   const workspaceForm = el(operation + "-form");
   workspaceForm.onsubmit = async event => {
     event.preventDefault();
     const control = workspaceForm.querySelector('button[type="submit"]');
     const before = location.hash;
-    let payload = Object.fromEntries(new FormData(workspaceForm));
+    const payload = Object.fromEntries(new FormData(workspaceForm));
     control.disabled = true;
     notice();
     try {
-      if (operation === "configure") payload = JSON.parse(payload.registry);
       if (operation === "eval") {
         payload.compare_memory = payload.memory === "compare";
         payload.no_memory = payload.memory === "off";
@@ -625,22 +931,48 @@ for (const operation of ["configure", "group", "dm", "memory", "eval"]) {
       }
       const result = await api(operation, payload);
       if (before !== location.hash) return;
-      if (operation === "memory" || operation === "eval") {
-        const output = el(operation + "-result");
-        output.textContent = JSON.stringify(operation === "memory" ? result.memory : result, null, 2);
-        output.hidden = false;
-      } else {
-        if (workspaceForm.elements.message) workspaceForm.elements.message.value = "";
-        await load();
-        if (before === location.hash) notice("已保存");
-      }
+      const output = el(operation + "-result");
+      output.textContent = JSON.stringify(operation === "memory" ? result.memory : result, null, 2);
+      output.hidden = false;
     } catch (error) {
-      if (before === location.hash) {
-        notice(error.message, true);
-        if (operation === "dm" || operation === "group") await load();
-      }
+      if (before === location.hash) notice(error.message, true);
     } finally { control.disabled = false; }
   };
 }
 
+let polling = false;
+window.setInterval(async () => {
+  if (polling || !state.workspace?.capabilities?.issue_runs || document.hidden || dialog.open) return;
+  const active = route();
+  if (["workspace", "chat"].includes(active.view) || (active.view === "issue" && !state.detail)) return;
+  const generation = state.generation;
+  polling = true;
+  try {
+    if (active.view !== "issue") {
+      const filters = active.view === "owner" ? {owner: active.key, owner_type: active.type} : {};
+      const result = await api("tasks", filters);
+      if (generation === state.generation && JSON.stringify(result.tasks) !== JSON.stringify(state.issues)) {
+        state.issues = result.tasks;
+        renderList();
+      }
+      return;
+    }
+    const records = await api("task", {task_id: active.key});
+    if (generation !== state.generation || JSON.stringify(records) === JSON.stringify(state.detail)) return;
+    if (el("inspector").contains(document.activeElement)) return;
+    const draft = el("issue-panel").querySelector("textarea");
+    if (draft?.value || el("issue-panel").contains(document.activeElement)) {
+      state.detail = {...state.detail, lane: records.lane, issue: records.issue, executions: records.executions};
+      renderInspector(state.detail);
+    } else if (state.tab === "artifacts" && JSON.stringify(records.artifacts) === JSON.stringify(state.detail.artifacts)) {
+      state.detail = {...state.detail, lane: records.lane, issue: records.issue, executions: records.executions};
+      renderInspector(state.detail);
+    } else {
+      state.detail = records;
+      renderDetail(records);
+    }
+  } catch (_) {
+    // Keep the current view during a transient polling error.
+  } finally { polling = false; }
+}, 750);
 void load();

@@ -18,7 +18,7 @@ def read_private_key(prompt):
         return getpass.getpass(prompt)
 
 
-def parser():
+def parser(*, assessment=False):
     root = argparse.ArgumentParser(description="Evolutionary multi-agent platform")
     root.add_argument("--version", action="version", version=__version__)
     root.add_argument("--state", default=".evo")
@@ -39,15 +39,20 @@ def parser():
     assignee.add_argument("--squad")
     command.add_argument("--no-memory", action="store_true")
     command.add_argument("--from-group", action="store_true", help="Attach the unassigned group discussion")
-    command.add_argument("--expect-file")
-    command.add_argument("--expect-text")
-    command.add_argument("--checks-file", help="JSON object of s1..s5 artifact checks")
-    command = commands.add_parser("assign", help="Assign a draft issue or revision")
+    if assessment:
+        command.add_argument("--expect-file")
+        command.add_argument("--expect-text")
+        command.add_argument("--checks-file", help="JSON object of s1..s5 artifact checks")
+    command = commands.add_parser("assign", help="Assign an issue and queue eligible work")
     command.add_argument("task_id")
     assignee = command.add_mutually_exclusive_group(required=True)
     assignee.add_argument("--agent")
     assignee.add_argument("--squad")
-    commands.add_parser("start", help="Execute an existing issue").add_argument("task_id")
+    commands.add_parser("start", help="Queue an existing issue").add_argument("task_id")
+    for name, field in (("issue-status", "status"), ("stop-run", "run_id"), ("retry-run", "run_id")):
+        operation = commands.add_parser(name)
+        operation.add_argument("task_id")
+        operation.add_argument(field)
     command = commands.add_parser("group")
     command.add_argument("message")
     command.add_argument("--task", dest="task_id")
@@ -57,7 +62,6 @@ def parser():
     command = commands.add_parser("artifact")
     command.add_argument("task_id")
     command.add_argument("event_id", type=int)
-    commands.add_parser("resume").add_argument("task_id")
     command = commands.add_parser("dm")
     command.add_argument("agent")
     command.add_argument("message")
@@ -78,20 +82,22 @@ def parser():
     memory = command.add_mutually_exclusive_group()
     memory.add_argument("--no-memory", action="store_true")
     memory.add_argument("--compare-memory", action="store_true", help="Compare memory on and off with isolated state")
-    command = commands.add_parser("review")
-    command.add_argument("task_id")
-    command.add_argument("decision", choices=("accepted", "changes_requested"))
-    command.add_argument("--feedback", default="")
-    command = commands.add_parser("revision")
-    command.add_argument("task_id")
-    command.add_argument("prompt")
-    command = commands.add_parser("answer")
-    command.add_argument("task_id")
-    command.add_argument("request_id")
-    choice = command.add_mutually_exclusive_group(required=True)
-    choice.add_argument("--approve", action="store_true")
-    choice.add_argument("--deny", action="store_true")
-    choice.add_argument("--text")
+    if assessment:
+        commands.add_parser("resume").add_argument("task_id")
+        command = commands.add_parser("review")
+        command.add_argument("task_id")
+        command.add_argument("decision", choices=("accepted", "changes_requested"))
+        command.add_argument("--feedback", default="")
+        command = commands.add_parser("revision")
+        command.add_argument("task_id")
+        command.add_argument("prompt")
+        command = commands.add_parser("answer")
+        command.add_argument("task_id")
+        command.add_argument("request_id")
+        choice = command.add_mutually_exclusive_group(required=True)
+        choice.add_argument("--approve", action="store_true")
+        choice.add_argument("--deny", action="store_true")
+        choice.add_argument("--text")
     command = commands.add_parser("web")
     command.add_argument("--port", type=int, default=8768)
     command = commands.add_parser("setup-key", aliases=["setup-hkgai-key"])
@@ -106,7 +112,7 @@ def parser():
 
 
 def main(argv=None, application=None):
-    root = parser()
+    root = parser(assessment=application is not None)
     args = root.parse_args(argv)
     if not args.command:
         root.print_help()
@@ -142,24 +148,33 @@ def main(argv=None, application=None):
                 raise ValueError("Invalid port")
             serve(app, args.port)
             return 0
+        if application is None and not args.demo:
+            from evo.interfaces.sqlite_application import SQLiteApplication
+            from evo.interfaces.workbench import Workbench
+            if isinstance(app, SQLiteApplication):
+                app = Workbench(app)
         payload = {k: v for k, v in vars(args).items() if k not in ("command", "demo", "state") and v is not None}
         if args.command == "configure":
             payload = json.loads(Path(args.file).read_text(encoding="utf-8"))
         if args.command == "create":
-            if bool(args.expect_file) != bool(args.expect_text):
+            expect_file = getattr(args, "expect_file", None)
+            expect_text = getattr(args, "expect_text", None)
+            checks_file = getattr(args, "checks_file", None)
+            if bool(expect_file) != bool(expect_text):
                 raise ValueError("Provide both expected file and text")
-            if args.checks_file and args.expect_file:
+            if checks_file and expect_file:
                 raise ValueError("Choose checks file or expected file and text")
-            payload = {"prompt": args.prompt, "no_memory": args.no_memory, "from_group": args.from_group}
+            payload = {"prompt": args.prompt, "from_group": args.from_group}
+            if getattr(args, "no_memory", False):
+                payload["no_memory"] = True
             if args.agent is not None:
                 payload["agent"] = args.agent
             elif args.squad is not None:
                 payload["squad"] = args.squad
-            if args.checks_file:
-                payload["checks"] = json.loads(Path(args.checks_file).read_text(encoding="utf-8"))
-            elif args.expect_file:
-                payload["checks"] = {"s1": {"path": args.expect_file,
-                                            "contains": args.expect_text}}
+            if checks_file:
+                payload["checks"] = json.loads(Path(checks_file).read_text(encoding="utf-8"))
+            elif expect_file:
+                payload["checks"] = {"s1": {"path": expect_file, "contains": expect_text}}
         if args.command == "answer":
             payload = {"task_id": args.task_id, "request_id": args.request_id}
             payload.update({"answer": args.text} if args.text is not None else {"approved": args.approve})

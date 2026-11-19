@@ -34,44 +34,34 @@ python -c 'from evo.adapters.tools.git import DEFAULT_GIT_IMAGE; print(DEFAULT_G
 
 安装参考见 [Docker Engine](https://docs.docker.com/engine/install/ubuntu/) 和 [Claude Code](https://code.claude.com/docs/en/setup)。
 
-## 配置 Squad、创建和启动工单
+## 工作区聊天
 
-将工作区配置保存为 `team.json`。队长必须是 Squad 成员，所有成员必须出现在 `agents` 中。
+从一级菜单进入「聊天」，可打开工作区群聊，或在二级菜单点「新建聊天」并选择 Agent。每次新建都会产生独立的私聊，切换会话或刷新浏览器后仍可继续。已有私聊会按 Agent 显示在会话列表中。
 
-```json
-{
-  "agents": [
-    {"name": "builder", "specialty": "制作交付物"},
-    {"name": "reviewer", "specialty": "验证交付物"}
-  ],
-  "squad": {"name": "reports", "lead": "builder", "members": ["builder", "reviewer"]}
-}
-```
+点「新建群聊」可以填写群名并选择参与的 Agent。每个群会单独保存历史，只有群成员会收到消息并回复。工单里的「关联工作区待归档的群聊」使用默认的「工作区群聊」。
+
+## 日常工单流程
+
+在「工作区」的「小队配置」表单中修改名称、选择队长和勾选成员。名称支持中文，队长会自动加入成员。改名后，已指派给该小队的工单会显示新名称。在「Agent 专长」中可以单独编辑并保存每个 Agent 的专长。
+
+指派给小队时，第一轮由队长运行。队长通过评论 `@` 成员，成员的运行单独显示在同一张工单，回报后队长再协调下一步。
+
+新建时选负责人，或者在工单详情里指派。可执行的工单会立即加入 SQLite 队列。待办池里已指派的工单移到「待处理」时才入队。用评论里的 `@agent-name` 发起独立运行，原负责人和工单状态保持。Agent 的运行结果会写回讨论区，交付用「待审查」和「已完成」等工单状态确认。
+
+「运行记录」会显示队列状态、Claude Code 原生工具的开始和执行结果。Agent 可以在执行期间请求转入「待审查」，状态在运行成功且产物归档后更新。排队中的运行可以撤销，停止正在运行的任务会清理容器。重试会建立关联的新运行并启动独立沙箱。上次进程中断且无法确认清理的运行会标记为「执行中断」，供人工核对。
+
+CLI 和 Web 使用同一状态目录和队列。下面的 CLI 命令具体由同一状态目录下正在运行的 Web 进程领取。Web 暂未启动时，提交会保留在队列里。
 
 ```bash
 python -m evo --state .evo/local-workbench configure --file team.json
-python -m evo --state .evo/local-workbench create 'Create hello.md containing hello' \
-  --squad reports --expect-file hello.md --expect-text hello
-python -m evo --state .evo/local-workbench tasks
-# 将 ISSUE_ID 替换为建单返回的 task.id
-python -m evo --state .evo/local-workbench start ISSUE_ID
+python -m evo --state .evo/local-workbench create 'Write the report to report.md' --squad reports
+python -m evo --state .evo/local-workbench comment ISSUE_ID '@reviewer Check the evidence'
 python -m evo --state .evo/local-workbench task ISSUE_ID
+python -m evo --state .evo/local-workbench stop-run ISSUE_ID RUN_ID
+python -m evo --state .evo/local-workbench retry-run ISSUE_ID RUN_ID
+python -m evo --state .evo/local-workbench issue-status ISSUE_ID done
 ```
 
-建单和查询可以离线完成。用 `--squad reports` 指派后，队长提名、成员协商接单。使用 `--agent builder` 时，由指定成员直接接单。启动会保存本次路由、角色与 Squad 快照。成员在协商和执行时读取自己的相关经验。建单时用 `--no-memory` 关闭本次工单的经验读写。先通过 `group` 讨论，再用 `create --from-group` 将尚未关联工单的讨论绑定到新工单。
+工单的 Claude Code 运行使用独立的 Docker 沙箱，在 `/workspace` 中可以调用原生 Bash、Read 和 Write。本工单已归档的文本产物可以作为只读输入。运行成功后，Evo 会归档 `/workspace/output` 中支持的 UTF‑8 文件，包括 Markdown、纯文本、HTML、Python、JSON、YAML 和 CSV。归档上限为每个文件 1 MiB、每轮合计 2 MiB、最多 32 个文件。
 
-用同一工单 ID 执行 `task` 查看最终负责人、职责和阻塞原因，用 `trace` 查看每轮提名、回复和确认。每个子任务最多协商三轮。若需确认是否改变用户目标，用 `answer ISSUE_ID REQUEST_ID --text '回复'` 保存答案。审批使用 `answer ISSUE_ID REQUEST_ID --approve` 或 `--deny`。保存决定后用 `resume` 恢复等待中的运行，并沿用建单时的 `--state`。
-
-## 成员委派与恢复
-
-执行中的成员可以通过 `delegate` 提出有明确验收条件的子任务，由受邀成员协商后接单。每条链最多允许两层成员委派。父任务暂停执行，子任务验收通过后会将产物共享给发起人。父任务恢复时取得原委派结果，可用 `import_artifact` 导入产物并整合。
-
-嵌套审批期间，`task ISSUE_ID` 会显示委派链、审批 ID、执行成员和待批准的操作。记录批准或拒绝后，对根工单执行 `resume ISSUE_ID`。拒绝和验收失败会沿原链返回，依赖失败任务的后续工作会阻塞。相同委派请求复用原子任务和结果，重复审批或恢复不会再次执行工具。
-
-## 工单工作台
-
-在 Web 的「工单列表」按状态、负责人或标题筛选。新建工单时可关闭本工单的个人记忆。进入详情后查看「下一步」，在同一页查看讨论、分派协商、运行记录、产物、审批与审查及修订。产物预览读取对应运行的快照，旧版和修订版可分别查看。
-
-CLI 可以先用 `create PROMPT` 保存草稿，再用 `assign ISSUE_ID --squad reports` 指派，或用 `--agent NAME` 指派给成员。`tasks --owner NAME` 筛选工单，同名时用 `--owner-type agent` 或 `--owner-type squad` 区分。`comment ISSUE_ID MESSAGE` 添加评论，`group MESSAGE --task ISSUE_ID` 在本工单与成员讨论。
-
-退回交付时用 `review RUN_ID changes_requested --feedback MESSAGE` 保存意见，再用 `revision RUN_ID PROMPT` 创建修订。按返回的修订 ID 执行 `start RUN_ID`，审核通过后用 `review RUN_ID accepted` 接受交付。原工单 ID 仍可查看整条修订记录。
+课程评测单独从工作区的 JSONL 评测或 `eval` 启动。[课程评测指南](MID_TEST_RUNBOOK.md)

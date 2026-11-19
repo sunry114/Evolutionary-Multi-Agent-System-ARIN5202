@@ -57,37 +57,20 @@ async function post(page, operation, payload) {
   }, {operation, payload});
 }
 
-async function createIssue(page, title, checks = false, noMemory = false) {
+async function createIssue(page, title, assignee) {
   await page.getByRole('button', {name: '新建工单'}).click();
   const dialog = page.getByRole('dialog', {name: '新建工单'});
   await dialog.getByLabel('目标与要求').fill(title);
-  if (checks) {
-    await dialog.getByLabel('验收文件').fill('report.md');
-    await dialog.getByLabel('文件应包含').fill('review deliverable');
-  }
-  if (noMemory) await dialog.getByLabel('关闭本工单的个人记忆').check();
+  if (assignee) await dialog.getByLabel('指派给').selectOption(assignee);
   await dialog.getByRole('button', {name: '创建工单', exact: true}).click();
   await page.getByRole('heading', {name: title, exact: true}).waitFor();
   return decodeURIComponent(new URL(page.url()).hash.split('/')[1]);
 }
 
-async function commentAndChat(page, letters) {
-  const panel = page.locator('#issue-panel');
-  await panel.getByLabel('工单讨论').fill('评论-' + letters);
+async function writeComment(panel, content) {
+  await panel.getByLabel('工单讨论').fill(content);
   await panel.getByRole('button', {name: '发表评论'}).click();
-  await panel.getByText('评论-' + letters, {exact: true}).waitFor();
-  await panel.getByLabel('工单讨论').fill('群聊-' + letters);
-  await panel.getByRole('button', {name: '发送工单群聊'}).click();
-  await panel.getByText('reviewer 回复 群聊-' + letters, {exact: true}).waitFor();
-}
-
-async function assignAndStart(page) {
-  const inspector = page.locator('#inspector');
-  await inspector.getByLabel('指派给').selectOption('squad:default');
-  await inspector.getByRole('button', {name: '确认指派'}).click();
-  await inspector.getByRole('link', {name: 'Squad · default'}).waitFor();
-  await inspector.getByRole('button', {name: '启动工单'}).click();
-  await inspector.getByRole('button', {name: '处理审批或澄清'}).waitFor();
+  await panel.getByText(content, {exact: true}).waitFor();
 }
 
 async function openIssue(page, id, title, url) {
@@ -116,112 +99,205 @@ async function run() {
   checks.push('Untrusted issue titles remain plain text');
 
   const titleA = 'A · 复核样本报告';
-  const titleB = 'B · 独立工单';
-  const a = await createIssue(page, titleA, true, true);
-  await commentAndChat(page, 'A-ONLY');
-  await assignAndStart(page);
-  const {events} = (await post(page, 'trace', {task_id: a})).body;
-  assert.equal(events.find(event => event.event_type === 'run_config').payload.memory_enabled, false);
+  const titleB = 'B · 慢速工单';
+  const a = await createIssue(page, titleA);
   const panel = page.locator('#issue-panel');
   const tabs = page.locator('#issue-tabs');
   const inspector = page.locator('#inspector');
-  await tabs.getByRole('button', {name: '分派协商'}).click();
-  await panel.getByText('由复核员独立核对证据', {exact: true}).waitFor();
-  await panel.getByText('提名 · researcher → reviewer', {exact: true}).waitFor();
-  await panel.getByText(/最终职责.*附上独立证据/s).waitFor();
-  await page.screenshot({path: path.join(output, 'detail.png'), fullPage: true});
-  await tabs.getByRole('button', {name: '运行记录'}).click();
-  await panel.getByText('发起人工请求', {exact: true}).waitFor();
-  checks.push('Create, assign to Squad, start, inspect reassignment rationale and scoped run log');
-
-  const b = await createIssue(page, titleB, true);
-  await commentAndChat(page, 'B-ONLY');
-  await assignAndStart(page);
-  const detailsA = (await post(page, 'task', {task_id: a})).body;
-  const detailsB = (await post(page, 'task', {task_id: b})).body;
-  assert.equal(detailsA.approvals.length, 1);
-  assert.equal(detailsB.approvals.length, 1);
-  const requestA = detailsA.approvals[0];
-  const requestB = detailsB.approvals[0];
-  assert.notEqual(requestA.id, requestB.id);
-  assert.equal((await post(page, 'answer', {task_id: a, request_id: requestB.id, approved: true})).status, 409);
-
-  await openIssue(page, a, titleA);
-  await panel.getByText('评论-A-ONLY', {exact: true}).waitFor();
-  assert.doesNotMatch(await panel.innerText(), /B-ONLY/);
-  await inspector.getByRole('button', {name: '处理审批或澄清'}).click();
-  await panel.getByText(requestA.payload.arguments.path, {exact: false}).waitFor();
-  assert.doesNotMatch(await panel.innerText(), new RegExp(requestB.payload.arguments.path));
-  await panel.getByRole('button', {name: '批准', exact: true}).click();
-  await inspector.getByRole('button', {name: '继续执行'}).click();
-  await inspector.getByRole('button', {name: '验收交付'}).waitFor();
-  assert.equal((await post(page, 'task', {task_id: b})).body.approvals[0].status, 'pending');
-  checks.push('Issue discussions and approvals are isolated, including forged cross-issue answers');
-
+  await writeComment(panel, '评论-A-ONLY');
+  assert.equal((await post(page, 'task', {task_id: a})).body.executions.length, 0);
+  await panel.getByLabel('工单讨论').fill('群聊-A-ONLY');
+  await panel.getByRole('button', {name: '发送工单群聊'}).click();
+  await panel.getByText('reviewer 回复 群聊-A-ONLY', {exact: true}).waitFor();
+  await inspector.getByLabel('指派给').selectOption('squad:default');
+  await inspector.getByRole('button', {name: '确认指派'}).click();
+  await inspector.getByRole('link', {name: 'Squad · default'}).waitFor();
+  await panel.getByText('已完成本轮执行', {exact: true}).waitFor();
+  await page.locator('#issue-heading').getByText('待审查', {exact: true}).waitFor();
+  let details = (await post(page, 'task', {task_id: a})).body;
+  assert.deepEqual(details.executions.map(run => [run.kind, run.agent, run.status]), [
+    ['handoff', 'researcher', 'completed'], ['mention', 'reviewer', 'completed'], ['assignment', 'researcher', 'completed'],
+  ]);
+  assert.equal(details.issue.assignee_id, 'default');
   await tabs.getByRole('button', {name: '产物'}).click();
   await panel.getByRole('button', {name: '查看产物'}).click();
-  await panel.getByText('original review deliverable', {exact: true}).waitFor();
-  const originalArtifact = (await post(page, 'task', {task_id: a})).body.artifacts[0];
-  assert.equal((await post(page, 'artifact', {task_id: b, event_id: originalArtifact.event_id})).status, 409);
+  await panel.getByText('verified local report', {exact: true}).waitFor();
+  const artifact = details.artifacts[0];
+  await inspector.getByLabel('状态').selectOption('done');
+  await inspector.getByRole('button', {name: '更新状态'}).click();
+  await page.locator('#issue-heading').getByText('已完成', {exact: true}).waitFor();
+  checks.push('Assign a Squad, automatically run its leader, hand off via @mention and complete through issue status');
+  await page.screenshot({path: path.join(output, 'detail.png'), fullPage: true});
 
-  await inspector.getByRole('button', {name: '验收交付'}).click();
-  await panel.getByLabel('审查意见').fill('补充复核注释');
-  await panel.getByRole('button', {name: '退回修改'}).click();
-  await panel.getByLabel('修订要求').fill('保留原验收条件，补充注释');
-  await panel.getByRole('button', {name: '创建修订'}).click();
-  await inspector.getByRole('button', {name: '启动修订'}).click();
-  await inspector.getByRole('button', {name: '验收交付'}).waitFor();
-  assert.equal(decodeURIComponent(new URL(page.url()).hash.split('/')[1]), a);
-  await tabs.getByRole('button', {name: '产物'}).click();
-  const previews = panel.getByRole('button', {name: '查看产物'});
-  assert.equal(await previews.count(), 2);
-  await previews.nth(0).click();
-  await previews.nth(1).click();
-  await panel.getByText('original review deliverable', {exact: true}).waitFor();
-  await panel.getByText('revised review deliverable', {exact: true}).waitFor();
-  checks.push('Original and revised artifact snapshots remain available under one issue ID');
+  const b = await createIssue(page, titleB, 'agent:builder');
+  await tabs.getByRole('button', {name: '运行记录'}).click();
+  await panel.getByText('builder · 运行中', {exact: true}).waitFor();
+  await panel.getByText('正在处理 builder', {exact: true}).waitFor();
+  assert.equal((await post(page, 'artifact', {task_id: b, event_id: artifact.event_id})).status, 409);
+  const running = (await post(page, 'task', {task_id: b})).body.executions[0];
+  assert.equal((await post(page, 'stop-run', {task_id: a, run_id: running.id})).status, 409);
+  await panel.getByRole('button', {name: '停止运行'}).click();
+  await panel.getByText('builder · 已停止', {exact: true}).waitFor();
+  await panel.getByRole('button', {name: '重试运行'}).click();
+  await panel.getByText('builder · 已完成', {exact: true}).waitFor();
+  details = (await post(page, 'task', {task_id: b})).body;
+  assert.deepEqual(details.executions.map(run => [run.status, run.retry_of]), [['completed', running.id], ['stopped', null]]);
+  checks.push('View live progress, stop a running job, and retry as a distinct attempt');
 
-  await inspector.getByRole('button', {name: '验收交付'}).click();
-  await panel.getByRole('button', {name: '接受交付'}).click();
-  await inspector.getByText('交付已验收', {exact: true}).waitFor();
-  assert.equal((await post(page, 'task', {task_id: a})).body.current.review_status, 'accepted');
-  await page.getByRole('navigation', {name: '负责人', exact: true}).getByRole('link', {name: 'Agent reviewer'}).click();
-  await page.getByRole('heading', {name: 'reviewer 的工单'}).waitFor();
-  await page.locator('#issue-list').getByRole('link', {name: new RegExp(titleA)}).waitFor();
-  assert.equal(await page.locator('#issue-list .issue-row').count(), 2);
-  await page.getByRole('navigation', {name: '主导航'}).getByRole('link', {name: '工单列表'}).click();
-  await page.getByRole('heading', {name: '工单', exact: true}).waitFor();
-  await page.getByRole('searchbox', {name: '搜索工单'}).fill('复核样本');
-  assert.equal(await page.locator('#issue-list .issue-row').count(), 1);
-  checks.push('Accept the revised delivery and find it by execution owner or search');
-  await page.getByRole('searchbox', {name: '搜索工单'}).fill('');
-  await page.screenshot({path: path.join(output, 'desktop.png'), fullPage: true});
+  await openIssue(page, a, titleA);
+  await writeComment(panel, '@builder 请复查 @builder');
+  await panel.getByText('已完成本轮执行', {exact: true}).last().waitFor();
+  await tabs.getByRole('button', {name: '运行记录'}).click();
+  await panel.getByText('builder · 已完成', {exact: true}).waitFor();
+  details = (await post(page, 'task', {task_id: a})).body;
+  assert.equal(details.executions.filter(run => run.kind === 'mention' && run.agent === 'builder').length, 1);
+  assert.equal(details.issue.assignee_id, 'default');
+  assert.equal(details.lane, 'done');
+  assert.equal((await post(page, 'review', {task_id: a, decision: 'accepted'})).status, 404);
+  assert.equal((await post(page, 'answer', {task_id: a, request_id: 'old'})).status, 404);
+  checks.push('A human @mention creates one targeted run and preserves issue ownership and status');
 
   const oldToken = await page.locator('meta[name=csrf-token]').getAttribute('content');
   await stop();
   url = await start();
   await openIssue(page, a, titleA, url);
   assert.notEqual(await page.locator('meta[name=csrf-token]').getAttribute('content'), oldToken);
-  await inspector.getByText('交付已验收', {exact: true}).waitFor();
+  await page.locator('#issue-heading').getByText('已完成', {exact: true}).waitFor();
   await panel.getByText('评论-A-ONLY', {exact: true}).waitFor();
   await openIssue(page, b, titleB);
-  await panel.getByText('评论-B-ONLY', {exact: true}).waitFor();
-  assert.doesNotMatch(await panel.innerText(), /A-ONLY/);
-  await inspector.getByRole('button', {name: '处理审批或澄清'}).waitFor();
-  assert.equal((await post(page, 'task', {task_id: b})).body.approvals[0].id, requestB.id);
-  checks.push('Server restart preserves deep links, discussion, revision review and the other pending approval');
+  assert.doesNotMatch(await panel.innerText(), /评论-A-ONLY/);
+  assert.equal((await post(page, 'task', {task_id: b})).body.executions[1].status, 'stopped');
+  checks.push('Restart preserves issue state and run history, with comments scoped to the issue');
 
-  await page.getByRole('navigation', {name: '主导航'}).getByRole('link', {name: '工作区'}).click();
+  const primary = page.getByRole('navigation', {name: '主导航'});
+  const conversations = page.getByRole('navigation', {name: '私聊会话'});
+  const transcript = page.getByRole('log', {name: '聊天记录'});
+  await primary.getByRole('link', {name: '聊天', exact: true}).click();
+  await page.getByRole('heading', {name: '工作区群聊', exact: true}).waitFor();
+  await page.getByLabel('聊天消息').fill('工作区群聊留档');
+  await page.getByRole('button', {name: '发送消息'}).click();
+  await transcript.getByText('reviewer 回复 工作区群聊留档', {exact: true}).waitFor();
+  assert.doesNotMatch(await transcript.innerText(), /群聊-A-ONLY/);
+  await page.screenshot({path: path.join(output, 'chat-group.png')});
+  checks.push('Open workspace group chat from primary navigation and keep issue discussions separate');
+
+  const groups = page.getByRole('navigation', {name: '群聊', exact: true});
+  const groupDialog = page.getByRole('dialog', {name: '新建群聊'});
+  const newGroup = page.getByRole('button', {name: '新建群聊', exact: true});
+  await newGroup.click();
+  await groupDialog.getByLabel('群聊名称').fill('分析讨论');
+  await groupDialog.getByRole('button', {name: '创建群聊'}).click();
+  await groupDialog.getByRole('alert').filter({hasText: '请选择至少一个 Agent'}).waitFor();
+  await groupDialog.getByRole('checkbox', {name: 'researcher'}).check();
+  await groupDialog.getByRole('checkbox', {name: 'builder'}).check();
+  await page.screenshot({path: path.join(output, 'group-picker.png')});
+  await groupDialog.getByRole('button', {name: '创建群聊'}).click();
+  await page.getByRole('heading', {name: '分析讨论', exact: true}).waitFor();
+  await page.getByLabel('聊天消息').fill('分析群历史');
+  await page.getByRole('button', {name: '发送消息'}).click();
+  await transcript.getByText('builder 回复 分析群历史', {exact: true}).waitFor();
+  assert.doesNotMatch(await transcript.innerText(), /reviewer|工作区群聊留档/);
+  await newGroup.click();
+  await groupDialog.getByLabel('群聊名称').fill('交付复核');
+  await groupDialog.getByRole('checkbox', {name: 'builder'}).check();
+  await groupDialog.getByRole('checkbox', {name: 'reviewer'}).check();
+  await groupDialog.getByRole('button', {name: '创建群聊'}).click();
+  await page.getByRole('heading', {name: '交付复核', exact: true}).waitFor();
+  await page.getByLabel('聊天消息').fill('交付群历史');
+  await page.getByRole('button', {name: '发送消息'}).click();
+  await transcript.getByText('reviewer 回复 交付群历史', {exact: true}).waitFor();
+  assert.doesNotMatch(await transcript.innerText(), /researcher|分析群历史|工作区群聊留档/);
+  await groups.getByRole('link', {name: '分析讨论', exact: true}).click();
+  await transcript.getByText('builder 回复 分析群历史', {exact: true}).waitFor();
+  await page.reload();
+  await transcript.getByText('builder 回复 分析群历史', {exact: true}).waitFor();
+  await page.screenshot({path: path.join(output, 'group-conversation.png')});
+  checks.push('Create named groups with different members and reload their independent chat histories');
+
+  const newChat = page.getByRole('button', {name: '新建聊天', exact: true});
+  const agentPicker = page.getByRole('dialog', {name: '选择聊天 Agent'});
+  await newChat.click();
+  await page.screenshot({path: path.join(output, 'chat-picker.png')});
+  await agentPicker.getByRole('button', {name: /^builder/}).click();
+  await page.getByRole('heading', {name: 'builder', exact: true}).waitFor();
+  await page.getByLabel('聊天消息').fill('工作区私聊');
+  await page.getByRole('button', {name: '发送消息'}).click();
+  await transcript.getByText('builder 回复 工作区私聊', {exact: true}).waitFor();
+  const firstChat = page.url();
+  await newChat.click();
+  await agentPicker.getByRole('button', {name: /^builder/}).click();
+  await transcript.getByText('向 builder 发送第一条消息', {exact: true}).waitFor();
+  assert.notEqual(page.url(), firstChat);
+  await page.getByLabel('聊天消息').fill('另一个私聊');
+  await page.getByRole('button', {name: '发送消息'}).click();
+  await transcript.getByText('builder 回复 另一个私聊', {exact: true}).waitFor();
+  assert.doesNotMatch(await transcript.innerText(), /工作区私聊|工作区群聊留档/);
+  await conversations.getByRole('link', {name: /^工作区私聊/}).click();
+  await transcript.getByText('builder 回复 工作区私聊', {exact: true}).waitFor();
+  await page.reload();
+  await transcript.getByText('builder 回复 工作区私聊', {exact: true}).waitFor();
+  await page.screenshot({path: path.join(output, 'chat-private.png')});
+  await page.getByRole('link', {name: '工作区群聊', exact: true}).click();
+  await transcript.getByText('reviewer 回复 工作区群聊留档', {exact: true}).waitFor();
+  assert.doesNotMatch(await transcript.innerText(), /工作区私聊|另一个私聊/);
+  checks.push('Choose an agent from the chat submenu, create independent sessions, switch and reload');
+
+  await primary.getByRole('link', {name: '工作区', exact: true}).click();
   await page.getByRole('heading', {name: '工作区', exact: true}).waitFor();
-  const privateChat = page.locator('details').filter({hasText: '成员私聊'});
-  await privateChat.locator('summary').click();
-  await privateChat.getByLabel('私聊成员').selectOption('builder');
-  await privateChat.getByLabel('私聊消息').fill('工作区私聊');
-  await privateChat.getByRole('button', {name: '发送私聊'}).click();
-  await privateChat.getByText('builder 回复 工作区私聊', {exact: true}).waitFor();
-  await privateChat.getByLabel('私聊成员').selectOption('reviewer');
-  assert.equal(await privateChat.getByText('工作区私聊', {exact: false}).count(), 0);
+  const settings = page.getByRole('region', {name: '小队配置'});
+  const configInput = settings.getByLabel('小队名称');
+  const lead = settings.getByLabel('队长', {exact: true});
+  const reviewer = settings.getByRole('checkbox', {name: 'reviewer'});
+  const saveConfig = settings.getByRole('button', {name: '保存小队配置'});
+  assert.equal(await configInput.inputValue(), 'default');
+  await configInput.fill('../小队1');
+  await saveConfig.click();
+  await settings.getByRole('status').filter({hasText: /小队名称须为/}).waitFor();
+  assert.equal(await configInput.inputValue(), '../小队1');
+  await configInput.fill('小队1');
+  await reviewer.uncheck();
+  await lead.selectOption('reviewer');
+  assert.equal(await reviewer.isChecked(), true);
+  assert.equal(await reviewer.isDisabled(), true);
+  await settings.getByRole('checkbox', {name: 'researcher'}).uncheck();
 
+  const profiles = page.getByRole('region', {name: 'Agent 专长'});
+  const builderEdit = profiles.getByRole('button', {name: '编辑 builder 的专长'});
+  const editDialog = page.getByRole('dialog', {name: '编辑 builder 的专长'});
+  const specialty = '编写和维护测试文档';
+  await builderEdit.click();
+  await editDialog.getByLabel('专长').fill(specialty);
+  await page.screenshot({path: path.join(output, 'workspace-agent-edit.png')});
+  await editDialog.getByRole('button', {name: '保存专长'}).click();
+  await profiles.getByRole('status').filter({hasText: 'builder 的专长已保存'}).waitFor();
+  await profiles.getByText(specialty, {exact: true}).waitFor();
+  assert.deepEqual(await page.evaluate(() => fetch('/api/state').then(response => response.json()).then(state => state.squad)),
+    {name: 'default', lead: 'researcher', members: ['researcher', 'builder', 'reviewer']});
+  assert.equal(await configInput.inputValue(), '小队1');
+  assert.equal(await lead.inputValue(), 'reviewer');
+
+  await saveConfig.click();
+  await settings.getByRole('status').filter({hasText: '小队配置已保存'}).waitFor();
+  await page.reload();
+  await profiles.getByText(specialty, {exact: true}).waitFor();
+  assert.equal(await configInput.inputValue(), '小队1');
+  assert.equal(await lead.inputValue(), 'reviewer');
+  assert.equal(await reviewer.isChecked(), true);
+  assert.equal(await settings.getByRole('checkbox', {name: 'researcher'}).isChecked(), false);
+  await page.screenshot({path: path.join(output, 'workspace-settings.png')});
+  checks.push('Select lead and members and save one agent specialty independently of squad edits');
+
+  await openIssue(page, a, titleA);
+  await inspector.getByRole('link', {name: 'Squad · 小队1', exact: true}).click();
+  await page.getByRole('heading', {name: '小队1 的工单', exact: true}).waitFor();
+  await page.getByRole('link', {name: new RegExp(titleA)}).waitFor();
+  await page.evaluate(() => {location.hash = '#owner/squad/default';});
+  await page.waitForURL(url => decodeURIComponent(url.hash) === '#owner/squad/小队1');
+  await page.getByRole('link', {name: new RegExp(titleA)}).waitFor();
+  checks.push('Save a Chinese squad name, preserve existing issues and redirect the old squad bookmark');
+
+  await primary.getByRole('link', {name: '工作区', exact: true}).click();
+  await page.getByRole('heading', {name: '工作区', exact: true}).waitFor();
   const dataset = path.join(state, 'memory-case.jsonl');
   const comparison = path.join(state, 'reports', 'memory-comparison.json');
   fs.writeFileSync(dataset, JSON.stringify({id: 'test', prompt: 'Write the report',
@@ -243,15 +319,32 @@ async function run() {
   checks.push('Web memory comparison writes and displays both arms under the same approval policy');
 
   await openIssue(page, b, titleB);
-  await panel.getByText('评论-B-ONLY', {exact: true}).waitFor();
   assert.doesNotMatch(await panel.innerText(), /工作区私聊/);
   checks.push('Workspace private messages remain outside issue discussion');
 
   await page.setViewportSize({width: 390, height: 844});
   await page.screenshot({path: path.join(output, 'mobile.png'), fullPage: true});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await primary.getByRole('link', {name: '工作区', exact: true}).click();
+  await profiles.getByText(specialty, {exact: true}).waitFor();
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  const nameBox = await configInput.boundingBox();
+  const leadBox = await lead.boundingBox();
+  assert.ok(nameBox.x + nameBox.width < leadBox.x);
+  await evaluation.locator('summary').click();
+  await page.screenshot({path: path.join(output, 'workspace-mobile.png'), fullPage: true});
+  await primary.getByRole('link', {name: '聊天', exact: true}).click();
+  await conversations.getByRole('link', {name: /^另一个私聊/}).click();
+  await transcript.getByText('builder 回复 另一个私聊', {exact: true}).waitFor();
+  assert.equal(await newChat.isVisible(), true);
+  assert.equal(await newGroup.isVisible(), true);
+  assert.equal(await page.evaluate(() => {
+    const composer = document.getElementById('chat-form').getBoundingClientRect();
+    return document.documentElement.scrollWidth <= innerWidth && composer.bottom <= innerHeight;
+  }), true);
+  await page.screenshot({path: path.join(output, 'chat-mobile.png')});
   assert.deepEqual(errors, []);
-  checks.push('Mobile workbench fits the viewport and emits no JavaScript errors');
+  checks.push('Mobile workbench and chat composer fit the viewport and emit no JavaScript errors');
   fs.writeFileSync(path.join(output, 'report.json'),
     JSON.stringify({status: 'passed', browser: browser.version(), checks, fixture: 'scripted provider and harness'}, null, 2));
   console.log(JSON.stringify({status: 'passed', checks: checks.length, output}));
