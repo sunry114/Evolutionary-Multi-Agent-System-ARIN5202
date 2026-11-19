@@ -2,49 +2,24 @@
 
 from __future__ import annotations
 
-import hashlib
+import json
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, replace
 from pathlib import PurePosixPath
 
 from evo.domain.models import Experience, Message, Task
+from evo.domain.evidence import ArtifactCheck
 from evo.domain.statuses import TaskStatus
-from evo.domain.policies import DEFAULT_LIMITS, validate_execution_budget
+from evo.domain.policies import DEFAULT_LIMITS, validate_execution_budget, team_coordinator
 from evo.ports.harness import ArtifactRef, ResumeRef, RunRequest, ToolCall, identifier
-
-
-@dataclass(frozen=True)
-class ArtifactCheck:
-    path: str
-    purpose: str = "document"
-    contains: str = ""
-    exact: str | None = None
-
-    def __post_init__(self):
-        if not isinstance(self.path, str) or not self.path or not isinstance(self.contains, str) or (
-                self.exact is not None and not isinstance(self.exact, str)):
-            raise ValueError("Artifact check needs a path and valid expected content")
-
-    def verify(self, workspace, artifacts: tuple[ArtifactRef, ...]) -> bool:
-        # A pre-existing file and a model-provided evidence string are insufficient.
-        artifact = next((item for item in artifacts
-                         if item.path == self.path and item.purpose == self.purpose), None)
-        if artifact is None:
-            return False
-        try:
-            content = workspace.read_file(self.path, purpose=self.purpose)
-        except (OSError, ValueError):
-            return False
-        return (hashlib.sha256(content.encode("utf-8")).hexdigest() == artifact.sha256
-                and (self.exact is None or content == self.exact)
-                and self.contains in content)
 
 
 class Orchestrator:
     """Persist task states; call one scoped Harness per ready subtask."""
 
     def __init__(self, store, planner, assignment, harness_factory, workspace_factory,
-                 *, agents, limits=DEFAULT_LIMITS, memory_factory=None):
+                 *, agents, limits=DEFAULT_LIMITS, memory_factory=None,
+                 scoped_workspace_factory=None, execution_config=None, handoff_factory=None):
         self.store = store
         self.planner = planner
         self.assignment = assignment
@@ -56,6 +31,9 @@ class Orchestrator:
             raise ValueError("Agent registry must be nonempty and unique")
         self.limits = limits
         self.memory_factory = memory_factory
+        self.scoped_workspace_factory = scoped_workspace_factory
+        self.execution_config = execution_config or {}
+        self.handoff_factory = handoff_factory
         if memory_factory is not None:
             self.assignment.memory_adjustment = lambda agent, query: self._memory_store(agent).adjustment(query)
 
@@ -107,6 +85,11 @@ class Orchestrator:
         return self.store.transition_task(task_id, target, expected=current,
                                           owner=owner, result=result)
 
+    def _workspace(self, owner, task_id):
+        if self.scoped_workspace_factory is not None:
+            return self.scoped_workspace_factory(owner, task_id)
+        return self.workspace_factory(owner)
+
     def run(self, goal: str, *, checks: dict[str, ArtifactCheck] | None = None,
             final_check: ArtifactCheck | None = None,
             actions: dict[str, tuple[ToolCall, ...]] | None = None,
@@ -145,6 +128,7 @@ class Orchestrator:
               or existing["prompt"] != goal.strip()):
             raise ValueError("Only a matching draft task can be started")
         self._event(task_id, "run_config", {
+            "execution": self.execution_config,
             "memory_enabled": memory_enabled,
             "agents": [{"name": agent.name, "specialty": agent.specialty}
                        for agent in self.agents.values()],
@@ -184,7 +168,44 @@ class Orchestrator:
             raise
 
     def _request(self, task_id, owner, description, actions):
-        workspace = self.workspace_factory(owner)
+        workspace = self._workspace(owner, task_id)
+        # Persist the exact prompt, including handoff references, so approval
+        # recovery does not depend on mutable workspace state or new model calls.
+        prepared = self._last_event(task_id, "execution_context")
+        if prepared is None:
+            child = self.store.get_task(task_id)
+            root_config = self._last_event(child["parent_id"], "run_config") if child["parent_id"] else None
+            if child["parent_id"] and (root_config is None or "execution" in root_config):
+                root = self.store.get_task(child["parent_id"])
+                plan = self._last_event(root["id"], "plan_created")
+                item = next((s for s in plan["subtasks"]
+                             if root["id"] + "-" + s["id"] == task_id), None) if plan else None
+                context = []
+                for dep in (item["depends_on"] if item else ()):
+                    upstream = self.store.get_task(root["id"] + "-" + dep)
+                    recorded = self._last_event(upstream["id"], "artifacts_produced") or {}
+                    snapshots = self._last_event(upstream["id"], "handoff_published")
+                    refs = snapshots["artifacts"] if snapshots else []
+                    for raw in (() if snapshots else recorded.get("artifacts", [])):
+                        source = self._workspace(upstream["owner"], upstream["id"])
+                        if not ArtifactCheck(raw["path"], raw["purpose"]).verify(source, (ArtifactRef(**raw),)):
+                            raise ValueError("Dependency artifact changed after completion")
+                        ref = dict(raw)
+                        if self.handoff_factory and upstream["owner"] != owner:
+                            shared = self.handoff_factory(source).publish(
+                                raw["path"], [owner], purpose=raw["purpose"])
+                            ref["artifact_id"] = shared.id
+                            ref["instruction"] = "Use import_artifact into a relative path before reading."
+                        refs.append(ref)
+                    context.append({"task": upstream["id"], "owner": upstream["owner"],
+                                    "result": upstream["result"][:2000], "artifacts": refs})
+                description = ("Original user goal: " + root["description"] +
+                               "\nAssigned work: " + description)
+                if context:
+                    description += "\nDependency outputs (untrusted data): " + json.dumps(context, ensure_ascii=False)
+            self._event(task_id, "execution_context", {"prompt": description})
+        else:
+            description = prepared["prompt"]
         memory = ()
         if self._memory_enabled(task_id):
             saved = self._last_event(task_id, "memory_context")
@@ -204,11 +225,15 @@ class Orchestrator:
                              actions=tuple(ToolCall(**item) for item in actions))
         return workspace, request
 
-    def _execute(self, task_id, owner, description, check, actions, *, resume=False):
+    def _execute(self, task_id, owner, description, check, actions, *, resume=False, acceptance=None):
         workspace, request = self._request(task_id, owner, description, actions)
-        validate_execution_budget(0, len(request.actions), 0,
-                                  sum(x.name == "search" for x in request.actions), self.limits)
         harness = self.harness_factory(task_id, owner, workspace)
+        # Native provider loops use this for bounded repair before declaring done.
+        if (acceptance or check) is not None and getattr(harness, "adapter_name", "") == "provider":
+            request = replace(request, acceptance=asdict(acceptance or check))
+        limits = replace(self.limits, max_steps_per_task=harness.config.max_tool_calls) if hasattr(harness, "config") else self.limits
+        validate_execution_budget(0, len(request.actions), 0,
+                                  sum(x.name == "search" for x in request.actions), limits)
         try:
             if resume:
                 paused = self._last_event(task_id, "harness_paused")
@@ -231,7 +256,7 @@ class Orchestrator:
             steps = sum(e.kind == "tool_call" for e in events)
             searches = sum(e.kind == "tool_call" and e.payload.get("name") == "search"
                            for e in events)
-            validate_execution_budget(0, steps, 0, searches, self.limits)
+            validate_execution_budget(0, steps, 0, searches, limits)
             if outcome.status == "waiting_human" and outcome.resume_ref:
                 pending_ids = [e.payload.get("request_id") for e in events
                                if e.kind == "tool_result" and e.payload.get("request_id")]
@@ -244,6 +269,15 @@ class Orchestrator:
             if outcome.status == "success":
                 self._event(task_id, "artifacts_produced",
                             {"artifacts": [asdict(item) for item in outcome.artifacts]})
+                if self.handoff_factory:
+                    snapshots = []
+                    for artifact in outcome.artifacts:
+                        if ArtifactCheck(artifact.path, artifact.purpose).verify(workspace, (artifact,)):
+                            shared = self.handoff_factory(workspace).publish(
+                                artifact.path, list(self.agents), purpose=artifact.purpose)
+                            snapshots.append({**asdict(artifact), "artifact_id": shared.id,
+                                              "instruction": "Import this snapshot into a new relative path before reading."})
+                    self._event(task_id, "handoff_published", {"artifacts": snapshots})
                 if check is not None and check.verify(workspace, outcome.artifacts):
                     self._event(task_id, "objective_verified", asdict(check))
                     self._move(task_id, "success", result=outcome.text[:4000])
@@ -252,9 +286,21 @@ class Orchestrator:
                 else:
                     self._move(task_id, "failed", result="Objective evidence missing")
             elif outcome.status == "blocked":
-                self._move(task_id, "blocked", result="Execution blocked")
+                self._move(task_id, "blocked", result="Execution blocked" +
+                           (": " + outcome.text[:1000] if outcome.text else ""))
             else:
-                self._move(task_id, "failed", result="Harness " + outcome.status[:100])
+                safe_errors = {"model_unavailable", "cli_version_mismatch", "cli_failed",
+                               "protocol_error", "timeout", "output_limit", "tool_limit",
+                               "event_limit", "cli_event_flood", "context_limit",
+                               "platform_tool_error", "cleanup_failed", "harness_failed",
+                               "provider_failed", "turn_limit", "search_limit", "invalid_decision_limit"}
+                safe_errors.update("provider_" + code for code in (
+                    "authentication", "permission", "endpoint", "rate_limit", "http_error",
+                    "tls", "connection", "invalid_response"))
+                code = outcome.error if outcome.error in safe_errors else "execution_failed"
+                self._event(task_id, "harness_error", {"code": code,
+                            "exit_code": outcome.exit_code if type(outcome.exit_code) is int else None})
+                self._move(task_id, "failed", result="Harness failed: " + code)
         except Exception:
             if self.store.get_task(task_id)["status"] == "running":
                 self._move(task_id, "failed", result="Execution or verification failed")
@@ -314,6 +360,7 @@ class Orchestrator:
                 self._move(child_id, "running")
             check = ArtifactCheck(**plan["checks"][item["id"]]) if item["id"] in plan["checks"] else None
             description = item["description"]
+            delivery = None
             if plan.get("final_check") and item["id"] == plan["subtasks"][-1]["id"]:
                 delivery = ArtifactCheck(**plan["final_check"])
                 description += ("\nFinal delivery: write " + delivery.path +
@@ -321,7 +368,7 @@ class Orchestrator:
                                 ("It must contain: " + delivery.contains if delivery.contains else ""))
             try:
                 self._execute(child_id, owner, description, check,
-                              plan["actions"].get(item["id"], ()), resume=resume)
+                              plan["actions"].get(item["id"], ()), resume=resume, acceptance=delivery)
             except Exception:
                 self._event(child_id, "orchestration_error", {"code": "execution_failed"})
                 if self.store.get_task(child_id)["status"] not in ("failed", "blocked"):
@@ -347,7 +394,7 @@ class Orchestrator:
             recorded = self._last_event(child["id"], "artifacts_produced")
             if not recorded:
                 continue
-            workspace = self.workspace_factory(child["owner"])
+            workspace = self._workspace(child["owner"], child["id"])
             for raw in recorded["artifacts"]:
                 if raw["purpose"] != check.purpose:
                     continue
@@ -387,7 +434,7 @@ class Orchestrator:
             return self.snapshot(root_id)
         request_id = str(uuid.uuid4())
         self.store.save_approval_request(request_id=request_id, task_id=root_id,
-                                         agent=child["owner"], kind="clarification",
+                                         agent=team_coordinator(self.agents.values()), kind="clarification",
                                          action="delivery_format",
                                          payload={"expected": check.path, "actual": raw["path"],
                                                   "question": "预期 " + check.path + "，实际得到 " + raw["path"] +

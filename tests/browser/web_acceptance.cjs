@@ -42,7 +42,14 @@ async function run() {
   const errors=[];page.on('pageerror',error=>errors.push(error.message));
   let url=await start();
   await page.goto(url);
-  await page.locator('#notice').filter({hasText:'SQLite'}).waitFor();
+  try {
+    await page.locator('#notice').filter({hasText:'SQLite'}).waitFor();
+  } catch (error) {
+    throw Error('Initial page state did not load: '+JSON.stringify({
+      notice:await page.locator('#notice').textContent(), pageErrors:errors,
+      stateStatus:(await page.request.get(new URL('/api/state',url).href)).status()
+    }),{cause:error});
+  }
   const tasks=page.locator('#task-list article');
   assert.equal(await tasks.count(),7);
   assert.equal(await page.locator('#run-form button').isEnabled(),true);
@@ -51,15 +58,32 @@ async function run() {
   checks.push('Real SQLite rendering; XSS text stays inert; run control enabled');
   await page.screenshot({path:path.join(output,'desktop.png'),fullPage:true});
 
+  await page.getByRole('button',{name:'群聊',exact:true}).click();
+  await page.locator('#group-task').selectOption('critical');
+  const longBubble=page.locator('#group-list .bubble p');
+  await longBubble.filter({hasText:'FULL-END'}).waitFor();
+  assert.equal(await longBubble.evaluate(node=>node.textContent.endsWith('FULL-END')),true);
+  assert.equal(await longBubble.evaluate(node=>node.scrollHeight>node.clientHeight),true);
+  checks.push('Long task chat stays complete inside a scrollable message');
+
   await page.getByRole('button',{name:'私聊',exact:true}).click();
   assert.equal(await page.locator('#dm-dot').isVisible(),true);
   const approval=page.locator('#dm-rooms .request-room > div').filter({hasText:'delete_file'});
+  const approvalDetail=approval.locator('pre');
+  assert.equal(await approvalDetail.evaluate(node=>node.textContent.includes('FULL-END')),true);
+  assert.equal(await approvalDetail.evaluate(node=>node.scrollHeight>node.clientHeight),true);
+  await page.setViewportSize({width:390,height:844});
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+  await page.setViewportSize({width:1280,height:900});
+  checks.push('Full approval details wrap and scroll without growing the page');
   await approval.getByRole('button',{name:'批准',exact:true}).click();
   await approval.waitFor({state:'detached'});
+  await page.locator('#dm-task').selectOption('denied');
   const denied=page.locator('#dm-rooms .request-room > div').filter({hasText:'run_python'});
   await denied.getByRole('button',{name:'拒绝',exact:true}).click();await denied.waitFor({state:'detached'});
+  await page.locator('#dm-task').selectOption('clarify');
   const clarification=page.locator('#dm-rooms .request-room > div').filter({hasText:'Which input file?'});
-  await clarification.getByRole('textbox',{name:'回复 planner'}).fill('report.md');
+  await clarification.getByRole('textbox',{name:'回复 researcher'}).fill('report.md');
   await clarification.getByRole('button',{name:'发送回复',exact:true}).click();await clarification.waitFor({state:'detached'});
   const bad=page.locator('#dm-rooms article').filter({hasText:'Error sample'});
   await bad.getByRole('button',{name:'要求修改',exact:true}).click();
@@ -116,7 +140,7 @@ async function run() {
   assert.equal((await page.locator('#dm-list').innerText()).includes('Private builder input'),false);
   await page.locator('#agents').selectOption('builder');
   await page.locator('#dm-form textarea').fill('force-provider-error');await page.locator('#dm-form button').click();
-  await page.waitForFunction(()=>document.querySelector('#status').textContent.includes('Agent reply failed'));
+  await page.waitForFunction(()=>document.querySelector('#status').textContent.includes('Agent 回复处理失败'));
   await page.locator('#dm-list').getByText(/force-provider-error/).waitFor();
   assert.equal((await page.locator('#status').innerText()).includes('private-fixture-error'),false);
   checks.push('Real ChatService + SQLite through offline provider: group replies, private histories and safe provider failure');
@@ -125,11 +149,11 @@ async function run() {
   await page.locator('#md-upload').setInputFiles({name:'scenario.md',mimeType:'text/markdown',buffer:Buffer.from(markdown)});
   await page.waitForFunction(()=>document.querySelector('#run-form textarea[name=prompt]').value==='Prepare imported report.md');
   await page.locator('#run-form button').click();
-  assert.equal(await page.locator('#tasks').isVisible(),true);
-  assert.equal(await page.locator('#group').isVisible(),false);
+  await page.locator('#group').waitFor({state:'visible'});
+  assert.equal(await page.locator('#tasks').isVisible(),false);
   await page.getByRole('button',{name:'群聊',exact:true}).click();
   await page.locator('#group-list').getByText(/Fixture reply from reviewer/).last().waitFor();
-  assert.equal(await page.locator('#group-list .bubble time').count(),3);
+  assert.equal(await page.locator('#group-list .bubble time').count(),4);
   await page.getByRole('button',{name:'私聊',exact:true}).click();
   await page.locator('#agents').selectOption('builder');
   await page.locator('#dm-form textarea').fill('Task private question');
@@ -137,7 +161,7 @@ async function run() {
   await page.locator('#dm-list').getByText(/Fixture reply from builder/).waitFor();
   assert.equal(await page.locator('#dm-list .bubble time').count(),2);
   await page.getByRole('button',{name:'群聊',exact:true}).click();
-  assert.equal((await page.locator('#group-list').innerText()).includes('Prepare imported report.md'),false);
+  assert.equal((await page.locator('#group-list').innerText()).includes('Prepare imported report.md'),true);
   await page.getByRole('button',{name:'任务',exact:true}).click();
   await tasks.filter({hasText:'Prepare imported report.md'}).getByText(/执行：created/).waitFor();
   assert.equal(await page.locator('#run-form input[name=expected_path]').count(),0);
@@ -167,7 +191,9 @@ async function run() {
   assert.equal(await tasks.count(),9);
   await page.getByRole('button',{name:'刷新状态',exact:true}).click();
   await tasks.filter({hasText:'Accept sample'}).getByText('执行：success · 审查：accepted',{exact:true}).waitFor();
-  await page.getByRole('button',{name:'私聊',exact:true}).click();await page.locator('#agents').selectOption('builder');
+  await page.getByRole('button',{name:'私聊',exact:true}).click();
+  await page.locator('#dm-task').selectOption('clarify');
+  await page.locator('#agents').selectOption('builder');
   await page.locator('#dm-list').getByText(/Private builder input/).waitFor();
   await page.getByRole('button',{name:'任务',exact:true}).click();
   checks.push('Actual restart retains review/revision, chat histories and human decisions');
@@ -179,11 +205,11 @@ async function run() {
   checks.push('390px mobile layout without horizontal overflow; no browser JavaScript errors');
   await page.locator('#clear-finished').click();
   await page.locator('#tasks-done').getByText('暂无记录').waitFor();
-  assert.equal(await tasks.count(),4);
+  assert.equal(await tasks.count(),3);
   await page.locator('#run-form textarea[name=prompt]').fill('Next task after clear');
   await page.locator('#run-form button').click();
-  assert.equal(await page.locator('#tasks').isVisible(),true);
-  await tasks.filter({hasText:'Next task after clear'}).waitFor();
+  await page.locator('#group').waitFor({state:'visible'});
+  await tasks.filter({hasText:'Next task after clear'}).waitFor({state:'attached'});
   checks.push('Finished board cache clears without affecting the next task');
   fs.writeFileSync(path.join(output,'report.json'),JSON.stringify({status:'passed',browser:browser.version(),
     checks,fixture:'isolated seeded SQLite; no real Agent results'},null,2));

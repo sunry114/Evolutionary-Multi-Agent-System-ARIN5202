@@ -37,6 +37,16 @@ class ApprovalTests(unittest.TestCase):
     def request(self, name="run_python", arguments=None):
         return self.executor.execute("t1", name, arguments if arguments is not None else {"path": "main.py"})["request_id"]
 
+    def test_web_source_commit_preparation_accepts_code_without_executing_it(self):
+        from evo.adapters.tools.git import DockerGitTools
+        self.fs.write_file("src/server.js", "console.log('hello');", purpose="code")
+        self.fs.write_file("public/app.css", "body { color: black; }", purpose="code")
+        self.executor.git = DockerGitTools(self.fs)
+        payload = self.executor._prepare("git_commit", {
+            "paths": ["src/server.js", "public/app.css"], "message": "Add web sources"})
+        self.assertEqual(set(payload["sha256"]), {"src/server.js", "public/app.css"})
+        self.python.run_python.assert_not_called()
+
     def age(self, request_id):
         with self.store._transaction() as connection:
             connection.execute("UPDATE approval_requests SET created_at='2000-01-01T00:00:00+00:00' WHERE id=?", (request_id,))
@@ -220,6 +230,15 @@ class ApprovalTests(unittest.TestCase):
             self.assertEqual(self.executor.execute(task_id, "run_python", {"path": "main.py"})["status"], "failed")
             self.assertNotIn("fixture-secret", json.dumps(self.store.list_events(task_id)))
 
+    def test_verified_nonzero_python_result_can_be_used_for_repair(self):
+        self.python.run_python.return_value = ExecutionResult(1, "FAIL C7", "")
+        request_id = self.request()
+        self.approval.answer(request_id, {"approved": True})
+        result = self.executor.execute("t1", "run_python", {"path": "main.py"})
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["result"]["stdout"], "FAIL C7")
+        self.assertEqual(self.store.get_task("t1")["status"], "running")
+
     def test_malformed_tool_result_fails_closed(self):
         request_id = self.request()
         self.approval.answer(request_id, {"approved": True})
@@ -232,6 +251,16 @@ class ApprovalTests(unittest.TestCase):
         result = self.executor.execute("t1", "git_status", {})
         self.assertEqual(result["status"], "success")
         self.assertEqual(self.store.get_action(result["action_id"])["tool_name"], "git_status")
+
+    def test_git_status_failure_does_not_end_running_task(self):
+        self.git.status.side_effect = ToolError("No repository yet")
+        result = self.executor.execute("t1", "git_status", {})
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(self.store.get_action(result["action_id"])["status"], "failed")
+        self.assertEqual(self.store.get_task("t1")["status"], "running")
+        self.git.status.side_effect = None
+        self.git.status.return_value = ExecutionResult(0, "", "")
+        self.assertEqual(self.executor.execute("t1", "git_status", {})["status"], "success")
 
     def test_high_risk_git_commit_requires_approval(self):
         self.executor.require_commit_approval = True

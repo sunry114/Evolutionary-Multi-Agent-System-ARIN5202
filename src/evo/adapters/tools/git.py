@@ -10,7 +10,7 @@ import stat
 import uuid
 
 from evo.adapters.tools.docker import DockerPythonRunner
-from evo.adapters.tools.filesystem import _directory, _read_at, validate_file_path
+from evo.adapters.tools.filesystem import _directory, _read_at, validate_file_path, PURPOSE_SUFFIXES
 from evo.adapters.tools.linux import isolation_arguments
 from evo.ports.tools import ExecutionResult, ToolError
 
@@ -198,6 +198,8 @@ class DockerGitTools(DockerPythonRunner):
         for path in paths:
             # Explicit purposes let code/data/config coexist with Markdown reports.
             purpose = {".py": "code", ".json": "data", ".csv": "data", ".yaml": "config", ".yml": "config"}.get(Path(path).suffix.lower(), "document")
+            if Path(path).suffix.lower() in PURPOSE_SUFFIXES["code"]:
+                purpose = "code"
             validate_file_path(path, purpose)
             self.filesystem.read_file(path, purpose=purpose)
         if len(set(paths)) != len(paths):

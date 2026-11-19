@@ -520,6 +520,15 @@ class SQLiteStore:
 
         return [dict(row) for row in rows]
 
+    def list_task_messages(self, task_id: str) -> Sequence[Mapping[str, object]]:
+        """Return a task's complete chat history in stable display order."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT * FROM messages WHERE task_id = ?
+                   ORDER BY created_at, id""", (task_id,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     # ------------------------------------------------------------------
     # Events / trace
     # ------------------------------------------------------------------
@@ -728,6 +737,58 @@ class SQLiteStore:
                 "Request could not be created"
             ) from exc
 
+    def save_chat_question(self, task_id, agent, question, agents, *, sources=()):
+        """Persist the private inbox question and its pending request together."""
+        request_id, now = uuid.uuid4().hex, _utc_now()
+        with self._transaction() as connection:
+            self._active_task(connection, task_id)
+            pending = connection.execute(
+                """SELECT id,payload_json FROM approval_requests WHERE task_id=? AND agent=?
+                   AND action='chat_question' AND status='pending'""", (task_id, agent)).fetchone()
+            if pending:
+                previous = _decode_json(pending["payload_json"])
+                combined_sources = list(dict.fromkeys(previous.get("sources", [agent]) + list(sources)))
+                previous_question = previous["question"]
+                combined_question = question if question == previous_question else previous_question + "\n\n" + question
+                connection.execute("UPDATE approval_requests SET payload_json=? WHERE id=?",
+                                   (_json_object({"question": combined_question, "agents": agents,
+                                                  "sources": combined_sources}), pending["id"]))
+                connection.execute("UPDATE messages SET content=? WHERE id=?",
+                                   (combined_question, pending["id"]))
+                self._insert_event(connection, task_id=task_id, event_type="request_updated", actor=agent,
+                                   payload={"request_id": pending["id"], "action": "chat_question"})
+                return pending["id"]
+            connection.execute(
+                """INSERT INTO approval_requests
+                   (id,task_id,agent,kind,action,payload_json,status,created_at)
+                   VALUES(?,?,?,'clarification','chat_question',?,'pending',?)""",
+                (request_id, task_id, agent, _json_object({"question": question, "agents": agents,
+                                                         "sources": list(sources) or [agent]}), now))
+            connection.execute(
+                """INSERT INTO messages(id,task_id,kind,sender,recipient,content,created_at)
+                   VALUES(?,?,'dm',?,'human',?,?)""", (request_id, task_id, agent, question, now))
+            self._insert_event(connection, task_id=task_id, event_type="request_created", actor=agent,
+                               payload={"request_id": request_id, "action": "chat_question"})
+        return request_id
+
+    def route_pending_questions(self, task_id, coordinator, agents):
+        """Upgrade outstanding text questions without changing action approvals."""
+        with self._transaction() as connection:
+            rows = connection.execute(
+                """SELECT * FROM approval_requests WHERE task_id=? AND kind='clarification'
+                   AND status='pending' AND agent<>?""", (task_id, coordinator)).fetchall()
+            for row in rows:
+                payload = _decode_json(row["payload_json"])
+                if row["action"] == "chat_question":
+                    payload["sources"] = list(dict.fromkeys(payload.get("sources", [row["agent"]])))
+                    payload["agents"] = agents
+                    connection.execute("UPDATE messages SET sender=? WHERE id=? AND kind='dm'",
+                                       (coordinator, row["id"]))
+                connection.execute("UPDATE approval_requests SET agent=?,payload_json=? WHERE id=?",
+                                   (coordinator, _json_object(payload), row["id"]))
+                self._insert_event(connection, task_id=task_id, event_type="question_routed", actor=coordinator,
+                                   payload={"request_id": row["id"], "from": row["agent"]})
+
     def get_approval_request(
         self,
         request_id: str,
@@ -835,11 +896,18 @@ class SQLiteStore:
                         or not response["answer"].strip() or len(response["answer"]) > 4000):
                     raise ValueError("Clarification requires bounded text")
                 status = "answered"
-            if not self._expire_action_request(connection, row, max_age_seconds):
+            # Conversation questions wait for a human without expiring the task.
+            # Critical-action approvals retain their original bounded lifetime.
+            if row["action"] == "chat_question" or not self._expire_action_request(connection, row, max_age_seconds):
                 now = _utc_now()
                 connection.execute(
                     "UPDATE approval_requests SET status=?,answered_at=?,answer_json=? WHERE id=?",
                     (status, now, _json_object(response), request_id))
+                if row["action"] == "chat_question":
+                    connection.execute(
+                        """INSERT INTO messages(id,task_id,kind,sender,recipient,content,created_at)
+                           VALUES(?,?,'dm','human',?,?,?)""",
+                        (uuid.uuid4().hex, row["task_id"], row["agent"], response["answer"].strip(), now))
                 if status == "denied":
                     connection.execute("UPDATE actions SET status='blocked',completed_at=? WHERE id=? AND status='requested'",
                                        (now, request_id))
@@ -855,7 +923,7 @@ class SQLiteStore:
                 raise RecordNotFoundError("Approval request not found")
             action = connection.execute("SELECT status FROM actions WHERE id=?", (request_id,)).fetchone()
             task = connection.execute("SELECT status FROM tasks WHERE id=?", (row["task_id"],)).fetchone()
-            if (row["status"] in ("pending", "approved") and (action is None or action["status"] == "requested")
+            if (row["action"] != "chat_question" and row["status"] in ("pending", "approved") and (action is None or action["status"] == "requested")
                     and task["status"] not in ("success", "failed", "blocked")):
                 self._expire_action_request(connection, row, max_age_seconds)
         return self.get_approval_request(request_id)
@@ -897,7 +965,7 @@ class SQLiteStore:
                                payload={"action_id": action_id, "tool_name": tool_name, "arguments": arguments})
         return action_id
 
-    def finish_action(self, action_id, *, succeeded, result):
+    def finish_action(self, action_id, *, succeeded, result, fail_task_on_error=True):
         with self._transaction() as connection:
             row = connection.execute("SELECT * FROM actions WHERE id=?", (action_id,)).fetchone()
             if row is None or row["status"] != "running":
@@ -906,7 +974,7 @@ class SQLiteStore:
             now = _utc_now()
             connection.execute("UPDATE actions SET status=?,result_json=?,completed_at=? WHERE id=?",
                                (status, _json_object(result), now, action_id))
-            if not succeeded:
+            if not succeeded and fail_task_on_error:
                 connection.execute("UPDATE tasks SET status='failed',updated_at=? WHERE id=?", (now, row["task_id"]))
             self._insert_event(connection, task_id=row["task_id"], event_type="action_completed", actor=row["agent"],
                                payload={"action_id": action_id, "status": status, "result": result})

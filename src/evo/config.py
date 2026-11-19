@@ -15,7 +15,7 @@ DEFAULT_MODELS = {"deepseek": "deepseek-chat", "hkgai": "t2_hkgai-v3_fp8_1m_e7"}
 
 @dataclass(frozen=True)
 class ProviderConfig:
-    provider: str = "hkgai"
+    provider: str = "deepseek"
     model: str = ""
     base_url: str = ""
     timeout: float = 60
@@ -44,7 +44,7 @@ class ProviderConfig:
         """Load only documented, non-secret settings; never enable dev mode implicitly."""
         try:
             return cls(
-                provider=os.environ.get("EVO_PROVIDER", "hkgai"),
+                provider=os.environ.get("EVO_PROVIDER", "deepseek"),
                 model=os.environ.get("EVO_MODEL", ""),
                 base_url=os.environ.get("EVO_BASE_URL", ""),
                 timeout=float(os.environ.get("EVO_TIMEOUT", "60")),
@@ -62,17 +62,17 @@ class HarnessConfig:
     cli_version: str = "2.1.311"
     timeout: float = 180
     max_output_bytes: int = 4 * 1024 * 1024
-    max_tool_calls: int = 20
+    max_tool_calls: int = 80
 
     def __post_init__(self):
-        if self.adapter not in ("baseline", "claude_code", "pi", "custom"):
+        if self.adapter not in ("baseline", "provider", "claude_code", "pi", "custom"):
             raise ValueError("Unknown harness adapter")
         if (not isinstance(self.cli_path, str) or not self.cli_path
                 or not re.fullmatch(r"2\.\d+\.\d+", self.cli_version)
                 or type(self.timeout) not in (int, float) or not math.isfinite(self.timeout)
                 or not 0 < self.timeout <= 600
                 or type(self.max_output_bytes) is not int or not 1024 <= self.max_output_bytes <= 8 * 1024 * 1024
-                or type(self.max_tool_calls) is not int or not 1 <= self.max_tool_calls <= 20):
+                or type(self.max_tool_calls) is not int or not 1 <= self.max_tool_calls <= 128):
             raise ValueError("Invalid harness resource limits or CLI version")
 
 

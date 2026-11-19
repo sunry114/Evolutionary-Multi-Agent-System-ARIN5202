@@ -6,6 +6,14 @@ Engine; native Windows/macOS execution is not a supported assessment environment
 
 ## Development status
 
+The default task runtime now uses the configured HKGAI/DeepSeek provider directly,
+with local owner routing, task-isolated workspaces, durable tool feedback,
+verification repair and dependency artifact snapshots. The existing frontend and
+API remain compatible; Claude Code and baseline harnesses remain optional.
+See [backend task runtime and migration notes](docs/TASK_RUNTIME.md) for the current
+execution path, configuration, verification and limitations. Historical milestone
+notes below describe the earlier CLI-first implementation.
+
 The original remote contained only README and LICENSE, despite describing a
 working prototype. Development began with member D's assigned work (C01, C04,
 C14, C15, C16), and now includes C03 domain contracts, C05 SQLite persistence,
@@ -81,12 +89,16 @@ EVO_PROVIDER=deepseek python -m evo run 'Create hello.md containing hello' \
 If the final file uses a different format, answer its format request with
 `python -m evo answer REQUEST_ID --text accept` or `--text decline`.
 
-Install the supported native Claude CLI and configure its path with
-`EVO_CLAUDE_CLI` if needed. The configured DeepSeek/HKGAI key must be available
-through the documented credential loader. HKGAI Anthropic-wire compatibility
-has not yet been verified. Critical actions still require explicit approval;
+The default `provider` harness needs the configured DeepSeek/HKGAI key through
+the documented credential loader. To use the optional Claude Code harness, set
+`EVO_HARNESS_ADAPTER=claude_code`, install the supported native Claude CLI and set
+`EVO_CLAUDE_CLI` if needed. HKGAI Anthropic-wire compatibility for that optional
+harness has not yet been verified. Critical actions still require explicit approval;
 answering does not execute them until `resume` is called. The Web `run` JSON
 payload accepts `checks` keyed by planned subtask ID for multi-step tasks.
+The Harness allows 80 platform tool calls per subtask, counted across human
+approval resumes. Set `EVO_MAX_TOOL_CALLS` before starting CLI/Web to change
+this bounded limit (1–128); a paused task keeps its previous call count.
 
 Configure scenario roles before a mid-test run. The role list is saved in
 `.evo/agents.json`; each task records its own role snapshot for `resume`.

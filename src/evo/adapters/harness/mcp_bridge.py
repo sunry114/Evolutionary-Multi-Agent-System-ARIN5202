@@ -9,6 +9,18 @@ import threading
 from dataclasses import asdict, is_dataclass
 
 from evo.ports.harness import HarnessError
+from evo.adapters.tools.filesystem import PathPolicyError, PURPOSE_SUFFIXES
+from evo.adapters.tools.web import WebToolError
+from evo.ports.tools import ToolError
+from evo.application.executor import ActionPreparationError
+
+
+class ToolCallRejected(HarnessError):
+    """A bounded, recoverable tool error that the agent may correct."""
+
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
 
 
 def schema(properties, required=()):
@@ -72,16 +84,23 @@ class PlatformToolBroker:
             names -= {"publish_artifact", "list_artifacts", "import_artifact"}
         if self.delegation is None:
             names -= {"delegate"}
-        return [{"name": name, "description": "Platform " + name + "; critical actions wait for human approval.",
+        descriptions = {
+            "write_file": "Write UTF-8 text. Allowed suffixes by purpose: " +
+                          json.dumps({key: sorted(value) for key, value in PURPOSE_SUFFIXES.items()}) +
+                          ". Parent directories are created automatically. Creates files, does not execute code.",
+            "run_python": "Run an existing .py script in the isolated Python container after human approval. "
+                          "Python standard library only; no Node, npm, shell, package installation or external network.",
+        }
+        return [{"name": name, "description": descriptions.get(name, "Platform " + name + "; critical actions wait for human approval."),
                  "inputSchema": SCHEMAS[name]} for name in sorted(names)]
 
     def call(self, task_id, name, arguments, *, request_id=None):
         allowed = {x["name"] for x in self.tools()}
         if name not in allowed or not isinstance(arguments, dict):
-            raise HarnessError("Unsupported platform tool")
+            raise ToolCallRejected("invalid_tool")
         spec = SCHEMAS[name]
         if set(arguments) - set(spec["properties"]) or set(spec["required"]) - set(arguments):
-            raise HarnessError("Invalid platform tool arguments")
+            raise ToolCallRejected("invalid_arguments")
         for key, value in arguments.items():
             rule = spec["properties"][key]
             typ = rule["type"]
@@ -90,12 +109,17 @@ class PlatformToolBroker:
                     or (typ == "array" and (not isinstance(value, list) or len(value) > 64
                                             or any(not isinstance(x, str) for x in value)))
                     or ("enum" in rule and value not in rule["enum"])):
-                raise HarnessError("Invalid platform tool argument type")
+                raise ToolCallRejected("invalid_arguments")
         task = self.repository.get_task(task_id)
         if task["owner"] != self.executor.agent:
             raise HarnessError("Tool task ownership mismatch")
         if name in CRITICAL_DISPATCH:
-            return self.executor.execute(task_id, name, arguments, request_id=request_id)
+            try:
+                return self.executor.execute(task_id, name, arguments, request_id=request_id)
+            except ActionPreparationError as error:
+                # Only preparation is recoverable here. Approval scope errors
+                # and failures after execution must retain their stop behavior.
+                raise ToolCallRejected(error.code) from None
         if request_id is not None or task["status"] != "running":
             raise HarnessError("Task is not ready for platform tools")
         # Content is private workspace data, not durable audit metadata.
@@ -123,8 +147,16 @@ class PlatformToolBroker:
                 # Surface a stopped parent instead of hiding the child failure.
                 status = "blocked" if value["status"] in ("blocked", "waiting_human") else "failed"
             self.repository.finish_action(action_id, succeeded=status == "success",
-                                          result={"status": status})
+                                          result={"status": status},
+                                          fail_task_on_error=name == "delegate")
             return {"status": status, "action_id": action_id, "result": jsonable(value)}
+        except (PathPolicyError, WebToolError, ToolError, ValueError, TypeError,
+                PermissionError, OSError, KeyError) as error:
+            self.repository.finish_action(action_id, succeeded=False, result={"error": "tool_failed"},
+                                          fail_task_on_error=False)
+            code = ("web_tool_failed" if isinstance(error, WebToolError) else
+                    "path_rejected" if isinstance(error, PathPolicyError) else "tool_failed")
+            raise ToolCallRejected(code) from None
         except Exception:
             self.repository.finish_action(action_id, succeeded=False, result={"error": "tool_failed"})
             raise HarnessError("Platform tool failed") from None

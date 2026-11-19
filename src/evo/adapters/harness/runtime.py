@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import threading
@@ -14,6 +15,7 @@ from evo.adapters.tools.filesystem import _directory, _read_at, _write_at
 from evo.config import HarnessConfig
 from evo.ports.harness import (ArtifactRef, HarnessCleanupError, HarnessError, HarnessEvent, ResumeRef,
                                RunHandle, RunRequest, RunResult, identifier)
+from .mcp_bridge import ToolCallRejected
 
 
 def request_record(request):
@@ -123,7 +125,8 @@ class ManagedHarness:
         agent_lease = None
         try:
             with _directory(self.root) as directory:
-                agent_lease = os.open("agent-" + request.agent + ".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+                workspace_key = hashlib.sha256(str(request.workspace).encode()).hexdigest()
+                agent_lease = os.open("workspace-" + workspace_key + ".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=directory)
             fcntl.flock(agent_lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             if agent_lease is not None:
@@ -134,10 +137,12 @@ class ManagedHarness:
         record = {"run_id": run_id, "adapter": self.adapter_name, "identity": self._identity(),
                   "request": saved_request, "native_session_id": str(uuid.uuid4()),
                   "events": [], "result": None, "pending": None, "inflight": None,
-                  "context": [], "artifacts": [], "tool_calls": 0, "baseline_index": 0}
+                  "context": [], "artifacts": [], "tool_calls": 0, "baseline_index": 0,
+                  "model_turns": 0}
         if previous:
             for key in ("pending", "context", "artifacts", "tool_calls", "baseline_index"):
                 record[key] = previous[key]
+            record["model_turns"] = previous.get("model_turns", 0)
             record["parent_run_id"] = previous["run_id"]
         control = _Control(record, (lease, agent_lease))
         try:
@@ -158,7 +163,7 @@ class ManagedHarness:
         previous = self._load(reference.run_id)
         if (asdict(reference) != {"run_id": previous["run_id"], "task_id": request.task_id,
                                   "agent": request.agent, "session_scope": request.session_scope}
-                or previous["request"] != request_record(request)
+                or {"acceptance": None, **previous["request"]} != request_record(request)
                 or previous["identity"] != self._identity()):
             raise HarnessError("Resume scope, request or backend does not match")
         # A lost process between side effect and checkpoint has an unknown outcome.
@@ -210,11 +215,17 @@ class ManagedHarness:
                 raise HarnessError("Harness is paused or stopping")
             with control.lock:
                 if request_id is None:
-                    control.record["tool_calls"] += 1
-                    if control.record["tool_calls"] > self.config.max_tool_calls:
+                    if control.record["tool_calls"] >= self.config.max_tool_calls:
                         control.failure = "tool_limit"
                         control.stop.set()
                         raise HarnessError("Harness tool limit exceeded")
+                    control.record["tool_calls"] += 1
+                if (name == "search" and self.broker.web is not None
+                        and sum(c["tool"] == "search" for c in control.record["context"])
+                        >= getattr(getattr(self.broker.web, "limits", None), "max_searches", 3)):
+                    control.failure = "search_limit"
+                    control.stop.set()
+                    raise HarnessError("Harness search limit exceeded")
                 if len(json.dumps(arguments).encode()) > 65536:
                     raise HarnessError("Platform tool arguments exceed harness limits")
                 if len(json.dumps(control.record).encode()) > 1024 * 1024:
@@ -225,14 +236,33 @@ class ManagedHarness:
                 self._event(control, "tool_call", {"name": name})
             try:
                 result = self.broker.call(request.task_id, name, arguments, request_id=request_id)
+            except ToolCallRejected as error:
+                result = {"status": "failed", "error": error.code}
+                hints = {
+                    "tool_file_missing": "The target file does not exist. Create it with write_file or import_artifact before retrying; no action ran and no approval was consumed.",
+                    "tool_preparation_failed": "The action could not be prepared. Check its arguments, file path and purpose using workspace tools before retrying; no action ran and no approval was consumed.",
+                    "path_rejected": "Use a relative workspace path without .. or symlinks. The file suffix must match its purpose; see write_file's allowed suffix list. Changing directories will not fix a suffix mismatch.",
+                }
+                if error.code in hints:
+                    result["message"] = hints[error.code]
+                    self.broker.repository.append_event(
+                        task_id=request.task_id, event_type="tool_preparation_rejected",
+                        actor=request.agent, payload={"name": name, "code": error.code})
             except Exception:
                 control.failure = "platform_tool_error"
                 control.stop.set()
                 result = {"status": "failed", "error": "platform_tool_rejected"}
             encoded = json.dumps(self._clean(result), ensure_ascii=False)
             if len(encoded.encode()) > 16384:
+                detail = result.get("result")
+                metadata = ({key: detail[key] for key in ("exit_code", "timed_out", "output_limited")
+                             if key in detail} if isinstance(detail, dict) else {})
+                raw = encoded.encode("utf-8")
                 result = {"status": result.get("status", "failed"), "action_id": result.get("action_id"),
-                          "output_truncated": True, "result": self._clean(encoded[:8192])}
+                          "output_truncated": True,
+                          "result": {**metadata, "output_excerpt":
+                                     raw[:2048].decode("utf-8", "ignore") + "\n...[truncated]...\n" +
+                                     raw[-4096:].decode("utf-8", "ignore")}}
             with control.lock:
                 if not control.failure:
                     control.record["inflight"] = None
@@ -257,6 +287,21 @@ class ManagedHarness:
                 outcome = self._call(control, request, **pending)
                 if outcome["status"] == "waiting_human":
                     status, error = "waiting_human", ""
+                elif (self.adapter_name in ("claude_code", "provider")
+                      and outcome.get("error") in ("tool_file_missing", "tool_preparation_failed")):
+                    # A file may disappear while waiting for approval. This
+                    # failed before claim/execution, so let the model repair it.
+                    status, text, error, exit_code = self._execute(control, request)
+                elif (self.adapter_name in ("claude_code", "provider") and pending["name"] == "run_python"
+                      and outcome["status"] == "failed" and isinstance(outcome.get("result"), dict)
+                      and type(outcome["result"].get("exit_code")) is int
+                      and outcome["result"]["exit_code"] != 0
+                      and outcome["result"].get("timed_out") is False
+                      and outcome["result"].get("output_limited") is False):
+                    # The approved script ran once and returned a definite test
+                    # failure. Restart Claude with that recorded output so it can
+                    # repair the work; never replay the consumed approval.
+                    status, text, error, exit_code = self._execute(control, request)
                 elif outcome["status"] != "success":
                     status, error = "blocked" if outcome["status"] == "blocked" else "failed", "platform_action_stopped"
                 else:
@@ -290,8 +335,14 @@ class ManagedHarness:
                 try:
                     self._event(control, "result", {"status": status, "error": error})
                     try:
+                        finished_payload = {"run_id": control.record["run_id"],
+                                            "status": status, "error": error,
+                                            "exit_code": exit_code}
+                        for event in control.record["events"]:
+                            if event["kind"] in ("system_event_summary", "model_proxy_summary"):
+                                finished_payload[event["kind"]] = event["payload"]
                         self.broker.repository.append_event(task_id=request.task_id, event_type="harness_finished", actor=request.agent,
-                                                            payload={"run_id": control.record["run_id"], "status": status})
+                                                            payload=finished_payload)
                     except Exception:
                         control.record["result"]["status"] = "failed"
                         control.record["result"]["error"] = "audit_failed"

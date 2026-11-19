@@ -15,6 +15,8 @@ class ModelProxy:
         self.endpoint = urlsplit(model.endpoint)
         self.requests = 0
         self.bytes = 0
+        self.status_codes = {}
+        self.failures = 0
         self.lock = threading.Lock()
         self.connections = set()
 
@@ -68,6 +70,8 @@ class ModelProxy:
                         headers["anthropic-beta"] = beta
                     connection.request("POST", target, body, headers)
                     response = connection.getresponse()
+                    with proxy.lock:
+                        proxy.status_codes[str(response.status)] = proxy.status_codes.get(str(response.status), 0) + 1
                     # Do not follow or relay Location/Set-Cookie/credentials.
                     if 300 <= response.status < 400:
                         self.send_error(502, "Model redirect denied")
@@ -87,6 +91,8 @@ class ModelProxy:
                         self.wfile.flush()
                 except Exception:
                     # Details can contain auth headers or provider response bodies.
+                    with proxy.lock:
+                        proxy.failures += 1
                     try:
                         self.send_error(502, "Model request failed")
                     except OSError:
@@ -123,6 +129,11 @@ class ModelProxy:
 
         self.server = Server(str(path), Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+
+    def summary(self):
+        with self.lock:
+            return {"requests": self.requests, "status_codes": dict(self.status_codes),
+                    "failures": self.failures}
 
     def __enter__(self):
         self.thread.start()

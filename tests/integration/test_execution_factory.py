@@ -24,6 +24,68 @@ class Provider:
 
 
 class ExecutionFactoryTests(unittest.TestCase):
+    def test_default_harness_deadline_and_explicit_override(self):
+        import os
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ):
+            os.environ.pop("EVO_HARNESS_TIMEOUT", None)
+            coordinator = create_orchestrator(temp, agents=(Agent("builder", "Build"),), provider=Provider())
+            self.assertEqual(coordinator.execution_config["harness"]["timeout"], 600)
+            os.environ["EVO_HARNESS_TIMEOUT"] = "240"
+            coordinator = create_orchestrator(temp, agents=(Agent("builder", "Build"),), provider=Provider())
+            self.assertEqual(coordinator.execution_config["harness"]["timeout"], 240)
+    def test_planning_uses_public_team_decisions_and_excludes_private_answers(self):
+        import json
+        from unittest.mock import Mock
+        from evo.domain.models import Message
+        with tempfile.TemporaryDirectory() as temp:
+            provider = Mock()
+            provider.complete.return_value = {"subtasks": [{"id": "s1", "description": "Build"}]}
+            coordinator = create_orchestrator(temp, agents=(Agent("builder", "Build"),), provider=provider)
+            coordinator.store.save_task(Task("t1", "Build"))
+            coordinator.store.save_task(Task("t2", "Other task"))
+            for message in (Message("decision", "group", "builder", "Use Room A", "chat", "t1"),
+                            Message("private", "dm", "human", "Private details", "builder", "t1"),
+                            Message("other", "group", "builder", "Other decision", "chat", "t2")):
+                coordinator.store.save_message(message)
+            coordinator.planner.plan("Build", task_id="t1")
+            payload = json.loads(provider.complete.call_args[0][0][1]["content"])
+            self.assertEqual(payload["team_discussion"], [{"agent": "builder", "content": "Use Room A"}])
+
+    def test_tool_budget_can_be_configured_for_web_and_cli_factory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with patch.dict("os.environ", {"EVO_HARNESS_ADAPTER": "baseline",
+                                        "EVO_MAX_TOOL_CALLS": "96"}):
+                coordinator = create_orchestrator(
+                    temp, agents=(Agent("builder", "documents"),), provider=Provider())
+                harness = coordinator.harness_factory(
+                    "task-1", "builder", coordinator.workspace_factory("builder"))
+            self.assertEqual(harness.config.max_tool_calls, 96)
+
+    def test_invalid_completion_from_one_bidder_does_not_fail_assignment(self):
+        class InvalidQaBidProvider(Provider):
+            def complete(self, messages, json_object=False):
+                if "Bid honestly" in messages[0]["content"]:
+                    if "You are qa," in messages[0]["content"]:
+                        raise ProviderError("private model output", code="invalid_completion")
+                    return {"score": 5, "reason": "Can write the report"}
+                return super().complete(messages, json_object=json_object)
+
+        with tempfile.TemporaryDirectory() as temp:
+            coordinator = create_orchestrator(
+                temp, agents=(Agent("builder", "documents"), Agent("qa", "testing")),
+                provider=InvalidQaBidProvider(),
+                harness_config=HarnessConfig(adapter="baseline"))
+            result = coordinator.run("Write report.md", checks={
+                "s1": ArtifactCheck("report.md", exact="done")},
+                actions={"s1": (ToolCall("write_file", {"path": "report.md", "content": "done"}),)})
+            self.assertEqual(result["task"]["status"], "success")
+            self.assertEqual(result["subtasks"][0]["owner"], "builder")
+            self.assertFalse(any(event["event_type"] == "orchestration_error" for event in
+                                 coordinator.store.list_events(result["subtasks"][0]["id"])))
+            fallback = [event for event in coordinator.store.list_events(result["task"]["id"])
+                        if event["event_type"] == "agent_bid_fallback"]
+            self.assertEqual(fallback[0]["payload"]["reason"], "invalid_completion")
+
     def test_bid_provider_error_is_categorized_in_trace(self):
         class FailingBidProvider(Provider):
             def complete(self, messages, json_object=False):

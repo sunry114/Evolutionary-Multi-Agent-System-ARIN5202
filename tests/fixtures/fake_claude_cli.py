@@ -37,12 +37,21 @@ def main():
         session = "other-session"
     print(json.dumps({"type": "system", "subtype": "init", "session_id": session, "tools": [],
                       "mcp_servers": [{"name": "evo", "status": "connected"}]}), flush=True)
+    if mode in ("system_noise", "many_thinking_tokens"):
+        for _ in range(40 if mode == "system_noise" else 1024):
+            print(json.dumps({"type": "system", "subtype": "thinking_tokens", "session_id": session}), flush=True)
     if mode == "blocked_native":
         print(json.dumps({"type": "system", "subtype": "init", "session_id": session, "tools": ["Bash"]}), flush=True)
     elif mode == "failed_mcp":
         print(json.dumps({"type": "system", "subtype": "init", "session_id": session,
                           "mcp_servers": [{"name": "evo", "status": "failed"}]}), flush=True)
     else:
+        if mode == "model_unavailable":
+            print(json.dumps({"type": "assistant", "session_id": session,
+                              "message": {"content": [{"type": "text", "text":
+                                  "There's an issue with the selected model (fixture-model). "
+                                  "It may not exist or you may not have access to it."}]}}), flush=True)
+            return 1
         if mode == "mcp":
             with socket.socket(socket.AF_UNIX) as channel:
                 channel.connect(os.environ["FAKE_MCP_SOCKET"])

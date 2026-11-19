@@ -38,6 +38,7 @@ class RunRequest:
     role: str = ""
     memory: tuple[str, ...] = ()
     actions: tuple[ToolCall, ...] = ()  # Baseline's explicit single-action sequence.
+    acceptance: Mapping[str, object] | None = None
 
     def __post_init__(self):
         for value in (self.task_id, self.agent, self.session_scope):
@@ -53,6 +54,10 @@ class RunRequest:
                 or not isinstance(self.actions, tuple) or len(self.actions) > 20
                 or any(not isinstance(x, ToolCall) for x in self.actions)):
             raise ValueError("Invalid or oversized harness context")
+        if self.acceptance is not None and (not isinstance(self.acceptance, Mapping)
+                or set(self.acceptance) - {"path", "purpose", "contains", "exact"}
+                or not isinstance(self.acceptance.get("path"), str)):
+            raise ValueError("Invalid harness acceptance check")
 
 
 @dataclass(frozen=True)

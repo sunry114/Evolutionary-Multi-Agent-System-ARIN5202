@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from evo.adapters.harness import create_harness
 from evo.adapters.harness.backend import local_claude_backend
@@ -11,6 +12,9 @@ from evo.adapters.harness.baseline import BaselineHarnessAdapter
 from evo.config import HarnessConfig, HarnessModelConfig
 from evo.ports.harness import HarnessError, ToolCall
 from evo.adapters.harness.mcp_bridge import MCPBridge
+from evo.adapters.harness.runtime import ManagedHarness
+from evo.adapters.tools.web import WebToolError
+from evo.ports.tools import ExecutionResult
 
 from tests.fixtures.harness import HarnessFixture
 
@@ -101,9 +105,11 @@ class BaselineTests(HarnessFixture):
                        {"memory": ("x" * 9000,)}):
             with self.assertRaises(ValueError):
                 replace(self.request, **kwargs)
-        for kwargs in ({"timeout": float("nan")}, {"max_tool_calls": 21}, {"cli_version": "latest"}):
+        for kwargs in ({"timeout": float("nan")}, {"max_tool_calls": 129}, {"cli_version": "latest"}):
             with self.assertRaises(ValueError):
                 HarnessConfig(**kwargs)
+        self.assertEqual(HarnessConfig().max_tool_calls, 80)
+        self.assertEqual(HarnessConfig(max_tool_calls=128).max_tool_calls, 128)
         with self.assertRaises(HarnessError):
             self.adapter.events(type("Handle", (), {"run_id": "../secret"})())
 
@@ -116,13 +122,98 @@ class BaselineTests(HarnessFixture):
     def test_tool_limit_is_enforced_across_resume(self):
         adapter = BaselineHarnessAdapter(self.state, self.broker, config=HarnessConfig(max_tool_calls=1))
         request = replace(self.request, actions=(ToolCall("list_files", {}), ToolCall("list_files", {})))
-        _, result = self.complete(request, adapter)
+        handle, result = self.complete(request, adapter)
         self.assertNotEqual(result.status, "success")
+        self.assertEqual(json.loads((adapter.root / (handle.run_id + ".json")).read_text())["tool_calls"], 1)
         actions = [e for e in self.store.list_events("t1") if e["event_type"] == "action_started"]
         self.assertEqual(len(actions), 1)
 
+    def test_default_budget_allows_more_than_twenty_platform_calls(self):
+        class ProbeHarness(ManagedHarness):
+            adapter_name = "baseline"
+
+            def _execute(self, control, request):
+                for _ in range(21):
+                    if self._call(control, request, "list_files", {})["status"] != "success":
+                        return "failed", "", "platform_action_stopped", None
+                return "success", "done", "", 0
+
+        adapter = ProbeHarness(self.state, self.broker)
+        handle, result = self.complete(self.request, adapter)
+        self.assertEqual(result.status, "success")
+        self.assertEqual(json.loads((adapter.root / (handle.run_id + ".json")).read_text())["tool_calls"], 21)
+
 
 class BridgeTests(HarnessFixture):
+    def test_large_failed_test_output_keeps_exit_code_and_failure_tail(self):
+        class ProbeHarness(ManagedHarness):
+            adapter_name = "baseline"
+
+            def _execute(self, control, request):
+                result = self._call(control, request, "run_python", {"path": "check.py"})
+                detail = result["result"]
+                return "success", str(detail["exit_code"]) + ":" + (
+                    "FAIL C7" if "FAIL C7" in detail["output_excerpt"] else "missing failure"), "", 0
+
+        output = {"status": "failed", "action_id": "fake-action",
+                  "result": {"exit_code": 1, "stdout": "x" * 20000 + "FAIL C7",
+                             "stderr": "", "timed_out": False, "output_limited": False}}
+        harness = ProbeHarness(self.state, self.broker)
+        with patch.object(self.broker, "call", return_value=output):
+            _, result = self.complete(adapter=harness)
+        self.assertEqual(result.status, "success")
+        self.assertIn("1:", result.text)
+        self.assertIn("FAIL C7", result.text)
+
+    def test_claude_resume_receives_failed_test_output_for_repair(self):
+        class ProbeHarness(ManagedHarness):
+            adapter_name = "claude_code"
+
+            def _execute(self, control, request):
+                context = control.record["context"]
+                if context and context[-1]["tool"] == "run_python":
+                    return "success", context[-1]["outcome"]["result"]["stdout"], "", 0
+                result = self._call(control, request, "run_python", {"path": "check.py"})
+                return result["status"], "", "", None
+
+        self.fs.write_file("check.py", "raise SystemExit(1)", purpose="code")
+        self.python.run_python.return_value = ExecutionResult(1, "FAIL C7", "")
+        harness = ProbeHarness(self.state, self.broker,
+                               config=HarnessConfig(adapter="claude_code"))
+        _, first = self.complete(adapter=harness)
+        self.assertEqual(first.status, "waiting_human")
+        self.approval.answer(self.store.list_pending_requests()[0]["id"], {"approved": True})
+        handle = harness.resume(first.resume_ref, self.request)
+        second = harness.wait(handle, 5)
+        self.assertEqual((second.status, second.text), ("success", "FAIL C7"))
+        self.assertEqual(self.store.get_task("t1")["status"], "running")
+        self.python.run_python.assert_called_once_with("check.py", approved=True)
+
+    def test_recoverable_search_failure_does_not_stop_other_tools(self):
+        class OfflineWeb:
+            def search(self, query):
+                raise WebToolError("Web request timed out")
+
+        class ProbeHarness(ManagedHarness):
+            adapter_name = "baseline"
+
+            def _execute(self, control, request):
+                self._call(control, request, "search", {"query": "meeting rooms"})
+                self._call(control, request, "list_files", {"path": "."})
+                return "success", "continued", "", 0
+
+        self.broker.web = OfflineWeb()
+        harness = ProbeHarness(self.state, self.broker)
+        handle, result = self.complete(adapter=harness)
+        self.assertEqual((result.status, result.text), ("success", "continued"), repr(result))
+        outcomes = [event.payload["outcome"] for event in harness.events(handle)
+                    if event.kind == "tool_result"]
+        self.assertEqual([item["status"] for item in outcomes], ["failed", "success"])
+        self.assertEqual(outcomes[0]["error"], "web_tool_failed")
+        actions = [event for event in self.store.list_events("t1")
+                   if event["event_type"] == "action_completed"]
+        self.assertEqual([event["payload"]["status"] for event in actions], ["failed", "success"])
+
     def test_tools_cannot_supply_identity_approval_or_arbitrary_paths(self):
         for name, args in (("run_python", {"path": "main.py", "approved": True}),
                            ("write_file", {"path": "report.md", "content": "x", "agent": "bob"}),

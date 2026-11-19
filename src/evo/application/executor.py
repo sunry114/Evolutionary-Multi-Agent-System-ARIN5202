@@ -2,10 +2,20 @@
 
 import hashlib
 from dataclasses import asdict
+from pathlib import PurePosixPath
 from typing import Mapping
 
 from evo.domain.policies import CRITICAL_TOOLS
 from evo.ports.tools import ExecutionResult, ToolError
+from evo.adapters.tools.filesystem import PURPOSE_SUFFIXES
+
+
+class ActionPreparationError(ValueError):
+    """Input validation failed before approval or execution; no action ran."""
+
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
 
 
 class ActionExecutor:
@@ -38,6 +48,8 @@ class ActionExecutor:
             raise ValueError("Unexpected or missing tool arguments")
         payload = {"arguments": args}
         if name in ("run_python", "delete_file"):
+            if name == "run_python" and (not isinstance(args["path"], str) or PurePosixPath(args["path"]).suffix.lower() != ".py"):
+                raise ValueError("Python execution requires a .py script")
             purpose = "code" if name == "run_python" else args["purpose"]
             content = self.workspace.read_file(args["path"], purpose=purpose)
             payload["sha256"] = hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -48,6 +60,8 @@ class ActionExecutor:
                 # The Git port validates paths; hash through the workspace port.
                 suffix = path.rsplit(".", 1)[-1].lower()
                 purpose = {"py": "code", "json": "data", "csv": "data", "yaml": "config", "yml": "config"}.get(suffix, "document")
+                if "." + suffix in PURPOSE_SUFFIXES["code"]:
+                    purpose = "code"
                 content = self.workspace.read_file(path, purpose=purpose)
                 payload["sha256"][path] = hashlib.sha256(content.encode("utf-8")).hexdigest()
         if name == "git_push":
@@ -63,7 +77,12 @@ class ActionExecutor:
             return {"status": "blocked"}
         if task["status"] not in ("running", "waiting_human"):
             raise ValueError("Task is not executable")
-        payload = self._prepare(name, arguments)
+        try:
+            payload = self._prepare(name, arguments)
+        except FileNotFoundError:
+            raise ActionPreparationError("tool_file_missing") from None
+        except (ToolError, ValueError, TypeError, OSError):
+            raise ActionPreparationError("tool_preparation_failed") from None
         critical = name in CRITICAL_TOOLS or (name == "git_commit" and self.require_commit_approval)
         if critical:
             if request_id is None:
@@ -110,6 +129,12 @@ class ActionExecutor:
         except Exception:
             self.repository.finish_action(action_id, succeeded=False, result={"error": "tool_failed"})
             raise ToolError("Action execution failed") from None
-        self.repository.finish_action(action_id, succeeded=succeeded, result=summary)
+        # A verified script exit with a nonzero code is test feedback the agent
+        # can act on. Runtime/tool failures and uncertain runs still end the task.
+        recoverable_script_failure = (name == "run_python" and isinstance(result, ExecutionResult)
+                                      and result.exit_code != 0 and not result.timed_out
+                                      and not result.output_limited)
+        self.repository.finish_action(action_id, succeeded=succeeded, result=summary,
+                                      fail_task_on_error=name != "git_status" and not recoverable_script_failure)
         return {"status": "success" if succeeded else "failed", "action_id": action_id,
                 "result": asdict(result) if isinstance(result, ExecutionResult) else result}

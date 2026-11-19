@@ -5,12 +5,13 @@ import uuid
 
 
 class ApprovalService:
-    def __init__(self, repository, *, max_age_seconds=3600):
+    def __init__(self, repository, *, max_age_seconds=3600, clarification_agent="planner"):
         if (isinstance(max_age_seconds, bool) or not isinstance(max_age_seconds, (float, int))
                 or not math.isfinite(max_age_seconds) or not 0 < max_age_seconds <= 86400):
             raise ValueError("Invalid approval lifetime")
         self.repository = repository
         self.max_age_seconds = max_age_seconds
+        self.clarification_agent = clarification_agent
 
     def request_approval(self, task_id, agent, action, payload):
         return self.repository.prepare_critical_action(task_id, agent, action, payload)
@@ -20,7 +21,7 @@ class ApprovalService:
             raise ValueError("Invalid clarification question")
         request_id = str(uuid.uuid4())
         self.repository.save_approval_request(request_id=request_id, task_id=task_id,
-                                             agent="planner", kind="clarification",
+                                             agent=self.clarification_agent, kind="clarification",
                                              payload={"question": question})
         return request_id
 

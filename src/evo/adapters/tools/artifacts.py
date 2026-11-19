@@ -40,6 +40,8 @@ class ArtifactExchange:
     def __init__(self, workspace: WorkspaceFilesystem):
         self._workspace = workspace
         self._root = workspace._state_root / "artifacts"
+        if workspace.task_scope is not None:
+            self._root = workspace._state_root / "tasks" / workspace.task_scope / "artifacts"
         with _directory(self._root, create=True):
             pass
 

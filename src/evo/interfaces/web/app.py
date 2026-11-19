@@ -7,7 +7,7 @@ from importlib.resources import files
 from evo.interfaces.gateway import ApplicationFailure, ApplicationUnavailable
 
 MAX_BODY = 65536
-OPERATIONS = {"run", "create", "terminate", "clear_finished", "resume", "agents", "dm", "group", "review", "revision", "answer", "eval", "trace", "metrics", "memory", "task", "tasks", "messages"}
+OPERATIONS = {"run", "start", "create", "terminate", "clear_finished", "resume", "continue", "agents", "dm", "group", "discuss", "review", "revision", "answer", "eval", "trace", "metrics", "memory", "task", "tasks", "messages"}
 
 
 def unique_object(pairs):
@@ -47,17 +47,20 @@ def make_server(application, port=8768):
 
         def reply(self, status, data, html=False):
             encoded = data.encode("utf-8") if html else json.dumps(redact(data), ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "text/html; charset=utf-8" if html else "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(encoded)))
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Content-Security-Policy",
-                             "default-src 'none'; script-src 'nonce-" + token +
-                             "'; style-src 'nonce-" + token + "'; connect-src 'self'; "
-                             "frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
-            self.end_headers()
-            self.wfile.write(encoded)
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", "text/html; charset=utf-8" if html else "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Security-Policy",
+                                 "default-src 'none'; script-src 'nonce-" + token +
+                                 "'; style-src 'nonce-" + token + "'; connect-src 'self'; "
+                                 "frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+                self.end_headers()
+                self.wfile.write(encoded)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass  # The client left; the operation has already completed.
 
         def valid_host(self):
             return self.headers.get_all("Host", []) == [self.server.authority]

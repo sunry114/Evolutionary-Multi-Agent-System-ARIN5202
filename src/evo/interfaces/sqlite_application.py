@@ -1,6 +1,6 @@
 """Real SQLite human-review workspace; no agent execution is simulated."""
 from pathlib import Path
-from threading import RLock
+from threading import RLock, Thread
 import uuid
 from datetime import datetime, timezone
 from dataclasses import asdict
@@ -8,8 +8,9 @@ from dataclasses import asdict
 from evo.adapters.persistence.sqlite_store import SQLiteStore
 from evo.application.reviews import ReviewService
 from evo.application.approvals import ApprovalService
-from evo.application.chat import ChatService
+from evo.application.chat import ChatService, human_question
 from evo.domain.models import Agent, Task
+from evo.domain.policies import team_coordinator
 from evo.application.orchestrator import ArtifactCheck
 from evo.adapters.tools.filesystem import validate_file_path
 from evo.interfaces.gateway import ApplicationFailure, ApplicationUnavailable
@@ -23,7 +24,7 @@ DEFAULT_AGENTS = (
 
 CAPABILITIES = {name: True
                 for name in ("tasks", "task", "trace", "review", "revision",
-                             "run", "create", "terminate", "clear_finished", "resume", "dm", "group", "answer", "memory", "eval", "metrics", "messages", "agents")}
+                             "run", "start", "create", "terminate", "clear_finished", "resume", "continue", "dm", "group", "discuss", "answer", "memory", "eval", "metrics", "messages", "agents")}
 
 
 def required_text(payload, name):
@@ -31,6 +32,27 @@ def required_text(payload, name):
     if not isinstance(value, str) or not value.strip():
         raise ValueError("Required text field is missing or invalid")
     return value.strip()
+
+
+def private_message_view(records):
+    """Keep agent-to-agent sections out of private history, including legacy DMs."""
+    visible = []
+    for record in records:
+        if record["kind"] == "dm" and record["sender"] != "human":
+            content = human_question(record["content"])
+            if not content:
+                continue
+            record = {**record, "content": content}
+        visible.append(record)
+    return visible
+
+
+def private_request_view(request):
+    if request["action"] == "chat_question":
+        question = human_question(request["payload"].get("question", ""))
+        return {**request, "payload": {**request["payload"],
+                "question": question or "请补充你对当前任务的需求或限制。"}}
+    return request
 
 
 class SQLiteApplication:
@@ -44,7 +66,90 @@ class SQLiteApplication:
         if not self.agents or len({agent.name for agent in self.agents}) != len(self.agents):
             raise ValueError("Agent registry must be nonempty and unique")
         self._provider = provider
-        self._chat_lock = RLock()
+        # Serialize each task's conversation; controls and other tasks stay responsive.
+        self._state_lock = RLock()
+        self._active_runs = set()
+        self._active_discussions = set()
+        self._conversation_locks = {}
+        # Existing unanswered text questions use the same human contact after restart.
+        for scope in {r["task_id"] for r in self.store.list_pending_requests() if r["kind"] == "clarification"}:
+            root = self.store.get_task(scope)
+            while root["parent_id"]:
+                root = self.store.get_task(root["parent_id"])
+            saved_agents = self._task_agents(root["id"])
+            self.store.route_pending_questions(scope, team_coordinator(saved_agents), [asdict(a) for a in saved_agents])
+
+    def _task_agents(self, task_id):
+        configs = [e["payload"]["agents"] for e in self.store.list_events(task_id)
+                   if e["event_type"] in ("task_agents", "run_config") and "agents" in e["payload"]]
+        return parse_agents(configs[-1]) if configs else self.agents
+
+    def _conversation_lock(self, task_id):
+        with self._state_lock:
+            return self._conversation_locks.setdefault(task_id, RLock())
+
+    def _require_discussion_ready(self, task_id):
+        with self._state_lock:
+            active = any(key[0] == task_id for key in self._active_discussions)
+        if active:
+            raise ApplicationUnavailable("团队仍在讨论，请等本轮讨论结束后开始执行。")
+        if any(r["task_id"] == task_id and r["action"] == "chat_question"
+               for r in self.store.list_pending_requests()):
+            raise ApplicationUnavailable("Agent 正在等待人类回答，请先到私聊回复。")
+
+    def start_discussion(self, payload):
+        """Acknowledge work promptly; committed messages are readable during model calls."""
+        if set(payload) - {"task_id", "message", "request_id"}:
+            raise ValueError("Invalid discussion fields")
+        task_id = required_text(payload, "task_id")
+        task = self.store.get_task(task_id)
+        if task["parent_id"] or task["status"] in ("success", "failed", "blocked"):
+            raise ValueError("Task is not active")
+        request_id = payload.get("request_id")
+        if request_id is not None:
+            if not isinstance(request_id, str):
+                raise ValueError("Invalid request ID")
+            request = self.store.get_approval_request(request_id)
+            if (request["task_id"] != task_id or request["action"] != "chat_question"
+                    or request["status"] != "answered"):
+                raise ValueError("Only an answered chat question may wake an agent")
+            if any(e["event_type"] == "chat_completed" and e["payload"].get("request_id") == request_id
+                   for e in self.store.list_events(task_id)):
+                raise ValueError("This reply has already been processed")
+            message = None
+        else:
+            message = required_text(payload, "message")
+            if len(message) > 8000:
+                raise ValueError("Message is too long")
+        key = (task_id, request_id)
+        with self._state_lock:
+            if key in self._active_discussions:
+                return {"status": "started", "task_id": task_id}
+            self._active_discussions.add(key)
+
+        def work():
+            try:
+                self.store.append_event(task_id=task_id, event_type="chat_started", actor="chat",
+                                        payload={"request_id": request_id})
+                self.chat("group", {"task_id": task_id, "message": message or "Resume private answer"},
+                          resume_request=request_id)
+                self.store.append_event(task_id=task_id, event_type="chat_completed", actor="chat",
+                                        payload={"request_id": request_id})
+            except Exception as error:
+                hint = str(error) if isinstance(error, (ApplicationFailure, ApplicationUnavailable)) else "讨论处理失败；已保存的消息和私聊回答会保留。"
+                self.store.append_event(task_id=task_id, event_type="chat_failed", actor="chat",
+                                        payload={"request_id": request_id, "message": hint})
+            finally:
+                with self._state_lock:
+                    self._active_discussions.discard(key)
+
+        try:
+            Thread(target=work, name="evo-chat-" + task_id[:8], daemon=True).start()
+        except Exception:
+            with self._state_lock:
+                self._active_discussions.discard(key)
+            raise
+        return {"status": "started", "task_id": task_id}
 
     def _refresh_agents(self):
         if self._uses_registry:
@@ -102,11 +207,6 @@ class SQLiteApplication:
         else:
             final_check = None
             checks = self._checks(payload.get("checks"))
-        try:
-            coordinator = self._coordinator()
-        except Exception:
-            raise ApplicationUnavailable(
-                "Execution needs a permitted provider, credential, and configured Harness runtime.") from None
         task_id = payload.get("task_id")
         if task_id is not None:
             if not isinstance(task_id, str):
@@ -114,8 +214,14 @@ class SQLiteApplication:
             task = self.store.get_task(task_id)
             if task["status"] != "created" or task["parent_id"] or task["prompt"] != prompt:
                 raise ValueError("Only a matching draft task can be started")
+            self._require_discussion_ready(task_id)
         else:
             task_id = uuid.uuid4().hex
+        try:
+            coordinator = self._coordinator(self._task_agents(task_id))
+        except Exception:
+            raise ApplicationUnavailable(
+                "Execution needs a permitted provider, credential, and configured Harness runtime.") from None
         try:
             options = {"final_check": final_check} if final_check is not None else {}
             result = coordinator.run(prompt, checks=checks, task_id=task_id,
@@ -131,6 +237,56 @@ class SQLiteApplication:
                     "message": "Task failed; inspect its trace for the recorded state."}
         return {"status": result["task"]["status"], "task": result["task"],
                 "subtasks": result["subtasks"]}
+
+    def start_task(self, payload):
+        """Start a board task without keeping its HTTP request open for minutes."""
+        if set(payload) - {"task_id", "prompt", "final_check", "no_memory"} or "final_check" not in payload:
+            raise ValueError("Invalid start fields")
+        task_id = required_text(payload, "task_id")
+        prompt = required_text(payload, "prompt")
+        self._final_check(payload["final_check"])
+        if type(payload.get("no_memory", False)) is not bool:
+            raise ValueError("Invalid memory mode")
+        with self._state_lock:
+            task = self.store.get_task(task_id)
+            if (task["status"] != "created" or task["parent_id"]
+                    or task["prompt"] != prompt or task_id in self._active_runs):
+                raise ValueError("Only a matching draft task can be started once")
+            self._refresh_agents()
+            self._require_discussion_ready(task_id)
+            try:
+                self._coordinator(self._task_agents(task_id))  # Validate before acknowledging start.
+            except Exception:
+                raise ApplicationUnavailable("Execution needs a permitted provider and credential.") from None
+            self._active_runs.add(task_id)
+
+        def work():
+            try:
+                result = self.run_task(payload)
+                if result["status"] == "failed":
+                    task = self.store.get_task(task_id)
+                    if task["status"] in ("created", "planning", "ready", "assigned"):
+                        self.store.transition_task(task_id, "failed", expected=task["status"],
+                                                   result="Execution failed; inspect trace")
+            except Exception:
+                try:
+                    task = self.store.get_task(task_id)
+                    if task["status"] in ("created", "planning", "ready", "assigned"):
+                        self.store.transition_task(task_id, "failed", expected=task["status"],
+                                                   result="Execution failed; inspect trace")
+                except Exception:
+                    pass
+            finally:
+                with self._state_lock:
+                    self._active_runs.discard(task_id)
+
+        try:
+            Thread(target=work, name="evo-task-" + task_id[:8], daemon=True).start()
+        except Exception:
+            with self._state_lock:
+                self._active_runs.discard(task_id)
+            raise
+        return {"status": "started", "task_id": task_id}
 
     def resume_task(self, task_id):
         task = self.store.get_task(task_id)
@@ -152,6 +308,39 @@ class SQLiteApplication:
             raise ApplicationFailure("Task could not resume; inspect its saved state and trace.") from None
         return {"status": result["task"]["status"], "task": result["task"],
                 "subtasks": result["subtasks"]}
+
+    def continue_task(self, task_id):
+        """Resume after human input without holding the HTTP connection open."""
+        with self._state_lock:
+            task = self.store.get_task(task_id)
+            if (task["parent_id"] or task["status"] != "waiting_human"
+                    or task_id in self._active_runs):
+                raise ValueError("Only one paused root task can resume")
+            if any(request["task_id"] == task_id or request["task_id"].startswith(task_id + "-")
+                   for request in self.store.list_pending_requests()):
+                raise ValueError("Answer pending human requests before continuing")
+            self._active_runs.add(task_id)
+
+        def work():
+            try:
+                self.resume_task(task_id)
+            except Exception:
+                try:
+                    self.store.append_event(task_id=task_id, event_type="resume_error", actor="web",
+                                            payload={"code": "resume_failed"})
+                except Exception:
+                    pass
+            finally:
+                with self._state_lock:
+                    self._active_runs.discard(task_id)
+
+        try:
+            Thread(target=work, name="evo-resume-" + task_id[:8], daemon=True).start()
+        except Exception:
+            with self._state_lock:
+                self._active_runs.discard(task_id)
+            raise
+        return {"status": "started", "task_id": task_id}
 
     def evaluate(self, payload):
         if set(payload) - {"dataset", "output", "no_memory"}:
@@ -178,16 +367,28 @@ class SQLiteApplication:
         except Exception:
             raise ApplicationFailure("Evaluation failed; inspect dataset and runtime configuration.") from None
 
-    def messages(self, *, agent=None):
+    def messages(self, *, agent=None, task_id=None):
         if agent is not None:
-            if agent not in {item.name for item in self.agents}:
+            agents = self._task_agents(task_id) if task_id else self.agents
+            if agent not in {item.name for item in agents}:
                 raise ValueError("Unknown agent")
-            return list(self.store.list_direct_messages("human", agent))[-100:]
+        if task_id is not None:
+            if not isinstance(task_id, str) or not task_id:
+                raise ValueError("Invalid task ID")
+            self.store.get_task(task_id)
+            return private_message_view([message for message in self.store.list_task_messages(task_id)
+                    if (message["kind"] == "group" and message.get("recipient") == "chat")
+                    or (message["kind"] == "dm" and
+                        (message["sender"] == "human" or message["recipient"] == "human"))
+                    if agent is None or message["kind"] != "dm" or
+                    message["sender"] == agent or message["recipient"] == agent])
+        if agent is not None:
+            return private_message_view(list(self.store.list_direct_messages("human", agent))[-100:])
         records = [m for m in self.store.list_group_messages()
                    if not m.get("task_id") or m.get("recipient") == "chat"]
         for item in self.agents:
             records.extend(self.store.list_direct_messages("human", item.name)[-100:])
-        return sorted(records, key=lambda m: (m["created_at"], m["id"]))[-400:]
+        return private_message_view(sorted(records, key=lambda m: (m["created_at"], m["id"]))[-400:])
 
     def memory(self, payload):
         self._refresh_agents()
@@ -223,7 +424,17 @@ class SQLiteApplication:
                 "timing_final": terminal, "includes_human_wait": True,
                 "note": "Stored task wall time and direct-child states; not an official dataset quality score."}
 
-    def chat(self, operation, payload):
+    def _save_chat_message(self, message):
+        # Termination clears messages under the same lock, so a reply arriving
+        # later cannot recreate a terminated task's conversation.
+        with self._state_lock:
+            if message.task_id is not None:
+                task = self.store.get_task(message.task_id)
+                if task["parent_id"] or task["status"] in ("success", "failed", "blocked"):
+                    raise ValueError("Task is not active")
+            self.store.save_message(message)
+
+    def chat(self, operation, payload, *, resume_request=None):
         self._refresh_agents()
         message = required_text(payload, "message")
         if len(message) > 8000:
@@ -236,9 +447,10 @@ class SQLiteApplication:
             task = self.store.get_task(task_id)
             if task["parent_id"] or task["status"] in ("success", "failed", "blocked"):
                 raise ValueError("Task is not active")
-        if agent is not None and agent not in {item.name for item in self.agents}:
+        agents = self._task_agents(task_id) if task_id else self.agents
+        if agent is not None and agent not in {item.name for item in agents}:
             raise ValueError("Unknown agent")
-        with self._chat_lock:
+        with self._conversation_lock(task_id):
             if task_id is not None:
                 task = self.store.get_task(task_id)
                 if task["parent_id"] or task["status"] in ("success", "failed", "blocked"):
@@ -254,20 +466,70 @@ class SQLiteApplication:
                         "Chat requires valid provider configuration and credentials; use provider-info and setup-key.") from None
             else:
                 provider = self._provider
-            service = ChatService(provider, self.store, self.agents)
+            agents = self._task_agents(task_id) if task_id else self.agents
+            if resume_request:
+                request = self.store.get_approval_request(resume_request)
+                agents = parse_agents(request["payload"]["agents"])
+            waiting = set()
+            for pending in self.store.list_pending_requests():
+                if pending["task_id"] == task_id and pending["action"] == "chat_question":
+                    waiting.add(pending["agent"])
+                    waiting.update(pending["payload"].get("sources", []))
+            def question_writer(name, question, scope):
+                if scope:
+                    with self._state_lock:
+                        if name != team_coordinator(agents):
+                            raise ValueError("Only the team coordinator may ask the human")
+                        self.store.save_chat_question(scope, name, question, [asdict(a) for a in agents],
+                                                      sources=service.question_sources)
+            service = ChatService(provider, self.store, agents,
+                                  message_writer=self._save_chat_message,
+                                  question_writer=question_writer, waiting_agents=waiting)
             try:
-                reply = service.direct_message(agent, message, task_id) if agent else service.group_message(message, task_id)
-            except Exception:
+                if resume_request:
+                    reply = service.resume_question(request["agent"], task_id,
+                                                     sources=request["payload"].get("sources", []))
+                else:
+                    reply = service.direct_message(agent, message, task_id) if agent else service.group_message(message, task_id)
+            except Exception as error:
+                from evo.adapters.llm.client import ProviderError
+                hints = {"connection": "模型服务连接失败或超时", "authentication": "模型 API 密钥无效",
+                         "permission": "模型服务拒绝访问", "rate_limit": "模型服务限流",
+                         "invalid_completion": "模型返回了空白、截断或格式错误的回复"}
+                hint = hints.get(error.code, "模型服务调用失败") if isinstance(error, ProviderError) else "Agent 回复处理失败"
                 raise ApplicationFailure(
-                    "Agent reply failed; the message and any completed replies may already be saved. Refresh history before retrying.") from None
+                    hint + "；已保存的消息会保留。这不是人类回复超时，请查看历史后再重试。") from None
         result = {"status": "success", "agent": agent, "reply" if agent else "replies": reply}
+        result["waiting_for_human"] = service.waiting_for_human
         if not agent:
             result["directed_replies"] = service.directed_replies
         return result
 
+    def _discussion_state(self, task_id):
+        events = [e for e in self.store.list_events(task_id)
+                  if e["event_type"] in ("chat_started", "chat_completed", "chat_failed")]
+        with self._state_lock:
+            active = any(key[0] == task_id for key in self._active_discussions)
+        return {"active": active, "last_event": events[-1] if events else None}
+
     def snapshot(self):
         self._refresh_agents()
         tasks = self.store.list_board_tasks()
+        requests = [private_request_view(r) for r in self.store.list_pending_requests()]
+        request_roots = {}
+        for request in requests:
+            scope = self.store.get_task(request["task_id"])
+            while scope["parent_id"]:
+                scope = self.store.get_task(scope["parent_id"])
+            request_roots[request["id"]] = scope["id"]
+        for task in tasks:
+            if not task["parent_id"]:
+                task["agent_details"] = [asdict(a) for a in self._task_agents(task["id"])]
+                task["coordinator"] = team_coordinator(self._task_agents(task["id"]))
+                task["discussion"] = self._discussion_state(task["id"])
+                pending = [r for r in requests if request_roots[r["id"]] == task["id"]]
+                task["pending_questions"] = sum(r["kind"] == "clarification" for r in pending)
+                task["pending_approvals"] = sum(r["kind"] == "approval" for r in pending)
         return {
             "mode": "SQLite 工作台：聊天、审查、审批、任务执行与评测已接入",
             "capabilities": dict(CAPABILITIES),
@@ -275,8 +537,9 @@ class SQLiteApplication:
             "agents": [agent.name for agent in self.agents],
             "agent_details": [{"name": agent.name, "specialty": agent.specialty}
                               for agent in self.agents],
+            "coordinator": team_coordinator(self.agents),
             "messages": self.messages(), "memory": [],
-            "requests": self.store.list_pending_requests(),
+            "requests": requests,
         }
 
     def dispatch(self, operation, payload):
@@ -286,24 +549,30 @@ class SQLiteApplication:
             raise ValueError("Unknown operation")
         if operation == "run":
             return self.run_task(payload)
+        if operation == "start":
+            return self.start_task(payload)
+        if operation == "discuss":
+            return self.start_discussion(payload)
         if operation == "create":
             if set(payload) - {"prompt", "agents"}:
                 raise ValueError("Invalid task fields")
             prompt = required_text(payload, "prompt")
             if len(prompt) > 8000:
                 raise ValueError("Task is too long")
-            with self._chat_lock:
+            with self._state_lock:
                 agents = parse_agents(payload["agents"]) if "agents" in payload else None
                 task_id = uuid.uuid4().hex
                 self.store.save_task(Task(task_id, prompt))
                 if agents is not None:
                     save_agents(self.state, agents)
                     self.agents = agents
+                self.store.append_event(task_id=task_id, event_type="task_agents", actor="human",
+                                        payload={"agents": [asdict(a) for a in self.agents]})
             return {"status": "created", "task_id": task_id}
         if operation == "terminate":
             if set(payload) != {"task_id"}:
                 raise ValueError("Invalid termination request")
-            with self._chat_lock:
+            with self._state_lock:
                 return self.store.terminate_task(required_text(payload, "task_id"))
         if operation == "clear_finished":
             if payload:
@@ -318,13 +587,17 @@ class SQLiteApplication:
         if operation == "agents":
             if set(payload) != {"agents"}:
                 raise ValueError("Invalid agent registry request")
-            with self._chat_lock:
+            with self._state_lock:
                 agents = parse_agents(payload["agents"])
                 save_agents(self.state, agents)
                 self.agents = agents
             return {"status": "success", "agents": [agent.name for agent in agents]}
         if operation == "resume":
             return self.resume_task(required_text(payload, "task_id"))
+        if operation == "continue":
+            if set(payload) != {"task_id"}:
+                raise ValueError("Invalid continue fields")
+            return self.continue_task(required_text(payload, "task_id"))
         if not CAPABILITIES[operation]:
             raise ApplicationUnavailable(
                 "This operation needs the evaluation or memory gateway.")
@@ -348,7 +621,21 @@ class SQLiteApplication:
                 raise ValueError("Invalid group fields")
             return self.chat(operation, payload)
         if operation == "messages":
-            return {"messages": self.messages(agent=payload.get("agent"))}
+            if set(payload) - {"agent", "task_id"}:
+                raise ValueError("Invalid message fields")
+            task_id = payload.get("task_id")
+            result = {"messages": self.messages(agent=payload.get("agent"), task_id=task_id)}
+            if task_id:
+                result["discussion"] = self._discussion_state(task_id)
+                requests = []
+                for request in self.store.list_pending_requests():
+                    scope = self.store.get_task(request["task_id"])
+                    while scope["parent_id"]:
+                        scope = self.store.get_task(scope["parent_id"])
+                    if scope["id"] == task_id:
+                        requests.append(private_request_view(request))
+                result["requests"] = requests
+            return result
         if operation == "tasks":
             return {"tasks": self.store.list_tasks(payload.get("limit", 100))}
         if operation == "answer":
@@ -356,6 +643,10 @@ class SQLiteApplication:
                 raise ValueError("Invalid human response")
             request_id = required_text(payload, "request_id")
             request = self.store.get_approval_request(request_id)
+            if request["action"] == "chat_question":
+                result = self.approvals.answer(request_id, {k: v for k, v in payload.items() if k != "request_id"})
+                self.start_discussion({"task_id": request["task_id"], "request_id": request_id})
+                return {**result, "message": "私聊回答已保存，总负责人正在向相关 Agent 同步决定。"}
             if request["action"] == "delivery_format" and (
                     set(payload) != {"request_id", "answer"} or
                     payload["answer"] not in ("accept", "decline")):

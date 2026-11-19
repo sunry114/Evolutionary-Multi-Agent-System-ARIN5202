@@ -203,6 +203,30 @@ class CollectiveTaskTests(unittest.TestCase):
         self.assertEqual(result["subtasks"][0]["status"], "failed")
         self.assertEqual(result["task"]["status"], "failed")
 
+    def test_harness_failure_records_safe_error_code(self):
+        coordinator = self.make({"subtasks": [{"id": "s1", "description": "Write"}]})
+        class ModelFailureHarness(ScriptedHarness):
+            def wait(self, handle, timeout=None):
+                return RunResult("failed", error="model_unavailable", exit_code=1)
+        coordinator.harness_factory = lambda task_id, agent, workspace: ModelFailureHarness(workspace, self.script)
+        result = coordinator.run("Goal", final_check=ArtifactCheck("result.md"))
+        child = result["subtasks"][0]
+        self.assertEqual(child["result"], "Harness failed: model_unavailable")
+        events = self.store.list_events(child["id"])
+        self.assertIn({"code": "model_unavailable", "exit_code": 1},
+                      [event["payload"] for event in events if event["event_type"] == "harness_error"])
+
+    def test_harness_event_limit_is_not_hidden_as_execution_failed(self):
+        coordinator = self.make({"subtasks": [{"id": "s1", "description": "Write"}]})
+
+        class EventLimitHarness(ScriptedHarness):
+            def wait(self, handle, timeout=None):
+                return RunResult("failed", error="event_limit")
+
+        coordinator.harness_factory = lambda task_id, agent, workspace: EventLimitHarness(workspace, self.script)
+        result = coordinator.run("Goal", final_check=ArtifactCheck("result.md"))
+        self.assertEqual(result["subtasks"][0]["result"], "Harness failed: event_limit")
+
     def test_waiting_human_resumes_once_from_checkpoint(self):
         calls = []
         def script(request):
@@ -245,13 +269,19 @@ class CollectiveTaskTests(unittest.TestCase):
             actions={"s1": tuple(ToolCall("list_files", {}) for _ in range(21))})
         self.assertEqual(result["subtasks"][0]["status"], "failed")
 
-    def test_assignment_failure_is_recorded_and_propagated(self):
+    def test_invalid_bid_fallback_allows_dependent_subtasks(self):
         orchestrator = self.make({"subtasks": [
             {"id": "s1", "description": "One"},
             {"id": "s2", "description": "Two", "depends_on": ["s1"]}]})
-        orchestrator.assignment.provider = Provider({"score": "invalid", "reason": "x"})
-        result = orchestrator.run("Goal", checks={})
-        self.assertEqual([x["status"] for x in result["subtasks"]], ["failed", "blocked"])
+        class InvalidBids:
+            def complete(self, messages, json_object=False):
+                return {"score": "invalid", "reason": "x"}
+        orchestrator.assignment.provider = InvalidBids()
+        result = orchestrator.run("Goal", final_check=ArtifactCheck("result.md"))
+        self.assertEqual([x["status"] for x in result["subtasks"]], ["success", "success"])
+        self.assertEqual(result["task"]["status"], "success")
+        self.assertEqual(len([event for event in self.store.list_events(result["task"]["id"])
+                              if event["event_type"] == "agent_bid_fallback"]), 4)
 
     def test_clarification_answer_replans_with_preserved_check(self):
         orchestrator = self.make(

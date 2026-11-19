@@ -14,7 +14,7 @@ def response(content='{"ok": true}', finish="stop"):
 
 class ProviderTests(unittest.TestCase):
     def setUp(self):
-        self.env = patch.dict(os.environ, {"HKGAI_API_KEY": "test-secret"})
+        self.env = patch.dict(os.environ, {"HKGAI_API_KEY": "test-secret", "DEEPSEEK_API_KEY": "test-secret"})
         self.env.start()
         self.addCleanup(self.env.stop)
 
@@ -25,9 +25,9 @@ class ProviderTests(unittest.TestCase):
             return response()
         result = ChatProvider(ProviderConfig(), transport).complete([], json_object=True)
         self.assertEqual(result, {"ok": True})
-        self.assertEqual(calls[0][0], "https://api1.hkgai.net/v1/chat/completions")
+        self.assertEqual(calls[0][0], "https://api.deepseek.com/chat/completions")
         self.assertEqual(calls[0][1]["Authorization"], "Bearer test-secret")
-        self.assertEqual(calls[0][2]["model"], "t2_hkgai-v3_fp8_1m_e7")
+        self.assertEqual(calls[0][2]["model"], "deepseek-chat")
 
     def test_retries_transient_errors(self):
         for error in (HTTPError("x", 429, "test-secret", {}, None),

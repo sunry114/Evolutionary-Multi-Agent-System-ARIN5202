@@ -32,10 +32,11 @@ class StoredClarificationRequests:
 
 
 class Planner:
-    def __init__(self, provider, agents, approval=None):
+    def __init__(self, provider, agents, approval=None, *, discussion_loader=None):
         self.provider = provider
         self.agents = tuple(agents)
         self.approval = approval
+        self.discussion_loader = discussion_loader
 
     def _clarify(self, question, task_id):
         if self.approval is None or not task_id:
@@ -63,17 +64,32 @@ class Planner:
             return self._clarify("Please provide the missing required input(s): "
                                  + ", ".join(missing) + ".", task_id)
         specs = {agent.name: agent.specialty for agent in self.agents}
+        discussion = self.discussion_loader(task_id) if self.discussion_loader and task_id else []
         result = self.provider.complete(
             [{"role": "system", "content":
               "Decompose the goal into 1 to 5 independently verifiable subtasks. "
               "Use IDs s1, s2, etc. Dependencies may refer only to earlier IDs. "
-              "For a simple artifact use one subtask. A critical input is a "
+              "Default to one owner and one subtask for writing, summarizing, translating, "
+              "simple research, coding or data conversion. Split only when distinct "
+              "deliverables really need different skills; do not create a subtask per role. "
+              "The last subtask must assemble the final requested deliverable and depend "
+              "on every earlier result it needs. Skills should match agent specialties. "
+              "Use an exact agent name in skills when that role should own the subtask. "
+              "Runtime: files may include Python, JS/TS, HTML/CSS and SQL, but execution "
+              "only supports Python standard-library scripts in isolated Docker. "
+              "There is no Node/npm, shell or package installation tool. Prefer a Python "
+              "stdlib backend with HTML/CSS/JS for a runnable web app unless the human "
+              "explicitly requires another stack. If a required stack cannot be tested "
+              "here, request clarification about that constraint before planning. "
+              "For a simple artifact use one subtask. Make reasonable choices for optional "
+              "formatting and presentation details. A critical input is a "
               "specific artifact, target or constraint needed to produce a "
               "verifiable result. If it is absent or ambiguous, return one "
               "clarification question instead of inventing it. Return JSON "
               "{question:null,subtasks:[{id,description,skills,depends_on}]}"},
              {"role": "user", "content": json.dumps(
-                 {"goal": goal, "agents": specs, "required_inputs": required_inputs},
+                 {"goal": goal, "agents": specs, "required_inputs": required_inputs,
+                  "team_discussion": discussion},
                  ensure_ascii=False)}],
             json_object=True)
         if not isinstance(result, dict):

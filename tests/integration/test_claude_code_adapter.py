@@ -45,6 +45,15 @@ class ClaudeProtocolTests(HarnessFixture):
                 self.assertEqual(result.status, "failed")
                 self.assertNotIn("sensitive diagnostic", result.text)
 
+    def test_model_unavailable_is_recorded_without_model_output_in_trace(self):
+        handle, result = self.complete(replace(self.request, prompt="model_unavailable"))
+        self.assertEqual((result.status, result.error, result.exit_code),
+                         ("failed", "model_unavailable", 1))
+        finished = [event["payload"] for event in self.store.list_events("t1")
+                    if event["event_type"] == "harness_finished"][-1]
+        self.assertEqual((finished["error"], finished["exit_code"]), ("model_unavailable", 1))
+        self.assertNotIn("fixture-model", str(finished))
+
     def test_timeout_and_stderr_flood_are_bounded(self):
         self.adapter.config = replace(self.config, timeout=0.2, max_output_bytes=1024)
         self.adapter.transport = FakeCLITransport(self.adapter.config)

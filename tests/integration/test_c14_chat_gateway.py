@@ -33,12 +33,218 @@ class ScriptedProvider:
 
 
 class C14GatewayTests(unittest.TestCase):
+    def test_board_and_chat_share_discussion_state_and_child_approval_counts(self):
+        task_id = self.app.dispatch("create", {"prompt": "Build"})["task_id"]
+        child = task_id + "-s1"
+        self.app.store.save_task(Task(child, "Run", owner="builder", parent_id=task_id,
+                                      status=TaskStatus.RUNNING))
+        approval_id = self.app.approvals.request_approval(child, "builder", "run_python", {"arguments": {"path": "check.py"}})
+        self.app.store.save_chat_question(task_id, "researcher", "Which input?", [
+            {"name": "researcher", "specialty": "Research"}])
+        self.app.store.append_event(task_id=task_id, event_type="chat_started", actor="chat", payload={})
+        self.app._active_discussions.add((task_id, None))
+        task = next(t for t in self.app.snapshot()["tasks"] if t["id"] == task_id)
+        live = self.app.dispatch("messages", {"task_id": task_id})
+        self.assertEqual(task["discussion"], live["discussion"])
+        self.assertTrue(task["discussion"]["active"])
+        self.assertEqual(task["pending_approvals"], 1)
+        self.assertEqual(task["pending_questions"], 1)
+        self.app.approvals.answer(approval_id, {"approved": True})
+        self.app._active_discussions.clear()
+        self.app.store.append_event(task_id=task_id, event_type="chat_completed", actor="chat", payload={})
+        updated = next(t for t in self.app.snapshot()["tasks"] if t["id"] == task_id)
+        self.assertEqual(updated["pending_approvals"], 0)
+        self.assertEqual(updated["pending_questions"], 1)
+        self.assertFalse(updated["discussion"]["active"])
+        self.assertEqual(updated["discussion"], self.app.dispatch("messages", {"task_id": task_id})["discussion"])
+
+    def test_worker_questions_are_consolidated_by_lead_and_answers_relay_to_workers(self):
+        from unittest.mock import Mock
+        provider = Mock()
+        provider.complete.side_effect = [
+            {"reply": "@human Which rooms?", "waiting_for_human": True},
+            {"reply": "@human Which timezone?", "waiting_for_human": True},
+            {"reply": "I will coordinate"},
+            {"reply": "@human Please confirm rooms and timezone.", "waiting_for_human": True,
+             "human_question": "Which rooms and timezone?"},
+            {"reply": "Use Room A in UTC+8."},
+            {"reply": "I will implement Room A in UTC+8."},
+            {"reply": "I will verify Room A in UTC+8."},
+        ]
+        self.app._provider = provider
+        task_id = self.app.dispatch("create", {"prompt": "Build", "agents": [
+            {"name": name, "specialty": name} for name in ("dev", "qa", "lead")]})["task_id"]
+        self.app.dispatch("group", {"task_id": task_id, "message": "Discuss"})
+        requests = self.app.snapshot()["requests"]
+        self.assertEqual(len(requests), 1)
+        request = requests[0]
+        self.assertEqual(request["agent"], "lead")
+        self.assertEqual(request["payload"]["sources"], ["dev", "qa"])
+        history = self.app.messages(task_id=task_id)
+        self.assertEqual({m["sender"] for m in history if m["kind"] == "dm"}, {"lead"})
+        with patch.object(self.app, "start_discussion"):
+            self.app.dispatch("answer", {"request_id": request["id"],
+                                         "answer": "Room A UTC+8; PRIVATE-BUDGET"})
+        self.app.chat("group", {"task_id": task_id, "message": "Resume"}, resume_request=request["id"])
+        contexts = [call.args[0][1]["content"] for call in provider.complete.call_args_list]
+        self.assertIn("PRIVATE-BUDGET", contexts[4])
+        self.assertNotIn("PRIVATE-BUDGET", contexts[5])
+        self.assertNotIn("PRIVATE-BUDGET", contexts[6])
+        self.assertIn("Use Room A in UTC+8", contexts[5])
+        self.assertEqual(provider.complete.call_count, 7)
+        self.assertEqual(self.app.snapshot()["requests"], [])
+
+    def test_worker_action_approvals_keep_their_owners_and_accept_only_buttons(self):
+        task_id = self.app.dispatch("create", {"prompt": "Build", "agents": [
+            {"name": name, "specialty": name} for name in ("lead", "dev", "qa")]})["task_id"]
+        requests = {}
+        for name in ("dev", "qa"):
+            child = task_id + "-" + name
+            self.app.store.save_task(Task(child, "Run checks", owner=name, parent_id=task_id,
+                                          status=TaskStatus.RUNNING))
+            requests[name] = self.app.approvals.request_approval(
+                child, name, "run_python", {"arguments": {"path": "check.py"}, "sha256": "f" * 64})
+        restored = SQLiteApplication(self.state, provider=self.provider)
+        pending = restored.snapshot()["requests"]
+        self.assertEqual({r["agent"] for r in pending if r["kind"] == "approval"}, {"dev", "qa"})
+        with self.assertRaises(ValueError):
+            restored.dispatch("answer", {"request_id": requests["dev"], "answer": "approve"})
+        restored.dispatch("answer", {"request_id": requests["dev"], "approved": True})
+        restored.dispatch("answer", {"request_id": requests["qa"], "approved": False})
+        self.assertEqual(restored.store.get_approval_request(requests["dev"])["status"], "approved")
+        self.assertEqual(restored.store.get_approval_request(requests["qa"])["status"], "denied")
+
+    def test_restart_routes_legacy_worker_questions_to_lead_and_keeps_approvals(self):
+        task_id = self.app.dispatch("create", {"prompt": "Build", "agents": [
+            {"name": name, "specialty": name} for name in ("dev", "lead")]})["task_id"]
+        question_id = self.app.store.save_chat_question(task_id, "dev", "Which input?", [
+            {"name": name, "specialty": name} for name in ("dev", "lead")])
+        child = task_id + "-s1"
+        self.app.store.save_task(Task(child, "Run", owner="dev", parent_id=task_id, status=TaskStatus.RUNNING))
+        approval_id = self.app.approvals.request_approval(child, "dev", "run_python", {"arguments": {"path": "check.py"}})
+        restored = SQLiteApplication(self.state, provider=self.provider)
+        question = restored.store.get_approval_request(question_id)
+        self.assertEqual(question["agent"], "lead")
+        self.assertEqual(question["payload"]["sources"], ["dev"])
+        self.assertEqual(restored.store.get_approval_request(approval_id)["agent"], "dev")
+        private = [m for m in restored.messages(task_id=task_id) if m["kind"] == "dm"]
+        self.assertEqual(private[0]["sender"], "lead")
+
+    def test_lead_pending_question_updates_keep_worker_sources_and_one_inbox_card(self):
+        roles = [{"name": name, "specialty": name} for name in ("lead", "dev", "qa")]
+        task_id = self.app.dispatch("create", {"prompt": "Build", "agents": roles})["task_id"]
+        request_id = self.app.store.save_chat_question(task_id, "lead", "Which rooms?", roles, sources=["dev"])
+        updated_id = self.app.store.save_chat_question(task_id, "lead", "Which timezone?", roles, sources=["qa"])
+        self.assertEqual(updated_id, request_id)
+        pending = self.app.dispatch("messages", {"task_id": task_id})["requests"]
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["payload"]["sources"], ["dev", "qa"])
+        self.assertIn("Which rooms?", pending[0]["payload"]["question"])
+        self.assertIn("Which timezone?", pending[0]["payload"]["question"])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.state = Path(self.temp.name)
         self.provider = ScriptedProvider()
         self.app = SQLiteApplication(self.state, provider=self.provider)
+
+    def test_group_question_goes_to_private_inbox_without_stopping_other_agents(self):
+        from unittest.mock import Mock
+        provider = Mock()
+        provider.complete.side_effect = [
+            {"reply": "@human Which rooms should be bookable?", "waiting_for_human": True},
+            {"reply": "I will plan implementation"},
+            {"reply": "I will plan validation"},
+            {"reply": "Thanks, using Room A"},
+        ]
+        self.app._provider = provider
+        task = self.app.dispatch("create", {"prompt": "Build booking system"})
+        payload = {"task_id": task["task_id"], "message": "Discuss rooms"}
+        result = self.app.dispatch("group", payload)
+        self.assertEqual(result["status"], "success")
+        self.assertTrue(result["waiting_for_human"])
+        self.assertEqual(set(result["replies"]), {"researcher", "builder", "reviewer"})
+        self.assertEqual(provider.complete.call_count, 3)
+        request = self.app.snapshot()["requests"][0]
+        self.assertEqual(request["action"], "chat_question")
+        self.assertEqual(request["agent"], "researcher")
+        history = self.app.messages(task_id=task["task_id"])
+        self.assertTrue(any(m["kind"] == "dm" and m["sender"] == "researcher" for m in history))
+        with patch.object(self.app, "start_discussion", return_value={"status": "started"}) as wake:
+            self.app.dispatch("answer", {"request_id": request["id"], "answer": "Room A"})
+        wake.assert_called_once_with({"task_id": task["task_id"], "request_id": request["id"]})
+        self.app.chat("group", payload, resume_request=request["id"])
+        self.assertEqual(provider.complete.call_count, 4)
+        self.assertIn("Room A", provider.complete.call_args[0][0][1]["content"])
+        self.assertFalse(any(m["kind"] == "group" and m["content"] == "Room A"
+                             for m in self.app.messages(task_id=task["task_id"])))
+
+    def test_provider_failure_reports_safe_cause_instead_of_human_timeout(self):
+        from evo.adapters.llm.client import ProviderError
+        from unittest.mock import Mock
+        self.app._provider = Mock()
+        self.app._provider.complete.side_effect = ProviderError("private-secret", code="connection")
+        with self.assertRaisesRegex(ApplicationFailure, "连接失败或超时") as result:
+            self.app.dispatch("group", {"message": "Discuss"})
+        self.assertNotIn("private-secret", str(result.exception))
+
+    def test_chat_question_survives_restart_and_does_not_expire_while_typing(self):
+        task = self.app.dispatch("create", {"prompt": "Build"})
+        request_id = self.app.store.save_chat_question(
+            task["task_id"], "builder", "Which room?",
+            [{"name": "builder", "specialty": "Build software"}])
+        with self.app.store._transaction() as connection:
+            connection.execute("UPDATE approval_requests SET created_at=? WHERE id=?",
+                               ("2000-01-01T00:00:00+00:00", request_id))
+        restored = SQLiteApplication(self.state, provider=self.provider)
+        self.assertIsNone(restored.approvals.get_answer(request_id))
+        self.assertEqual(restored.store.get_task(task["task_id"])["status"], "created")
+        with self.assertRaisesRegex(ApplicationUnavailable, "私聊"):
+            restored.start_task({"task_id": task["task_id"], "prompt": "Build",
+                                 "final_check": {"path": "report.md"}})
+        with patch.object(restored, "start_discussion"):
+            restored.dispatch("answer", {"request_id": request_id, "answer": "Room A"})
+            with self.assertRaises(ValueError):
+                restored.dispatch("answer", {"request_id": request_id, "answer": "Room B"})
+        answers = [m for m in restored.messages(task_id=task["task_id"])
+                   if m["kind"] == "dm" and m["sender"] == "human"]
+        self.assertEqual([m["content"] for m in answers], ["Room A"])
+
+    def test_task_keeps_its_roles_when_a_later_task_changes_the_registry(self):
+        first = self.app.dispatch("create", {"prompt": "First", "agents": [
+            {"name": "lead", "specialty": "Coordinate"}, {"name": "dev", "specialty": "Develop"}]})
+        self.app.dispatch("create", {"prompt": "Second", "agents": [
+            {"name": "writer", "specialty": "Write"}]})
+        result = self.app.dispatch("group", {"task_id": first["task_id"], "message": "Discuss"})
+        self.assertEqual(set(result["replies"]), {"lead", "dev"})
+        self.assertEqual([a.name for a in self.app._task_agents(first["task_id"])], ["lead", "dev"])
+
+    def test_live_inbox_includes_child_questions_without_other_task_questions(self):
+        self.app.store.save_task(Task("root", "Build"))
+        self.app.store.save_task(Task("child", "Check", parent_id="root"))
+        self.app.store.save_task(Task("other", "Other"))
+        for scope in ("child", "other"):
+            self.app.store.save_approval_request(request_id=scope + "-question", task_id=scope,
+                                                 agent="builder", kind="clarification",
+                                                 payload={"question": "Please clarify"})
+        live = self.app.dispatch("messages", {"task_id": "root"})
+        self.assertEqual([r["id"] for r in live["requests"]], ["child-question"])
+
+    def test_legacy_mixed_questions_are_filtered_only_in_private_views(self):
+        task_id = self.app.dispatch("create", {"prompt": "Discuss"})["task_id"]
+        mixed = "@builder Implement the API.\n@human Which timezone?\n@reviewer Test overlaps."
+        self.app.store.save_chat_question(task_id, "researcher", mixed,
+                                          [{"name": "researcher", "specialty": "Research"}])
+        self.app.store.save_message(Message("team", "group", "researcher", mixed, "chat", task_id))
+        history = self.app.dispatch("messages", {"task_id": task_id})
+        private = [m for m in history["messages"] if m["kind"] == "dm"]
+        self.assertEqual([m["content"] for m in private], ["Which timezone?"])
+        self.assertEqual(history["requests"][0]["payload"]["question"], "Which timezone?")
+        self.assertEqual(self.app.snapshot()["requests"][0]["payload"]["question"], "Which timezone?")
+        public = [m for m in history["messages"] if m["kind"] == "group"]
+        self.assertEqual(public[0]["content"], mixed)
+
 
     @contextmanager
     def http_service(self):
@@ -78,6 +284,22 @@ class C14GatewayTests(unittest.TestCase):
             status, result = request("/api/group", {"message": "Group request"}, token)
             self.assertEqual(status, 502)
             self.assertNotIn("private-provider-secret", result)
+
+    def test_task_scoped_messages_keep_older_history_beyond_board_snapshot_limit(self):
+        self.app.store.save_task(Task("long-task", "Long discussion"))
+        self.app.store.save_task(Task("other-task", "Other discussion"))
+        self.app.store.save_message(Message("first", "group", "builder", "FULL-END",
+                                            "chat", "long-task"))
+        for index in range(401):
+            self.app.store.save_message(Message("later-" + str(index), "group", "builder",
+                                                "Other message", "chat", "other-task"))
+        self.assertNotIn("first", {item["id"] for item in self.app.snapshot()["messages"]})
+        scoped = self.app.dispatch("messages", {"task_id": "long-task"})["messages"]
+        self.assertEqual([item["content"] for item in scoped], ["FULL-END"])
+        with self.http_service() as (request, token):
+            status, body = request("/api/messages", {"task_id": "long-task"}, token)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["messages"][0]["content"], "FULL-END")
 
     def test_http_missing_key_returns_503_without_saving_message(self):
         self.app._provider = None

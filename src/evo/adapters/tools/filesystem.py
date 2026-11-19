@@ -18,7 +18,8 @@ MAX_FILE_BYTES = 1024 * 1024
 MAX_DIRECTORY_ENTRIES = 1000
 PURPOSE_SUFFIXES = {
     "document": DOCUMENT_SUFFIXES,
-    "code": frozenset({".py"}),
+    "code": frozenset({".py", ".js", ".mjs", ".cjs", ".ts", ".jsx", ".tsx",
+                       ".html", ".css", ".sql"}),
     "config": frozenset({".json", ".yaml", ".yml"}),
     "data": frozenset({".json", ".csv"}),
 }
@@ -143,7 +144,7 @@ class WorkspaceFilesystem:
     """
 
     def __init__(self, state_root: Path | str, agent: str, *,
-                 max_file_bytes: int = MAX_FILE_BYTES):
+                 max_file_bytes: int = MAX_FILE_BYTES, task_scope: str | None = None):
         if sys.platform != "linux":
             raise RuntimeError("Workspace tools require Linux")
         if type(max_file_bytes) is not int or not 0 < max_file_bytes <= MAX_FILE_BYTES:
@@ -151,7 +152,11 @@ class WorkspaceFilesystem:
         self.agent = validate_agent(agent)
         self.max_file_bytes = max_file_bytes
         self._state_root = Path(os.path.abspath(state_root))
+        self.task_scope = task_scope
         self.workspace = self._state_root / "agents" / self.agent / "workspace"
+        if task_scope is not None:
+            from evo.ports.harness import identifier
+            self.workspace = self._state_root / "tasks" / identifier(task_scope) / "agents" / self.agent / "workspace"
         with _directory(self.workspace, create=True):
             pass
 

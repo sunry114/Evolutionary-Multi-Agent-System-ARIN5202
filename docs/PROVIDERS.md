@@ -1,7 +1,9 @@
 # Provider configuration (C04)
 
-Only DeepSeek and HKGAI are accepted. Defaults for this course are the supplied
-HKGAI base URL `https://api1.hkgai.net/v1` and model `t2_hkgai-v3_fp8_1m_e7`.
+Only DeepSeek and HKGAI are accepted. The default provider is DeepSeek, with
+base URL `https://api.deepseek.com` and model `deepseek-chat`. Set
+`EVO_PROVIDER=hkgai` to use the supplied HKGAI base URL
+`https://api1.hkgai.net/v1` and model `t2_hkgai-v3_fp8_1m_e7`.
 The /v1 base passed real text and JSON smoke checks on 2026-11-08; the bare
 domain returned HTTP 404. See API_SMOKE_REPORT.md for evidence.
 No real key is required for tests.

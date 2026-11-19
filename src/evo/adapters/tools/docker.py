@@ -102,6 +102,8 @@ class DockerPythonRunner:
     def run_python(self, path: str, *, approved: bool = False) -> ExecutionResult:
         if approved is not True:
             raise PermissionError("Python execution requires human approval")
+        if not isinstance(path, str) or not path.lower().endswith(".py"):
+            raise ToolError("Python execution requires a .py script")
         validate_file_path(path, "code")
         self.filesystem.read_file(path, purpose="code")
         # Validate platform and mount before contacting Docker.

@@ -10,6 +10,18 @@ DOCUMENT_SUFFIXES = frozenset({".md", ".txt", ".html", ".htm", ".rst", ".xml",
                                ".json", ".csv", ".yaml", ".yml"})
 
 
+def team_coordinator(agents):
+    """One human contact per saved team; prefer an explicitly named lead."""
+    agents = tuple(agents)
+    if not agents:
+        raise ValueError("A team needs at least one agent")
+    for preferred in ("lead", "coordinator", "manager"):
+        for agent in agents:
+            if agent.name.casefold() == preferred:
+                return agent.name
+    return agents[0].name
+
+
 @dataclass(frozen=True)
 class Limits:
     max_plan_subtasks: int = 5

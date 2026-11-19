@@ -34,6 +34,13 @@ class DockerTests(unittest.TestCase):
                          f"type=bind,src={self.fs.workspace},dst=/workspace")
         self.assertEqual(args[-1], "/workspace/main.py")
 
+    def test_javascript_source_cannot_be_executed_as_python(self):
+        self.fs.write_file("server.js", "console.log('hello');", purpose="code")
+        with patch("subprocess.Popen") as process:
+            with self.assertRaisesRegex(ToolError, "requires a .py script"):
+                self.runner.run_python("server.js", approved=True)
+        process.assert_not_called()
+
     def test_platform_root_mount_and_image_validation(self):
         with patch("evo.adapters.tools.linux.sys.platform", "win32"):
             with self.assertRaisesRegex(ToolError, "Unsupported"):
