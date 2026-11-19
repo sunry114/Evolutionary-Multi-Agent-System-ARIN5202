@@ -9,6 +9,46 @@ import time
 from pathlib import Path
 
 
+INCIDENT_REPORT = "Analyze the supplied test-log.txt and deliver report.md."
+INCIDENT_REVIEW = "Independently review the supplied test-log.txt."
+
+
+def incident_scenario(mode, previous, call):
+    if mode == INCIDENT_REVIEW:
+        log = call("read_file", path="test-log.txt", purpose="document")["result"]
+        assert all(line in log for line in ("L02", "free_bytes=0", "L03", "error=ENOSPC",
+                                            "L05", "free_bytes=67108864", "L07", "status=PASS"))
+        call("write_file", path="review.md", purpose="document", content=(
+            "# Independent review\n\n"
+            "L02–L04 show that run A17 had zero free bytes on export-temp, hit ENOSPC, and failed. "
+            "L05 shows cleanup restored 67,108,864 bytes. L06–L07 show that run A18 passed.\n\n"
+            "Independent review conclusion: The same test passed after temporary space was freed, "
+            "but one rerun does not establish that the failure will stay resolved.\n"))
+        return
+
+    deliveries = [item["outcome"] for item in previous if item["tool"] == "delegate"]
+    if not deliveries:
+        log = call("read_file", path="test-log.txt", purpose="document")["result"]
+        assert "error=ENOSPC" in log and "status=FAIL" in log
+        result = call("delegate", agent="reviewer", path="review.md", contains="Independent review conclusion:",
+                      description=INCIDENT_REVIEW + "\nCheck the failure, cleanup, rerun, and evidence limits. "
+                      "Return review.md with line citations and the label 'Independent review conclusion:'.")
+        assert result["status"] == "waiting_dependency"
+        return
+
+    artifact = deliveries[0]["result"]["artifact"]
+    call("import_artifact", artifact_id=artifact["id"], destination="review.md")
+    review = call("read_file", path="review.md", purpose="document")["result"]
+    conclusion = next(line for line in review.splitlines() if line.startswith("Independent review conclusion:"))
+    call("write_file", path="report.md", purpose="document", content=(
+        "# CSV export test failure\n\n## Root cause\n\n"
+        "Run A17 ran out of space on export-temp (L02). The temporary write failed with ENOSPC (L03), "
+        "and export_writes_csv failed (L04). Cleanup restored 67,108,864 bytes (L05).\n\n"
+        "## Independent verification\n\n> " + conclusion + "\n\n"
+        "The same test passed once in run A18 (L06–L07). The log records neither the source of disk "
+        "growth nor additional runs under sustained load. Check temporary-file retention and available space.\n"))
+
+
 def delegation_scenario(prompt):
     mode = prompt["goal"].splitlines()[0]
     suffix = "-fails" if mode.endswith("-fails") else ""
@@ -25,6 +65,9 @@ def delegation_scenario(prompt):
                 assert not result["isError"], result
                 return json.loads(result["content"][0]["text"])
 
+            if mode in (INCIDENT_REPORT, INCIDENT_REVIEW):
+                incident_scenario(mode, previous, call)
+                return
             if mode == "fixture-delegation-evidence":
                 if not any(item["tool"] == "run_python" for item in previous):
                     call("write_file", path="check.py", purpose="code", content="print('checked')\n")
@@ -90,7 +133,11 @@ def main():
         print(json.dumps({"type": "system", "subtype": "init", "session_id": session,
                           "mcp_servers": [{"name": "evo", "status": "failed"}]}), flush=True)
     else:
-        if mode.startswith("fixture-delegation-"):
+        if mode == "system_status_updates":
+            status = json.dumps({"type": "system", "subtype": "status", "session_id": session})
+            for _ in range(520):
+                print(status)
+        if mode.startswith("fixture-delegation-") or mode.partition("\n")[0] in (INCIDENT_REPORT, INCIDENT_REVIEW):
             delegation_scenario(prompt)
         if mode == "mcp":
             with socket.socket(socket.AF_UNIX) as channel:

@@ -1,0 +1,8 @@
+{
+  "agents": [
+    {"name": "captain", "specialty": "Coordinates the incident report. First nominate analyst for the original description using an empty scope. If analyst offers a scope preserving report.md and moving independent evidence review to reviewer, select that offered scope verbatim and renominate analyst."},
+    {"name": "analyst", "specialty": "Diagnoses failed tests and assembles report.md. In the first nomination with an empty scope, reply revise to take root-cause analysis and report assembly while delegating the independent source-log check to reviewer. Accept a subsequent nomination with that scope. Begin execution by reading test-log.txt with purpose=document, then delegate. Import and read the review artifact before writing the report. Use purpose=document for TXT and Markdown reads and writes. Reuse the completed delegation in the resumed context. Pass no diagnosis to reviewer so they can check the source independently."},
+    {"name": "reviewer", "specialty": "Independently verifies test failures and recovery from source logs. Accept delegated incident verification. Use read_file with path=test-log.txt and purpose=document. Use write_file with path=review.md and purpose=document, with line citations and a stand-alone sentence beginning exactly 'Independent review conclusion:'."}
+  ],
+  "squad": {"name": "incident", "lead": "captain", "members": ["captain", "analyst", "reviewer"]}
+}

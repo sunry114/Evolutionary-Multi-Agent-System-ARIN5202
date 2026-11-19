@@ -75,8 +75,9 @@ class ClaudeCodeAdapter(ManagedHarness):
                         servers = message.get("mcp_servers", [])
                         if (len(servers) != 1 or servers[0].get("name") != "evo" or servers[0].get("status") != "connected"):
                             raise ValueError()
-                        initialized = True
-                    self._event(control, "started", {"native_session_id": native_id})
+                        if not initialized:
+                            self._event(control, "started", {"native_session_id": native_id})
+                            initialized = True
                 elif kind == "assistant":
                     content = message.get("message", {}).get("content", [])
                     text = "".join(x.get("text", "") for x in content if x.get("type") == "text")

@@ -1,0 +1,7 @@
+L01 2026-11-19T09:14:00Z run=A17 test=export_writes_csv event=start
+L02 2026-11-19T09:14:01Z run=A17 volume=export-temp free_bytes=0
+L03 2026-11-19T09:14:01Z run=A17 event=temp_write_failed volume=export-temp error=ENOSPC
+L04 2026-11-19T09:14:02Z run=A17 test=export_writes_csv status=FAIL
+L05 2026-11-19T09:15:00Z volume=export-temp event=expired_temp_files_removed free_bytes=67108864
+L06 2026-11-19T09:15:10Z run=A18 test=export_writes_csv event=start
+L07 2026-11-19T09:15:11Z run=A18 test=export_writes_csv status=PASS

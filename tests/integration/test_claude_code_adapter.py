@@ -32,6 +32,11 @@ class ClaudeProtocolTests(HarnessFixture):
         self.assertNotIn("--dangerously-skip-permissions", command)
         self.assertIn("assistant", [event.kind for event in self.adapter.events(handle)])
 
+    def test_system_status_updates_do_not_record_repeated_starts(self):
+        handle, result = self.complete(replace(self.request, prompt="system_status_updates"))
+        self.assertEqual(result.status, "success")
+        self.assertEqual([event.kind for event in self.adapter.events(handle)].count("started"), 1)
+
     def test_mcp_tool_call_reaches_bound_workspace_and_audit(self):
         _, result = self.complete(replace(self.request, prompt="mcp"))
         self.assertEqual(result.status, "success")

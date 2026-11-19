@@ -81,8 +81,10 @@ class NegotiationService:
             context)
 
     def _member_decision(self, member, context):
-        choices = ("Use accept, blocked, or clarify with question." if self.direct else
-                   "Use accept, revise with scope, recommend with member, or blocked.")
+        choices = ("Use accept, blocked, or clarify with a question field." if self.direct else
+                   'Use accept, revise, recommend, or blocked. For revise, include a separate scope field, '
+                   'as in {"decision":"revise","scope":"Revised division of work","reason":"Why it helps"}. '
+                   'For recommend, include a member field naming the suggested member.')
         return self._call(member, "member_reply",
             "Respond to the proposed assignment as the nominated member. " + choices +
             ' Return JSON like {"decision":"accept","reason":"One short sentence."}. '

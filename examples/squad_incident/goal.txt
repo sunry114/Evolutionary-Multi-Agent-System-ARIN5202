@@ -1,0 +1,7 @@
+Analyze the supplied test-log.txt and deliver report.md.
+
+Plan one work item, s1. The captain initially nominates analyst for both analysis and review. Analyst proposes doing root cause and report assembly while reviewer independently checks the evidence. Captain considers that scope and keeps analyst accountable for report.md.
+
+Both agents have test-log.txt in their own workspaces. Analyst reads it and uses delegate to ask reviewer to check the log independently and return review.md with line citations and the label "Independent review conclusion:". Analyst imports and reads that artifact before writing report.md. Use only local file and delegation tools. Use purpose=document for all TXT and Markdown files.
+
+In English, use headings "## Root cause" and "## Independent verification". Cite line IDs for failure, cleanup, and rerun. Quote the reviewer's conclusion sentence verbatim and explain the limits of the rerun. A human will compare both artifacts to the log.
