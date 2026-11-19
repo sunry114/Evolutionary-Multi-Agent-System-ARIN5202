@@ -204,6 +204,10 @@ class ManagedHarness:
             raise HarnessError("Run is not owned by this process; inspect/reconcile before recovery")
         return result
 
+    @staticmethod
+    def _pending_status(pending):
+        return "waiting_dependency" if pending["name"] == "delegate" else "waiting_human"
+
     def _call(self, control, request, name, arguments, *, request_id=None):
         with control.operation_lock:
             if control.stop.is_set() or (control.record["pending"] and request_id is None):
@@ -238,8 +242,10 @@ class ManagedHarness:
             with control.lock:
                 if not control.failure:
                     control.record["inflight"] = None
-                if result.get("status") == "waiting_human":
-                    control.record["pending"] = {"name": name, "arguments": arguments, "request_id": result["request_id"]}
+                if result.get("status") in ("waiting_human", "waiting_dependency"):
+                    continuation_key = "delegation_id" if name == "delegate" else "request_id"
+                    control.record["pending"] = {"name": name, "arguments": arguments,
+                                                 "request_id": result[continuation_key]}
                 else:
                     control.record["pending"] = None
                     control.record["context"].append(self._clean({"tool": name, "arguments": arguments, "outcome": result}))
@@ -247,7 +253,9 @@ class ManagedHarness:
                         artifact = result["result"]
                         control.record["artifacts"] = [a for a in control.record["artifacts"] if a["path"] != artifact["path"]] + [artifact]
                 self._event(control, "tool_result", {"name": name, "status": result.get("status"),
-                                                       "request_id": result.get("request_id"), "action_id": result.get("action_id"),
+                                                       "request_id": result.get("request_id"),
+                                                       "delegation_id": result.get("delegation_id"),
+                                                       "action_id": result.get("action_id"),
                                                        "outcome": self._clean(result)})
             return self._clean(result)
 
@@ -257,8 +265,8 @@ class ManagedHarness:
             pending = control.record["pending"]
             if pending:
                 outcome = self._call(control, request, **pending)
-                if outcome["status"] == "waiting_human":
-                    status, error = "waiting_human", ""
+                if outcome["status"] in ("waiting_human", "waiting_dependency"):
+                    status, error = outcome["status"], ""
                 elif outcome["status"] != "success":
                     status, error = "blocked" if outcome["status"] == "blocked" else "failed", "platform_action_stopped"
                 else:
@@ -282,7 +290,7 @@ class ManagedHarness:
                 if control.failure:
                     status, error = "failed", control.failure
                 elif control.record["pending"]:
-                    status, error = "waiting_human", ""
+                    status, error = self._pending_status(control.record["pending"]), ""
                 elif control.stop.is_set():
                     status, error = ("failed", control.failure) if control.failure else ("cancelled", "cancelled")
                 ref = ResumeRef(control.record["run_id"], request.task_id, request.agent, request.session_scope)

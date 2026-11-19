@@ -46,8 +46,7 @@ class MemoryTests(unittest.TestCase):
             self.assertEqual(len({item.lesson for item in found}), 3)
             self.assertNotIn("Look outside", [item.lesson for item in found])
             self.assertTrue(all(item.agent == "builder" for item in found))
-            self.assertEqual(memory.adjustment("Unrelated astronomy"), 0)
-            self.assertLessEqual(abs(memory.adjustment("Python report generation")), 0.75)
+            self.assertEqual(memory.recall("Unrelated astronomy"), ())
 
     def test_cross_agent_write_and_non_terminal_outcome_are_rejected(self):
         with tempfile.TemporaryDirectory() as root:

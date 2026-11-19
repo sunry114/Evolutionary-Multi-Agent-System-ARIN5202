@@ -19,7 +19,7 @@ class ApplicationGateway(Protocol):
         ...
 
     def dispatch(self, operation: str, payload: dict) -> dict:
-        """Run/DM/group/eval/metrics/trace/memory/review/revision/answer."""
+        """Dispatch a workspace query or operation."""
         ...
 
 

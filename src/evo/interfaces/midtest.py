@@ -5,7 +5,7 @@ import re
 import zipfile
 from pathlib import Path, PurePosixPath
 
-from evo.interfaces.agent_registry import parse_agents, save_agents
+from evo.interfaces.agent_registry import default_registry, parse_agents, save_registry
 
 
 def prepare_midtest(archive, output):
@@ -58,7 +58,7 @@ def prepare_midtest(archive, output):
                 "scenarios": []}
     for ident, agents, tasks, files in prepared:
         state = output / ident
-        save_agents(state, agents)
+        save_registry(state, default_registry(agents))
         for number, task in enumerate(tasks, 1):
             (state / ("task_" + str(number) + ".txt")).write_text(task + "\n", encoding="utf-8")
         manifest["scenarios"].append({"id": ident, "state": str(state), "agents": [a.name for a in agents],

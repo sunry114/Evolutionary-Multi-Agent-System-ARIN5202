@@ -19,5 +19,5 @@ version = {attr = "evo.__version__"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-"evo.interfaces.web" = ["assets/*.html"]
+"evo.interfaces.web" = ["assets/*.html", "assets/*.css", "assets/*.js"]
 "evo.adapters.persistence" = ["migrations/*.sql"]

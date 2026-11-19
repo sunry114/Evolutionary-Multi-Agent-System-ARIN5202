@@ -43,7 +43,7 @@ class MidtestAndDisplayTests(unittest.TestCase):
         report = prepare_midtest(archive, out)
         self.assertEqual(report["status"], "prepared_not_executed")
         state = out / "scenario_1"
-        self.assertEqual([r["name"] for r in json.loads((state / "agents.json").read_text())],
+        self.assertEqual([r["name"] for r in json.loads((state / "agents.json").read_text())["agents"]],
                          ["lead", "dev", "qa", "release"])
         self.assertEqual((state / "task_2.txt").read_text().strip(), "Verbatim task 2")
         self.assertFalse((state / "events.sqlite3").exists())

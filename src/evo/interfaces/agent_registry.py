@@ -3,10 +3,23 @@
 import json
 import os
 import tempfile
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass
+from fcntl import LOCK_EX, flock
 from pathlib import Path
 
 from evo.adapters.tools.filesystem import validate_agent
-from evo.domain.models import Agent
+from evo.domain.models import Agent, Squad
+
+
+@dataclass(frozen=True)
+class WorkspaceRegistry:
+    agents: tuple[Agent, ...]
+    squad: Squad
+
+    def payload(self):
+        return {"agents": [asdict(agent) for agent in self.agents],
+                "squad": {**asdict(self.squad), "members": list(self.squad.members)}}
 
 
 def parse_agents(value):
@@ -29,18 +42,62 @@ def parse_agents(value):
     return tuple(agents)
 
 
-def load_agents(state, fallback):
-    path = Path(state) / "agents.json"
-    if not path.exists():
-        return tuple(fallback)
-    return parse_agents(json.loads(path.read_text(encoding="utf-8")))
+def default_registry(agents):
+    agents = tuple(agents)
+    names = tuple(agent.name for agent in agents)
+    if not names or len(set(names)) != len(names):
+        raise ValueError("Agent registry must be nonempty and unique")
+    return WorkspaceRegistry(agents, Squad("default", names[0], names))
 
 
-def save_agents(state, agents):
+def parse_registry(value):
+    if not isinstance(value, dict) or set(value) != {"agents", "squad"}:
+        raise ValueError("Provide agents and one Squad")
+    agents = parse_agents(value["agents"])
+    squad = value["squad"]
+    if not isinstance(squad, dict) or set(squad) != {"name", "lead", "members"}:
+        raise ValueError("Squad requires a name, lead and members")
+    validate_agent(squad["name"])
+    members = squad["members"]
+    names = {agent.name for agent in agents}
+    if (not isinstance(members, list) or not members
+            or any(not isinstance(member, str) or member not in names for member in members)
+            or len(members) != len(set(members)) or squad["lead"] not in members):
+        raise ValueError("Squad members must be unique registered agents and include the lead")
+    return WorkspaceRegistry(agents, Squad(squad["name"], squad["lead"], tuple(members)))
+
+
+def load_registry(state, default):
     path = Path(state) / "agents.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = json.dumps([{"name": agent.name, "specialty": agent.specialty}
-                       for agent in agents], ensure_ascii=False, indent=2)
+    return parse_registry(json.loads(path.read_text(encoding="utf-8"))) if path.exists() else default
+
+
+@contextmanager
+def _registry_write(state):
+    state = Path(state)
+    state.mkdir(parents=True, exist_ok=True)
+    with (state / ".agents.lock").open("a") as lock:
+        flock(lock, LOCK_EX)
+        yield state / "agents.json"
+
+
+def migrate_registry(state):
+    """Upgrade the old on-disk role array before the strict registry reader runs."""
+    if not (Path(state) / "agents.json").exists():
+        return
+    with _registry_write(state) as path:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(value, list):
+            _write_registry(path, default_registry(parse_agents(value)))
+
+
+def save_registry(state, registry):
+    with _registry_write(state) as path:
+        _write_registry(path, registry)
+
+
+def _write_registry(path, registry):
+    data = json.dumps(registry.payload(), ensure_ascii=False, indent=2)
     descriptor, temporary = tempfile.mkstemp(prefix=".agents-", dir=path.parent)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:

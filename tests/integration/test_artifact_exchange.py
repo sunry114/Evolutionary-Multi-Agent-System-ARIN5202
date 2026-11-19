@@ -6,12 +6,17 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from evo.adapters.persistence.sqlite_memory import SQLiteMemoryStore
 from evo.adapters.persistence.sqlite_store import SQLiteStore
+from evo.adapters.harness.mcp_bridge import PlatformToolBroker
 from evo.adapters.tools.artifacts import ArtifactExchange
 from evo.adapters.tools.filesystem import PathPolicyError, WorkspaceFilesystem
+from evo.domain.models import Task
+from evo.domain.statuses import TaskStatus
+from evo.interfaces.sqlite_application import SQLiteApplication
 
 
 @unittest.skipUnless(sys.platform == "linux", "Linux artifact exchange")
@@ -178,10 +183,28 @@ class ArtifactExchangeTests(unittest.TestCase):
         self.assertEqual(tuple((self.root / "artifacts").iterdir()), ())
         self.assertEqual(self.receiver.list_available(), ())
 
+    def test_published_snapshot_is_previewable_only_in_its_issue(self):
+        app = SQLiteApplication(self.root)
+        app.store.save_task(Task("source", "Share evidence", owner="alice", status=TaskStatus.RUNNING))
+        app.store.save_task(Task("other", "Unrelated task"))
+        self.alice.write_file("evidence.md", "source issue evidence")
+        executor = SimpleNamespace(agent="alice", workspace=self.alice, repository=app.store)
+        broker = PlatformToolBroker(executor, artifacts=self.publisher)
+        result = broker.call("source", "publish_artifact", {"path": "evidence.md", "recipients": ["bob"]})
+        self.assertEqual(result["status"], "success")
+
+        item, = app.dispatch("task", {"task_id": "source"})["artifacts"]
+        self.assertFalse(item["verified"])
+        self.assertEqual(item["archive"]["id"], result["result"]["id"])
+        preview = app.dispatch("artifact", {"task_id": "source", "event_id": item["event_id"]})
+        self.assertEqual(preview["content"], "source issue evidence")
+        with self.assertRaises(ValueError):
+            app.dispatch("artifact", {"task_id": "other", "event_id": item["event_id"]})
+
     def test_storage_is_separate_from_existing_sqlite_databases(self):
         store = SQLiteStore(self.root / "events.sqlite3")
         memory = SQLiteMemoryStore(self.root, "alice")
-        self.assertEqual(store.schema_version(), 1)
+        self.assertEqual(store.schema_version(), 6)
         self.assertEqual(memory.schema_version(), 2)
         self.assertEqual(self.alice.list_files(), ())
         for path in ["../memory.sqlite3", "../../../events.sqlite3", "../../../artifacts/a.md"]:
@@ -190,4 +213,4 @@ class ArtifactExchangeTests(unittest.TestCase):
         self.alice.write_file("ok.md", "ok")
         self.publisher.publish("ok.md", ["bob"])
         self.assertEqual(memory.schema_version(), 2)
-        self.assertEqual(store.schema_version(), 1)
+        self.assertEqual(store.schema_version(), 6)

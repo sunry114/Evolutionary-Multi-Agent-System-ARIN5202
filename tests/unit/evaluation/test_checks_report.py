@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from evo.adapters.persistence.sqlite_store import SQLiteStore
 from evo.evaluation.dataset import load_dataset
 from evo.evaluation.report import verify_report, write_report
 from evo.evaluation.runner import EvaluationRunner
@@ -18,8 +19,11 @@ class Workspace:
 
 
 class App:
+    squad = {"name": "test"}
+
     def __init__(self, root, *, preseed=False, write=False, status="success"):
         self.root = root
+        self.store = SQLiteStore(root / "events.sqlite3")
         self.workspace = Workspace(root)
         self.write = write
         self.status = status
@@ -30,7 +34,7 @@ class App:
         assert agent == "builder"
         return self.workspace
 
-    def run(self, prompt, *, checks, memory_enabled):
+    def start(self, task_id, *, checks, memory_enabled):
         if self.write:
             (self.workspace.workspace / "report.md").write_text("done")
         return {"task": {"status": self.status, "result": "done"},
@@ -47,16 +51,16 @@ class EvaluationChecksTests(unittest.TestCase):
 
     def test_stale_file_and_failed_run_cannot_pass(self):
         cases = load_dataset(self.data)
-        stale = EvaluationRunner(lambda root: App(root, preseed=True)).run(cases)
+        stale = EvaluationRunner(lambda root, *, memory_state: App(root, preseed=True), model="scripted").run(cases)
         self.assertFalse(stale["cases"][0]["passed"])
         self.assertEqual(stale["objective_completion_rate"], 0)
-        failed = EvaluationRunner(lambda root: App(root, write=True, status="failed")).run(cases)
+        failed = EvaluationRunner(lambda root, *, memory_state: App(root, write=True, status="failed"), model="scripted").run(cases)
         self.assertFalse(failed["cases"][0]["passed"])
         self.assertFalse(failed["cases"][0]["checks"][0]["passed"])
 
     def test_report_is_recomputable_and_contains_no_prompt(self):
         cases = load_dataset(self.data)
-        report = EvaluationRunner(lambda root: App(root, write=True)).run(cases, memory_enabled=False)
+        report = EvaluationRunner(lambda root, *, memory_state: App(root, write=True), model="scripted").run(cases, memory_enabled=False)
         self.assertEqual(report["objective_completion_rate"], 1)
         self.assertTrue(verify_report(report, cases))
         output = self.root / "result.json"
@@ -72,7 +76,7 @@ class EvaluationChecksTests(unittest.TestCase):
         cases = load_dataset(self.data)
         called = []
         with self.assertRaisesRegex(ValueError, "Unknown trusted"):
-            EvaluationRunner(lambda root: called.append(root)).run(cases)
+            EvaluationRunner(lambda root, *, memory_state: called.append(root), model="scripted").run(cases)
         self.assertEqual(called, [])
 
     def test_result_file_exists_and_trusted_test_checks(self):
@@ -86,8 +90,8 @@ class EvaluationChecksTests(unittest.TestCase):
         def check_state(case, snapshot, state):
             seen.append(state)
             return (state / "builder" / "report.md").read_text() == "done"
-        report = EvaluationRunner(lambda root: App(root, write=True),
-                                  trusted_tests={"check_state": check_state}).run(cases)
+        report = EvaluationRunner(lambda root, *, memory_state: App(root, write=True),
+                                  model="scripted", trusted_tests={"check_state": check_state}).run(cases)
         self.assertTrue(report["cases"][0]["passed"])
         self.assertEqual([item["passed"] for item in report["cases"][0]["checks"]],
                          [True, True, True])
@@ -96,7 +100,7 @@ class EvaluationChecksTests(unittest.TestCase):
     def test_self_reported_case_has_no_objective_denominator(self):
         self.data.write_text('{"id":"c1","prompt":"Report"}\n')
         cases = load_dataset(self.data)
-        report = EvaluationRunner(lambda root: App(root)).run(cases)
+        report = EvaluationRunner(lambda root, *, memory_state: App(root), model="scripted").run(cases)
         self.assertEqual(report["cases"][0]["basis"], "self_reported")
         self.assertEqual(report["objective_count"], 0)
         self.assertIsNone(report["objective_completion_rate"])
@@ -106,9 +110,9 @@ class EvaluationChecksTests(unittest.TestCase):
     def test_provider_failure_is_redacted_from_machine_report(self):
         cases = load_dataset(self.data)
         class FailingApp(App):
-            def run(self, prompt, *, checks, memory_enabled):
+            def start(self, task_id, *, checks, memory_enabled):
                 raise RuntimeError("API_KEY=private-test-secret")
-        report = EvaluationRunner(lambda root: FailingApp(root)).run(cases)
+        report = EvaluationRunner(lambda root, *, memory_state: FailingApp(root), model="scripted").run(cases)
         self.assertEqual(report["cases"][0]["status"], "error")
         self.assertFalse(report["cases"][0]["passed"])
         self.assertTrue(verify_report(report, cases))

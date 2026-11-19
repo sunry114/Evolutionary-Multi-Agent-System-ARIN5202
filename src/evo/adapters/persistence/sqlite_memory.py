@@ -173,11 +173,6 @@ class SQLiteMemoryStore:
                                 row["lesson"], row["evidence"], row["failure_category"], row["source_issue_id"])
                      for row in list(unique.values())[:limit])
 
-    def adjustment(self, query: str) -> float:
-        weights = {TaskStatus.SUCCESS: 0.25, TaskStatus.FAILED: -0.25,
-                   TaskStatus.BLOCKED: -0.1}
-        return max(-0.75, min(0.75, sum(weights[item.outcome] for item in self.recall(query))))
-
     def list_recent(self, limit=20):
         """Bounded human-facing view of a single agent's records."""
         if type(limit) is not int or not 1 <= limit <= 50:

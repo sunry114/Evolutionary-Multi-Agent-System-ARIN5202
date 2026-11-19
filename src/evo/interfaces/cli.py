@@ -25,24 +25,38 @@ def parser():
     root.add_argument("--demo", action="store_true", help="Volatile UI preview; no agents execute")
     commands = root.add_subparsers(dest="command")
     commands.add_parser("task").add_argument("task_id")
-    commands.add_parser("tasks").add_argument("--limit", type=int, default=100)
+    command = commands.add_parser("tasks")
+    command.add_argument("--limit", type=int, default=100)
+    command.add_argument("--owner")
+    command.add_argument("--owner-type", choices=("agent", "squad"))
     commands.add_parser("messages").add_argument("--agent")
-    commands.add_parser("agents").add_argument("--file", required=True,
-                                                help="JSON array of {name,specialty} roles")
-    for name in ("run", "group"):
-        command = commands.add_parser(name)
-        command.add_argument("prompt" if name == "run" else "message")
-        if name == "run":
-            command.add_argument("--no-memory", action="store_true")
-            command.add_argument("--expect-file")
-            command.add_argument("--expect-text")
-            command.add_argument("--checks-file", help="JSON object of s1..s5 artifact checks")
-        else:
-            command.add_argument("--execute", action="store_true", help="Start the discussed task")
-            command.add_argument("--no-memory", action="store_true")
-            command.add_argument("--expect-file")
-            command.add_argument("--expect-text")
-            command.add_argument("--checks-file")
+    commands.add_parser("configure", help="Configure the workspace agents and Squad").add_argument(
+        "--file", required=True, help="JSON object with agents and squad")
+    command = commands.add_parser("create", help="Save an issue for an agent or Squad")
+    command.add_argument("prompt")
+    assignee = command.add_mutually_exclusive_group()
+    assignee.add_argument("--agent")
+    assignee.add_argument("--squad")
+    command.add_argument("--no-memory", action="store_true")
+    command.add_argument("--from-group", action="store_true", help="Attach the unassigned group discussion")
+    command.add_argument("--expect-file")
+    command.add_argument("--expect-text")
+    command.add_argument("--checks-file", help="JSON object of s1..s5 artifact checks")
+    command = commands.add_parser("assign", help="Assign a draft issue or revision")
+    command.add_argument("task_id")
+    assignee = command.add_mutually_exclusive_group(required=True)
+    assignee.add_argument("--agent")
+    assignee.add_argument("--squad")
+    commands.add_parser("start", help="Execute an existing issue").add_argument("task_id")
+    command = commands.add_parser("group")
+    command.add_argument("message")
+    command.add_argument("--task", dest="task_id")
+    command = commands.add_parser("comment")
+    command.add_argument("task_id")
+    command.add_argument("message")
+    command = commands.add_parser("artifact")
+    command.add_argument("task_id")
+    command.add_argument("event_id", type=int)
     commands.add_parser("resume").add_argument("task_id")
     command = commands.add_parser("dm")
     command.add_argument("agent")
@@ -61,7 +75,9 @@ def parser():
     command = commands.add_parser("eval")
     command.add_argument("dataset")
     command.add_argument("--output", required=True)
-    command.add_argument("--no-memory", action="store_true")
+    memory = command.add_mutually_exclusive_group()
+    memory.add_argument("--no-memory", action="store_true")
+    memory.add_argument("--compare-memory", action="store_true", help="Compare memory on and off with isolated state")
     command = commands.add_parser("review")
     command.add_argument("task_id")
     command.add_argument("decision", choices=("accepted", "changes_requested"))
@@ -70,6 +86,7 @@ def parser():
     command.add_argument("task_id")
     command.add_argument("prompt")
     command = commands.add_parser("answer")
+    command.add_argument("task_id")
     command.add_argument("request_id")
     choice = command.add_mutually_exclusive_group(required=True)
     choice.add_argument("--approve", action="store_true")
@@ -125,28 +142,26 @@ def main(argv=None, application=None):
                 raise ValueError("Invalid port")
             serve(app, args.port)
             return 0
-        payload = {k: v for k, v in vars(args).items() if k not in ("command", "demo", "state")}
-        if args.command == "agents":
-            payload = {"agents": json.loads(Path(args.file).read_text(encoding="utf-8"))}
-        if args.command in ("run", "group") and (args.command == "run" or args.execute):
+        payload = {k: v for k, v in vars(args).items() if k not in ("command", "demo", "state") and v is not None}
+        if args.command == "configure":
+            payload = json.loads(Path(args.file).read_text(encoding="utf-8"))
+        if args.command == "create":
             if bool(args.expect_file) != bool(args.expect_text):
-                raise ValueError("Run requires both expected file and text")
+                raise ValueError("Provide both expected file and text")
             if args.checks_file and args.expect_file:
                 raise ValueError("Choose checks file or expected file and text")
-            payload = ({"prompt": args.prompt} if args.command == "run"
-                       else {"message": args.message, "execute": True})
-            payload["no_memory"] = args.no_memory
+            payload = {"prompt": args.prompt, "no_memory": args.no_memory, "from_group": args.from_group}
+            if args.agent is not None:
+                payload["agent"] = args.agent
+            elif args.squad is not None:
+                payload["squad"] = args.squad
             if args.checks_file:
                 payload["checks"] = json.loads(Path(args.checks_file).read_text(encoding="utf-8"))
             elif args.expect_file:
                 payload["checks"] = {"s1": {"path": args.expect_file,
                                             "contains": args.expect_text}}
-        elif args.command == "group":
-            if args.expect_file or args.expect_text or args.checks_file or args.no_memory:
-                raise ValueError("Group execution flags require --execute")
-            payload = {"message": args.message}
         if args.command == "answer":
-            payload = {"request_id": args.request_id}
+            payload = {"task_id": args.task_id, "request_id": args.request_id}
             payload.update({"answer": args.text} if args.text is not None else {"approved": args.approve})
         result = app.dispatch(args.command, payload)
         from evo.interfaces.web.app import redact

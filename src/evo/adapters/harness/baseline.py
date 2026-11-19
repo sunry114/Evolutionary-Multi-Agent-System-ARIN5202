@@ -20,7 +20,8 @@ class BaselineHarnessAdapter(ManagedHarness):
             action = request.actions[index]
             result = self._call(control, request, action.name, dict(action.arguments))
             if result["status"] != "success":
-                return result["status"], "", "" if result["status"] == "waiting_human" else "platform_action_stopped", None
+                waiting = result["status"] in ("waiting_human", "waiting_dependency")
+                return result["status"], "", "" if waiting else "platform_action_stopped", None
             control.record["baseline_index"] = index + 1
             self._save(control)
             if time.monotonic() > deadline:

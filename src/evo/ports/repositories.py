@@ -39,7 +39,7 @@ class MessageRepository(Protocol):
     ) -> Sequence[Record]:
         ...
 
-    def list_group_messages(self) -> Sequence[Record]:
+    def list_group_messages(self, *, task_id: str | None = None) -> Sequence[Record]:
         ...
 
 
@@ -146,7 +146,4 @@ class MemoryRepository(Protocol):
         ...
 
     def add(self, experience: Experience) -> None:
-        ...
-
-    def adjustment(self, query: str) -> float:
         ...

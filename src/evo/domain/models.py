@@ -13,6 +13,13 @@ class Agent:
 
 
 @dataclass(frozen=True)
+class Squad:
+    name: str
+    lead: str
+    members: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class Subtask:
     id: str
     description: str
@@ -28,6 +35,9 @@ class Task:
     parent_id: Optional[str] = None
     status: TaskStatus = TaskStatus.CREATED
     result: str = ""
+    assignee_type: Optional[str] = None
+    assignee_id: Optional[str] = None
+    routing_mode: Optional[str] = None
 
 
 @dataclass(frozen=True)

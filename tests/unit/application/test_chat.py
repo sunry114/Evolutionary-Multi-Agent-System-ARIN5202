@@ -40,7 +40,7 @@ class ChatTests(unittest.TestCase):
         service = ChatService(provider, self.store, self.agents)
         self.assertEqual(service.group_message("Discuss"),
                          {"builder": "builder reply", "reviewer": "reviewer reply"})
-        self.assertEqual(len(self.store.list_group_messages()), 4)
+        self.assertEqual(len(self.store.list_group_messages()), 3)
         self.assertNotIn("private bid", provider.calls[0][1]["content"])
 
     def test_invalid_input_and_reply(self):

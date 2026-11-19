@@ -1,3 +1,9 @@
+import contextlib
+import io
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from importlib.resources import files
+from threading import Barrier
 import json
 import tempfile
 import unittest
@@ -9,18 +15,24 @@ from evo.application.approvals import ApprovalService
 from evo.adapters.tools.docker import DockerPythonRunner
 from evo.config import HarnessConfig
 from evo.domain.models import Agent, Task
-from evo.domain.statuses import TaskStatus
+from evo.interfaces.cli import main
 from evo.interfaces.execution_factory import create_orchestrator
 from evo.interfaces.sqlite_application import SQLiteApplication
 from evo.ports.harness import ToolCall
 from evo.ports.tools import ExecutionResult
+from tests.e2e.test_collective_task import NegotiationProvider, ScriptedHarness
 
 
-class Provider:
+class Provider(NegotiationProvider):
     def complete(self, messages, json_object=False):
         if "Decompose the goal" in messages[0]["content"]:
             return {"subtasks": [{"id": "s1", "description": "Write report.md"}]}
-        return {"score": 5, "reason": "Can write the report"}
+        return super().complete(messages, json_object)
+
+
+def registry_for(roles):
+    names = [item["name"] for item in roles]
+    return {"agents": roles, "squad": {"name": "default", "lead": names[0] if names else "", "members": names}}
 
 
 class ExecutionFactoryTests(unittest.TestCase):
@@ -28,9 +40,10 @@ class ExecutionFactoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             agent = Agent("builder", "documents")
             coordinator = create_orchestrator(
-                temp, agents=(agent,), provider=Provider(),
+                temp, agents=(agent,), direct_assignee="builder", provider=Provider(),
                 harness_config=HarnessConfig(adapter="baseline"))
-            result = coordinator.run("Write report.md", checks={
+            coordinator.store.save_task(Task("root", "Write report.md"))
+            result = coordinator.start("root", checks={
                 "s1": ArtifactCheck("report.md", exact="done")},
                 actions={"s1": (ToolCall("write_file", {"path": "report.md", "content": "done"}),)})
             self.assertEqual(result["task"]["status"], "success")
@@ -44,12 +57,13 @@ class ExecutionFactoryTests(unittest.TestCase):
             agent = Agent("builder", "documents and Python")
             def build():
                 return create_orchestrator(
-                    temp, agents=(agent,), provider=Provider(),
+                    temp, agents=(agent,), direct_assignee="builder", provider=Provider(),
                     harness_config=HarnessConfig(adapter="baseline"))
             with patch.object(DockerPythonRunner, "run_python",
                               return_value=ExecutionResult(0, "ok", "")) as python:
                 coordinator = build()
-                first = coordinator.run("Write report.md", checks={
+                coordinator.store.save_task(Task("root", "Write report.md"))
+                first = coordinator.start("root", checks={
                     "s1": ArtifactCheck("report.md", exact="done")}, actions={"s1": (
                     ToolCall("write_file", {"path": "report.md", "content": "done"}),
                     ToolCall("write_file", {"path": "check.py", "content": "print('ok')", "purpose": "code"}),
@@ -62,79 +76,98 @@ class ExecutionFactoryTests(unittest.TestCase):
                 self.assertEqual(final["task"]["status"], "success")
                 python.assert_called_once_with("check.py", approved=True)
 
-    def test_default_gateway_run_and_resume_dispatch(self):
+    def test_cli_configure_create_start_and_query_same_squad_issue(self):
         with tempfile.TemporaryDirectory() as temp:
-            app = SQLiteApplication(temp, provider=Provider(), agents=(Agent("builder", "documents"),))
-            called = []
-            class Coordinator:
-                def run(self, prompt, *, checks, task_id, memory_enabled, group_context=None):
-                    called.append((prompt, checks["s1"].path, memory_enabled))
-                    app.store.save_task(Task(task_id, prompt, status=TaskStatus.WAITING_HUMAN))
-                    return {"task": {"id": task_id, "status": "waiting_human"}, "subtasks": []}
-                def resume(self, task_id):
-                    called.append(("resume", task_id))
-                    return {"task": {"id": task_id, "status": "success"}, "subtasks": []}
-            with patch.object(app, "_coordinator", return_value=Coordinator()):
-                first = app.dispatch("run", {"prompt": "Write report.md", "no_memory": True,
-                                             "checks": {"s1": {"path": "report.md", "exact": "done"}}})
-                final = app.dispatch("resume", {"task_id": first["task"]["id"]})
-            self.assertEqual(first["status"], "waiting_human")
-            self.assertEqual(final["status"], "success")
-            self.assertEqual(called[0], ("Write report.md", "report.md", False))
-            self.assertEqual(called[1], ("resume", first["task"]["id"]))
+            root = Path(temp)
+            registry = {"agents": [{"name": "builder", "specialty": "documents"},
+                                   {"name": "external", "specialty": "other"}],
+                        "squad": {"name": "reports", "lead": "builder", "members": ["builder"]}}
+            config_path = root / "squad.json"
+            config_path.write_text(json.dumps(registry))
 
-    def test_four_configured_roles_chat_and_execute_with_objective_evidence(self):
-        with tempfile.TemporaryDirectory() as temp:
-            roles = [{"name": name, "specialty": specialty} for name, specialty in (
-                ("researcher", "research"), ("architect", "design"),
-                ("builder", "documents"), ("reviewer", "testing"))]
-            class TeamProvider(Provider):
-                def complete(self, messages, json_object=False):
-                    if "multi-agent group chat" in messages[0]["content"]:
-                        return {"reply": "Ready to collaborate"}
-                    if "Bid honestly" in messages[0]["content"]:
-                        return {"score": 5, "reason": "Can contribute"}
-                    return super().complete(messages, json_object)
-            app = SQLiteApplication(temp, provider=TeamProvider())
-            self.assertEqual(app.dispatch("agents", {"agents": roles})["agents"],
-                             [item["name"] for item in roles])
-            restored = SQLiteApplication(temp, provider=TeamProvider())
-            self.assertEqual(restored.snapshot()["agent_details"], roles)
-            self.assertEqual(set(restored.dispatch("group", {"message": "Plan report.md"})["replies"]),
-                             {item["name"] for item in roles})
-            with patch.dict("os.environ", {"EVO_HARNESS_ADAPTER": "baseline"}):
-                coordinator = restored._coordinator()
-            result = coordinator.run("Write report.md", checks={
-                "s1": ArtifactCheck("report.md", exact="done")},
-                actions={"s1": (ToolCall("write_file", {"path": "report.md", "content": "done"}),)})
-            self.assertEqual(result["task"]["status"], "success")
-            self.assertEqual(len([event for event in coordinator.store.list_events(result["task"]["id"])
-                                  if event["event_type"] == "agent_bid"]), 4)
-            config = next(event["payload"] for event in coordinator.store.list_events(result["task"]["id"])
-                          if event["event_type"] == "run_config")
-            self.assertEqual(config["agents"], roles)
+            def command(*args, application=None):
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(main(["--state", temp, *args], application), 0)
+                return json.loads(output.getvalue())
 
-    def test_group_execute_dispatches_task_after_four_agent_discussion(self):
+            with patch("evo.interfaces.execution_factory.load_key", side_effect=AssertionError) as load_key:
+                self.assertEqual(command("configure", "--file", str(config_path))["squad"], registry["squad"])
+                issue = command("create", "Write report.md", "--squad", "reports", "--no-memory",
+                                "--expect-file", "report.md", "--expect-text", "done")["task"]
+                load_key.assert_not_called()
+            issue_id = issue["id"]
+            self.assertEqual((issue["status"], issue["assignee_id"], issue["owner"]), ("created", "reports", None))
+            listed, = command("tasks")["tasks"]
+            self.assertEqual((listed["id"], listed["lane"]), (issue_id, "draft"))
+
+            app = SQLiteApplication(temp, provider=Provider())
+            def harness(config, state, broker, **kwargs):
+                return ScriptedHarness(broker.executor.workspace, lambda request: ("success", "report.md", "done"))
+            with patch.dict("os.environ", {"EVO_HARNESS_ADAPTER": "baseline"}), patch(
+                    "evo.interfaces.execution_factory.create_harness", side_effect=harness) as runtime:
+                started = command("start", issue_id, application=app)
+                self.assertEqual(started["task"]["id"], issue_id)
+                self.assertEqual(started["status"], "success")
+                self.assertEqual(command("start", issue_id, application=app), started)
+                runtime.assert_called_once()
+            detail = command("task", issue_id)
+            self.assertEqual(detail["task"]["status"], "success")
+            self.assertEqual(detail["children"][0]["owner"], "builder")
+            self.assertEqual([row["id"] for row in command("tasks")["tasks"]], [issue_id])
+            config = app.store.latest_event_payload(issue_id, "run_config")
+            self.assertEqual(config["squad"], registry["squad"])
+            self.assertEqual(config["agents"], registry["agents"][:1])
+            self.assertEqual(config["routing_mode"], "squad")
+            self.assertFalse(config["memory_enabled"])
+
+    def test_concurrent_start_claims_once(self):
+        class Clarifier:
+            def complete(self, messages, json_object=False):
+                return {"question": "Which file?"}
+
+        with tempfile.TemporaryDirectory() as temp, patch.dict("os.environ", {"EVO_HARNESS_ADAPTER": "baseline"}):
+            apps = [SQLiteApplication(temp, provider=Clarifier()) for _ in range(2)]
+            task_id = apps[0].dispatch("create", {"prompt": "Write a report", "agent": "builder"})["task"]["id"]
+            gate = Barrier(2)
+
+            def build(*args, **kwargs):
+                coordinator = create_orchestrator(*args, **kwargs)
+                gate.wait(timeout=5)
+                return coordinator
+
+            with patch("evo.interfaces.execution_factory.create_orchestrator", side_effect=build):
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    results = list(pool.map(lambda app: app.dispatch("start", {"task_id": task_id}), apps))
+            store = apps[0].store
+            self.assertEqual({result["task"]["id"] for result in results}, {task_id})
+            self.assertEqual(store.get_task(task_id)["status"], "waiting_human")
+            self.assertEqual(len(store.list_pending_requests()), 1)
+            self.assertEqual(sum(event["event_type"] == "run_config" for event in store.list_events(task_id)), 1)
+            config = store.latest_event_payload(task_id, "run_config")
+            self.assertEqual(config["direct_assignee"], "builder")
+            self.assertEqual(config["routing_mode"], "direct")
+            self.assertIsNone(config["squad"])
+
+    def test_group_discussion_is_claimed_by_one_issue(self):
+        class TeamProvider:
+            def complete(self, messages, json_object=False):
+                return {"reply": "Agreed"}
+
         with tempfile.TemporaryDirectory() as temp:
-            class TeamProvider(Provider):
-                def complete(self, messages, json_object=False):
-                    return {"reply": "Agreed"}
             app = SQLiteApplication(temp, provider=TeamProvider())
             roles = [{"name": name, "specialty": name} for name in ("a", "b", "c", "d")]
-            app.dispatch("agents", {"agents": roles})
-            class Coordinator:
-                def run(self, prompt, *, checks, task_id, memory_enabled, group_context):
-                    self.context = group_context
-                    self.prompt = prompt
-                    return {"task": {"id": task_id, "status": "waiting_human"}, "subtasks": []}
-            coordinator = Coordinator()
-            with patch.object(app, "_coordinator", return_value=coordinator):
-                result = app.dispatch("group", {"message": "Create report.md", "execute": True,
-                    "checks": {"s1": {"path": "report.md", "exact": "done"}}})
-            self.assertEqual(result["status"], "waiting_human")
-            self.assertEqual(len(result["replies"]), 4)
-            self.assertEqual([row["sender"] for row in coordinator.context], ["human", "a", "b", "c", "d"])
-            self.assertEqual(coordinator.prompt, "Create report.md")
+            app.dispatch("configure", registry_for(roles))
+            replies = app.dispatch("group", {"message": "Plan report.md"})["replies"]
+            self.assertEqual(set(replies), {item["name"] for item in roles})
+            issue = app.dispatch("create", {"prompt": "Write report.md", "squad": "default", "from_group": True})
+            issue_id = issue["task"]["id"]
+            context = app.store.list_group_messages(task_id=issue_id)
+            self.assertEqual([row["sender"] for row in context], ["human", "a", "b", "c", "d"])
+            self.assertTrue(all(row["task_id"] == issue_id for row in context))
+            self.assertEqual(app.store.list_group_messages(), [])
+            with self.assertRaisesRegex(ValueError, "No unassigned"):
+                app.dispatch("create", {"prompt": "Another task", "squad": "default", "from_group": True})
+            self.assertEqual(len(app.store.list_tasks()), 1)
 
     def test_group_clarification_restores_confirmed_requirements_and_builds_slide_plan(self):
         class DiscussionProvider(Provider):
@@ -145,7 +178,8 @@ class ExecutionFactoryTests(unittest.TestCase):
                         return {"question": "Which file and title should we use?"}
                     return {"subtasks": [{"id": "s1", "description": "Present the confirmed risk analysis"}],
                             "checks": {"s1": {"path": "slides.html", "contains": "Risk analysis"}}}
-                if "Bid honestly" in messages[0]["content"]:
+                if any(phrase in messages[0]["content"] for phrase in
+                       ("Nominate one listed member", "Respond to the proposed assignment")):
                     return super().complete(messages, json_object)
                 return {"reply": "Ready"}
 
@@ -154,7 +188,8 @@ class ExecutionFactoryTests(unittest.TestCase):
             app = SQLiteApplication(temp, provider=provider)
             app.dispatch("group", {"message": "Confirmed: explain investment risks."})
             app.dispatch("dm", {"agent": "builder", "message": "private note"})
-            result = app.dispatch("group", {"message": "Prepare the presentation", "execute": True})
+            issue = app.dispatch("create", {"prompt": "Prepare the presentation", "squad": "default", "from_group": True})
+            result = app.dispatch("start", {"task_id": issue["task"]["id"]})
             self.assertEqual(result["status"], "waiting_human")
             context = provider.inputs["group_history"]
             self.assertIn({"sender": "human", "content": "Confirmed: explain investment risks."}, context)
@@ -163,7 +198,7 @@ class ExecutionFactoryTests(unittest.TestCase):
             app.dispatch("group", {"message": "Unrelated later discussion"})
             app = SQLiteApplication(temp, provider=provider)
             request = app.store.list_pending_requests()[0]
-            app.dispatch("answer", {"request_id": request["id"], "answer": "slides.html, titled Risk analysis"})
+            app.dispatch("answer", {"task_id": root, "request_id": request["id"], "answer": "slides.html, titled Risk analysis"})
             app.dispatch("resume", {"task_id": root})
             self.assertEqual(provider.inputs["group_history"], context)
             plan = next(e["payload"] for e in app.store.list_events(root) if e["event_type"] == "plan_created")
@@ -178,52 +213,93 @@ class ExecutionFactoryTests(unittest.TestCase):
                                ("Risk analysis", "failed")):
             with self.subTest(body=body), tempfile.TemporaryDirectory() as temp:
                 coordinator = create_orchestrator(temp, agents=(Agent("builder", "slides"),),
-                                                  provider=Provider(), harness_config=HarnessConfig(adapter="baseline"))
-                result = coordinator.run("Prepare slides", checks={"s1": ArtifactCheck("slides.html", contains="Risk analysis")},
+                                                  provider=Provider(), direct_assignee="builder",
+                                                  harness_config=HarnessConfig(adapter="baseline"))
+                coordinator.store.save_task(Task("root", "Prepare slides"))
+                result = coordinator.start("root", checks={"s1": ArtifactCheck("slides.html", contains="Risk analysis")},
                                          actions={"s1": (ToolCall("write_file", {"path": "slides.html", "purpose": "slides",
                                                                                 "content": body}),)})
                 self.assertEqual(result["task"]["status"], expected)
                 self.assertEqual((Path(temp) / "agents/builder/workspace/slides.html").read_text(), body)
 
-    def test_resume_uses_task_roles_after_workspace_roles_change(self):
-        with tempfile.TemporaryDirectory() as temp:
-            app = SQLiteApplication(temp, provider=Provider())
-            original = [{"name": name, "specialty": name} for name in ("a", "b", "c", "d")]
-            app.store.save_task(Task("saved", "Goal", status=TaskStatus.WAITING_HUMAN))
-            app.store.append_event(task_id="saved", event_type="run_config", actor="orchestrator",
-                                   payload={"agents": original})
-            app.dispatch("agents", {"agents": [{"name": "replacement", "specialty": "new role"}]})
-            class Coordinator:
-                def resume(self, task_id):
-                    return {"task": {"id": task_id, "status": "success"}, "subtasks": []}
-            with patch.object(app, "_coordinator", return_value=Coordinator()) as factory:
-                self.assertEqual(app.dispatch("resume", {"task_id": "saved"})["status"], "success")
-            self.assertEqual([agent.name for agent in factory.call_args.args[0]], ["a", "b", "c", "d"])
+    def test_upgrade_v1_config_and_resume_with_saved_roles(self):
+        class HistoricalProvider(Provider):
+            def complete(self, messages, json_object=False):
+                if "Decompose the goal" in messages[0]["content"]:
+                    self.inputs = json.loads(messages[1]["content"])
+                return super().complete(messages, json_object)
+
+        with tempfile.TemporaryDirectory() as temp, patch.dict("os.environ", {"EVO_HARNESS_ADAPTER": "baseline"}):
+            root = Path(temp)
+            initial = files("evo.adapters.persistence").joinpath("migrations", "0001_initial.sql")
+            original = [{"name": "builder", "specialty": "original role"}]
+            (root / "agents.json").write_text(json.dumps(original))
+            config = {"agents": original, "actions": {}, "memory_enabled": False, "group_context": None,
+                      "checks": {"s1": {"path": "report.md", "exact": "done"}}}
+            now = "2025-11-01T00:00:00+00:00"
+            with contextlib.closing(sqlite3.connect(root / "events.sqlite3")) as conn:
+                conn.executescript(initial.read_text())
+                conn.execute("INSERT INTO tasks (id, description, status, created_at, updated_at) "
+                             "VALUES ('saved', 'Write the report', 'waiting_human', ?, ?)", (now, now))
+                conn.execute("INSERT INTO approval_requests (id, task_id, agent, kind, status, "
+                             "created_at, answer_json) VALUES ('question', 'saved', 'planner', "
+                             "'clarification', 'answered', ?, ?)", (now, json.dumps({"answer": "Use report.md"})))
+                for kind, payload in (("run_config", config), ("clarification_requested", {
+                        "request_id": "question", "question": "Which file?"})):
+                    conn.execute("INSERT INTO events (task_id, event_type, payload_json, created_at) "
+                                 "VALUES ('saved', ?, ?, ?)", (kind, json.dumps(payload), now))
+                conn.commit()
+
+            provider = HistoricalProvider()
+            app = SQLiteApplication(temp, provider=provider)
+            self.assertEqual(app.store.schema_version(), 6)
+            self.assertEqual(json.loads((root / "agents.json").read_text()), registry_for(original))
+            self.assertEqual(app.dispatch("task", {"task_id": "saved"})["task"]["id"], "saved")
+            self.assertEqual(app.store.latest_event_payload("saved", "run_config"),
+                             {**config, "squad": registry_for(original)["squad"], "routing_mode": "squad"})
+            app.dispatch("configure", registry_for([{"name": "replacement", "specialty": "new role"}]))
+            resumed = SQLiteApplication(temp, provider=provider).dispatch("resume", {"task_id": "saved"})
+            self.assertEqual(resumed["task"]["id"], "saved")
+            self.assertEqual(provider.inputs["agents"], {"builder": "original role"})
+            self.assertIn("Use report.md", provider.inputs["goal"])
 
     def test_invalid_role_registry_does_not_replace_existing_roles(self):
         with tempfile.TemporaryDirectory() as temp:
             app = SQLiteApplication(temp, provider=Provider())
+            saved = registry_for([{"name": "builder", "specialty": "documents"},
+                                  {"name": "reviewer", "specialty": "verification"}])
+            app.dispatch("configure", saved)
             for roles in ([], [{"name": "a/../b", "specialty": "bad"}],
                           [{"name": "human", "specialty": "reserved"}],
                           [{"name": "same", "specialty": "one"},
                            {"name": "same", "specialty": "two"}]):
                 with self.subTest(roles=roles), self.assertRaises(ValueError):
-                    app.dispatch("agents", {"agents": roles})
-            self.assertEqual(SQLiteApplication(temp).snapshot()["agents"],
-                             [agent.name for agent in app.agents])
+                    app.dispatch("configure", registry_for(roles))
+            for changes in ({"lead": "reviewer", "members": ["builder"]}, {"members": ["builder", "unknown"]},
+                            {"members": ["builder", "builder"]}, {"name": "../reports"}):
+                with self.subTest(squad=changes), self.assertRaises(ValueError):
+                    app.dispatch("configure", {**saved, "squad": {**saved["squad"], **changes}})
+            snapshot = SQLiteApplication(temp).snapshot()
+            self.assertEqual(snapshot["agent_details"], saved["agents"])
+            self.assertEqual(snapshot["squad"], saved["squad"])
 
     def test_evaluation_gateway_uses_scenario_roles_and_restricted_report_path(self):
         with tempfile.TemporaryDirectory() as temp:
             app = SQLiteApplication(temp, provider=Provider())
             roles = [{"name": name, "specialty": name} for name in ("a", "b", "c", "d")]
-            app.dispatch("agents", {"agents": roles})
+            app.dispatch("configure", registry_for(roles))
             output = str(Path(temp) / "reports" / "mid.json")
             with self.assertRaises(ValueError):
                 app.dispatch("eval", {"dataset": "mid.jsonl", "output": str(Path(temp) / "agents.json")})
-            def evaluate(dataset, destination, factory, *, memory_enabled):
-                self.assertEqual(factory(Path(temp) / "case"), "coordinator")
+            def evaluate(dataset, destination, factory, *, model, memory_enabled, compare_memory):
+                memory_state = Path(temp) / "cohort"
+                self.assertEqual(factory(Path(temp) / "case", memory_state=memory_state), "coordinator")
                 self.assertEqual([agent.name for agent in create.call_args.kwargs["agents"]],
                                  [item["name"] for item in roles])
+                self.assertEqual(create.call_args.kwargs["squad"], registry_for(roles)["squad"])
+                self.assertEqual(create.call_args.kwargs["memory_state"], memory_state)
+                self.assertEqual(model, create.call_args.kwargs["provider_config"].model)
+                self.assertFalse(compare_memory)
                 self.assertEqual((dataset, destination, memory_enabled), ("mid.jsonl", Path(output), False))
                 return {"objective_count": 1}
             with patch("evo.interfaces.execution_factory.create_orchestrator",
@@ -239,7 +315,7 @@ class ExecutionFactoryTests(unittest.TestCase):
             for checks in ({}, {"s1": {"path": "../report.md", "exact": "done"}},
                            {"s1": {"path": "report.md"}}):
                 with self.subTest(checks=checks), self.assertRaises(ValueError):
-                    app.dispatch("run", {"prompt": "Write report.md", "checks": checks})
+                    app.dispatch("create", {"prompt": "Write report.md", "agent": "builder", "checks": checks})
             self.assertEqual(app.store.list_tasks(), [])
 
 

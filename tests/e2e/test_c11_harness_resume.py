@@ -10,23 +10,18 @@ from evo.adapters.harness.mcp_bridge import PlatformToolBroker
 from evo.adapters.persistence.sqlite_store import SQLiteStore
 from evo.adapters.tools.filesystem import WorkspaceFilesystem
 from evo.application.approvals import ApprovalService
-from evo.application.assignment import AssignmentService
 from evo.application.executor import ActionExecutor
 from evo.application.orchestrator import ArtifactCheck, Orchestrator
 from evo.application.planner import Planner
-from evo.domain.models import Agent
+from evo.domain.models import Agent, Task
 from evo.ports.harness import ToolCall
 from evo.ports.tools import ExecutionResult
+from tests.e2e.test_collective_task import NegotiationProvider
 
 
 class Provider:
     def complete(self, messages, json_object=False):
         return {"subtasks": [{"id": "s1", "description": "Write and check hello"}]}
-
-
-class Bidder:
-    def complete(self, messages, json_object=False):
-        return {"score": 5, "reason": "Can do it"}
 
 
 class HarnessResumeTests(unittest.TestCase):
@@ -48,9 +43,10 @@ class HarnessResumeTests(unittest.TestCase):
                 return BaselineHarnessAdapter(root, PlatformToolBroker(executor))
 
             coordinator = Orchestrator(store, Planner(Provider(), (agent,), approval),
-                                       AssignmentService(Bidder(), (agent,), store),
-                                       harness, workspace, agents=(agent,))
-            first = coordinator.run("Create hello.md and run a check", checks={
+                                       harness, workspace, agents=(agent,), direct_assignee="builder",
+                                       negotiation_provider=NegotiationProvider())
+            coordinator.store.save_task(Task("root", "Create hello.md and run a check"))
+            first = coordinator.start("root", checks={
                 "s1": ArtifactCheck("hello.md", exact="hello")}, actions={"s1": (
                 ToolCall("write_file", {"path": "check.py", "content": "print('ok')", "purpose": "code"}),
                 ToolCall("write_file", {"path": "hello.md", "content": "hello"}),

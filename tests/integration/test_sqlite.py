@@ -3,6 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
+from importlib.resources import files
 from pathlib import Path
 
 from evo.adapters.persistence.sqlite_memory import SQLiteMemoryStore
@@ -16,6 +17,72 @@ from evo.domain.statuses import TaskStatus
 
 
 class SQLiteMigrationTests(unittest.TestCase):
+    def test_v4_revision_becomes_a_runnable_root_in_the_same_issue(self):
+        with tempfile.TemporaryDirectory() as temp:
+            database = Path(temp) / "events.sqlite3"
+            migrations = files("evo.adapters.persistence").joinpath("migrations")
+            with closing(sqlite3.connect(database)) as connection:
+                for filename in ("0001_initial.sql", "0002_issues.sql", "0003_routing.sql", "0004_delegations.sql"):
+                    connection.executescript(migrations.joinpath(filename).read_text())
+                connection.execute(
+                    "INSERT INTO tasks(id, description, status, created_at, updated_at, assignee_type, assignee_id, routing_mode) "
+                    "VALUES ('original', 'Report', 'success', 'now', 'now', 'agent', 'builder', 'direct')")
+                connection.execute(
+                    "INSERT INTO tasks(id, description, parent_id, status, created_at, updated_at) "
+                    "VALUES ('revision', 'Improve report', 'original', 'created', 'now', 'now')")
+                connection.execute(
+                    "INSERT INTO reviews(task_id, status, revision_task_id, created_at, updated_at) "
+                    "VALUES ('original', 'revising', 'revision', 'now', 'now')")
+                connection.execute(
+                    """INSERT INTO events(task_id, event_type, payload_json, created_at)
+                    VALUES ('original', 'issue_config',
+                    '{"checks":{"s1":{"path":"report.md","exact":"done"}},"memory_enabled":false,"group_context":[]}', 'now')""")
+                connection.commit()
+
+            store = SQLiteStore(database)
+            self.assertEqual(store.schema_version(), 6)
+            revision = store.get_task("revision")
+            self.assertIsNone(revision["parent_id"])
+            self.assertEqual((revision["assignee_id"], revision["routing_mode"]), ("builder", "direct"))
+            self.assertEqual(store.issue_id("revision"), "original")
+            issue, = store.list_issues()
+            self.assertEqual((issue["id"], issue["current_task_id"]), ("original", "revision"))
+            settings = {"checks": {"s1": {"path": "report.md", "exact": "done"}}, "memory_enabled": False}
+            self.assertEqual(store.latest_event_payload("revision", "issue_config"), settings)
+            self.assertEqual(store.latest_event_payload("original", "issue_config"), settings)
+
+    def test_v2_drafts_and_existing_run_migrate_to_current_routes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            database = Path(temp) / "events.sqlite3"
+            migrations = files("evo.adapters.persistence").joinpath("migrations")
+            with closing(sqlite3.connect(database)) as connection:
+                for filename in ("0001_initial.sql", "0002_issues.sql"):
+                    connection.executescript(migrations.joinpath(filename).read_text())
+                connection.executemany(
+                    "INSERT INTO tasks(id, description, status, created_at, updated_at, assignee_type, assignee_id) "
+                    "VALUES (?, 'Test issue', ?, 'now', 'now', ?, ?)", (
+                        ("squad-draft", "created", "squad", "reports"),
+                        ("agent-draft", "created", "agent", "builder"),
+                        ("agent-run", "waiting_human", "agent", "builder")))
+                connection.execute(
+                    "INSERT INTO events(task_id, event_type, payload_json, created_at) "
+                    "VALUES ('agent-run', 'run_config', '{\"routing_mode\":\"bidding\"}', 'now')")
+                connection.execute(
+                    "INSERT INTO events(task_id, event_type, payload_json, created_at) "
+                    "VALUES ('agent-run', 'plan_created', '{\"subtasks\":[]}', 'now')")
+                connection.commit()
+
+            store = SQLiteStore(database)
+            self.assertEqual(store.get_task("squad-draft")["routing_mode"], "squad")
+            self.assertEqual(store.get_task("agent-draft")["routing_mode"], "direct")
+            self.assertEqual(store.get_task("agent-run")["routing_mode"], "direct")
+            self.assertEqual(store.latest_event_payload("agent-run", "run_config"),
+                             {"routing_mode": "direct", "direct_assignee": "builder", "squad": None})
+            self.assertEqual(store.latest_event_payload("agent-run", "plan_created"),
+                             {"goal": "Test issue", "subtasks": []})
+            with closing(sqlite3.connect(database)) as connection, self.assertRaises(sqlite3.IntegrityError):
+                connection.execute("UPDATE tasks SET routing_mode = 'bidding' WHERE id = 'squad-draft'")
+
     def test_empty_directory_is_migrated_and_reopen_is_idempotent(self):
         with tempfile.TemporaryDirectory() as temp:
             database = (
@@ -27,11 +94,11 @@ class SQLiteMigrationTests(unittest.TestCase):
             first = SQLiteStore(database)
 
             self.assertTrue(database.is_file())
-            self.assertEqual(first.schema_version(), 1)
+            self.assertEqual(first.schema_version(), 6)
 
             second = SQLiteStore(database)
 
-            self.assertEqual(second.schema_version(), 1)
+            self.assertEqual(second.schema_version(), 6)
 
             with closing(sqlite3.connect(database)) as connection:
                  rows = connection.execute(
@@ -44,7 +111,7 @@ class SQLiteMigrationTests(unittest.TestCase):
 
             self.assertEqual(
                 rows,
-                [(1, "0001_initial")],
+                [(1, "0001_initial"), (2, "0002_issues"), (3, "0003_routing"), (4, "0004_delegations"), (5, "0005_workbench"), (6, "0006_squad_routing")],
             )
 
     def test_foreign_keys_busy_timeout_and_schema_version(self):
@@ -58,7 +125,7 @@ class SQLiteMigrationTests(unittest.TestCase):
 
             self.assertEqual(settings["foreign_keys"], 1)
             self.assertEqual(settings["busy_timeout"], 4321)
-            self.assertEqual(settings["user_version"], 1)
+            self.assertEqual(settings["user_version"], 6)
 
     def test_connection_is_released_and_directory_can_be_removed(self):
         temp = tempfile.mkdtemp()
@@ -305,9 +372,10 @@ class SQLiteReviewTests(unittest.TestCase):
             child["id"],
         )
 
-        self.assertEqual(child["parent_id"], "t1")
+        self.assertIsNone(child["parent_id"])
+        self.assertEqual(self.store.issue_id(child["id"]), "t1")
         self.assertEqual(child["status"], "created")
-        self.assertEqual(len(children), 1)
+        self.assertEqual(len(children), 0)
 
         with self.assertRaises(ValueError):
             service.revise(
@@ -317,7 +385,7 @@ class SQLiteReviewTests(unittest.TestCase):
 
         self.assertEqual(
             len(self.store.list_children("t1")),
-            1,
+            0,
         )
 
         events = self.store.list_events("t1")

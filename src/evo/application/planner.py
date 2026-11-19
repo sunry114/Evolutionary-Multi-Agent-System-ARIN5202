@@ -35,10 +35,11 @@ class StoredClarificationRequests:
 
 
 class Planner:
-    def __init__(self, provider, agents, approval=None):
+    def __init__(self, provider, agents, approval=None, *, actor=None):
         self.provider = provider
         self.agents = tuple(agents)
         self.approval = approval
+        self.actor = actor
 
     def _clarify(self, question, task_id):
         if self.approval is None or not task_id:
@@ -49,7 +50,8 @@ class Planner:
             raise ValueError("Clarification store did not return a request ID")
         return PlanResult(question=question, request_id=request_id)
 
-    def plan(self, goal, task_id=None, required_inputs=None, *, group_context=None, acceptance=None):
+    def plan(self, goal, task_id=None, required_inputs=None, *, group_context=None, acceptance=None,
+             on_model_call=None):
         if not isinstance(goal, str) or not goal.strip():
             raise ValueError("Goal cannot be empty")
         # Callers can declare inputs that must exist before planning. None,
@@ -68,21 +70,29 @@ class Planner:
         specs = {agent.name: agent.specialty for agent in self.agents}
         inputs = {"goal": goal, "agents": specs, "required_inputs": required_inputs}
         instructions = ""
-        if group_context is not None:
-            inputs.update(group_history=group_context, explicit_checks=acceptance)
-            instructions = (" Use the ordered group discussion as context. Apply the human's confirmed "
-                            "requirements and acceptance criteria relevant to the current goal. Agent "
-                            "proposals need human agreement. Carry decisions into subtask descriptions; "
-                            "ask for clarification if relevant decisions conflict or are insufficient.")
+        verify_acceptance = group_context is not None or acceptance is not None
+        if verify_acceptance:
+            inputs["explicit_checks"] = acceptance
+            if group_context is not None:
+                inputs["group_history"] = group_context
+            if group_context:
+                instructions = (" Use the ordered group discussion as context. Apply the human's confirmed "
+                                "requirements and acceptance criteria relevant to the current goal. Agent "
+                                "proposals need human agreement. Carry decisions into subtask descriptions; "
+                                "ask for clarification if relevant decisions conflict or are insufficient.")
             if acceptance:
                 instructions += " Match the explicit check IDs and delivery criteria."
             else:
                 instructions += (" Return checks keyed by every subtask ID. Each needs path and contains "
-                                 "or exact text drawn from agreed deliverables. Use purpose slides for "
+                                 "or exact text drawn from the user's acceptance criteria. Use purpose slides for "
                                  ".html, code for .py. Ask the human for missing acceptance details.")
+        identity = (f"You are {self.actor.name}, specializing in {self.actor.specialty}. "
+                    if self.actor else "")
+        if on_model_call is not None:
+            on_model_call()
         result = self.provider.complete(
             [{"role": "system", "content":
-              "Decompose the goal into 1 to 5 independently verifiable subtasks. "
+              identity + "Decompose the goal into 1 to 5 independently verifiable subtasks. "
               "Use IDs s1, s2, etc. Dependencies may refer only to earlier IDs. "
               "For a simple artifact use one subtask. A critical input is a "
               "specific artifact, target or constraint needed to produce a "
@@ -118,7 +128,7 @@ class Planner:
             subtasks.append(Subtask(identifier, description, tuple(skills), tuple(dependencies)))
         validate_plan(subtasks)
         checks = {}
-        if group_context is not None:
+        if verify_acceptance:
             try:
                 checks = parse_checks(acceptance or result.get("checks"))
                 if set(checks) != {item.id for item in subtasks}:

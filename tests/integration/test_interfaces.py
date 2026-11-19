@@ -16,17 +16,27 @@ from evo.application.reviews import ReviewService
 
 class CliTests(unittest.TestCase):
     def test_demo_cannot_claim_task_success(self):
+        app = DemoApplication()
         with contextlib.redirect_stdout(io.StringIO()) as output:
-            self.assertEqual(main(["--demo", "run", "write hello.md"]), 1)
+            self.assertEqual(main(["create", "write hello.md", "--squad", "default"], app), 0)
+        issue_id = json.loads(output.getvalue())["task"]["id"]
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(main(["start", issue_id], app), 1)
         self.assertEqual(json.loads(output.getvalue())["status"], "blocked")
 
     def test_missing_application_is_actionable(self):
         with tempfile.TemporaryDirectory() as state, \
                 patch.dict(os.environ, {"EVO_APPLICATION_FACTORY": ""}), \
-                patch("evo.interfaces.execution_factory.load_key", side_effect=ValueError("missing credential")), \
-                contextlib.redirect_stderr(io.StringIO()) as output:
-            self.assertEqual(main(["--state", state, "run", "hello", "--expect-file", "hello.md", "--expect-text", "hello"]), 2)
-        self.assertIn("Execution needs", output.getvalue())
+                patch("evo.interfaces.execution_factory.load_key", side_effect=ValueError("missing credential")):
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(main(["--state", state, "create", "hello", "--agent", "builder"]), 0)
+            issue_id = json.loads(output.getvalue())["task"]["id"]
+            with contextlib.redirect_stderr(io.StringIO()) as error:
+                self.assertEqual(main(["--state", state, "start", issue_id]), 2)
+            self.assertIn("Execution needs", error.getvalue())
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(main(["--state", state, "task", issue_id]), 0)
+            self.assertEqual(json.loads(output.getvalue())["task"]["status"], "created")
 
     def test_commands_map_to_backend(self):
         class App:
@@ -35,13 +45,14 @@ class CliTests(unittest.TestCase):
                 return {"status": "success"}
         app = App()
         commands = [
-            (["run", "Python report", "--no-memory"], "run",
-             {"prompt": "Python report", "no_memory": True}),
+            (["create", "Python report", "--agent", "builder", "--no-memory"], "create",
+             {"prompt": "Python report", "agent": "builder", "no_memory": True, "from_group": False}),
+            (["start", "t1"], "start", {"task_id": "t1"}),
             (["dm", "builder", "hello"], "dm", {"agent": "builder", "message": "hello"}),
-            (["answer", "r1", "--deny"], "answer", {"request_id": "r1", "approved": False}),
+            (["answer", "t1", "r1", "--deny"], "answer", {"task_id": "t1", "request_id": "r1", "approved": False}),
             (["revision", "t1", "fix"], "revision", {"task_id": "t1", "prompt": "fix"}),
             (["eval", "input.jsonl", "--output", "report.json", "--no-memory"], "eval",
-             {"dataset": "input.jsonl", "output": "report.json", "no_memory": True}),
+             {"dataset": "input.jsonl", "output": "report.json", "compare_memory": False, "no_memory": True}),
         ]
         for argv, operation, payload in commands:
             with self.subTest(argv=argv), contextlib.redirect_stdout(io.StringIO()):
@@ -53,7 +64,7 @@ class CliTests(unittest.TestCase):
             def dispatch(self, *args):
                 raise RuntimeError("private-key")
         with contextlib.redirect_stderr(io.StringIO()) as output:
-            self.assertEqual(main(["run", "x"], App()), 2)
+            self.assertEqual(main(["start", "t1"], App()), 2)
         self.assertNotIn("private-key", output.getvalue())
 
 
@@ -95,19 +106,23 @@ class WebTests(unittest.TestCase):
             valid.update(headers)
             if not headers:
                 valid.pop("X-CSRF-Token")
-            status, _ = self.request("POST", "/api/run", '{"prompt":"x"}', valid)
+            status, _ = self.request("POST", "/api/create", '{"prompt":"x","squad":"default"}', valid)
             self.assertEqual(status, 403)
         self.assertEqual(self.app.snapshot()["tasks"], [])
 
     def test_json_and_routes(self):
         headers = self.write_headers()
-        status, _ = self.request("POST", "/api/run", '{"prompt":"hello"}', headers)
+        status, result = self.request("POST", "/api/create", '{"prompt":"hello","squad":"default"}', headers)
         self.assertEqual(status, 200)
         self.assertEqual(len(self.app.snapshot()["tasks"]), 1)
+        issue_id = json.loads(result)["task"]["id"]
+        status, result = self.request("POST", "/api/start", json.dumps({"task_id": issue_id}), headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(result)["task"]["id"], issue_id)
         for body in ("[]", "{broken"):
-            self.assertEqual(self.request("POST", "/api/run", body, headers)[0], 400)
+            self.assertEqual(self.request("POST", "/api/create", body, headers)[0], 400)
         headers["Content-Type"] = "text/plain"
-        self.assertEqual(self.request("POST", "/api/run", "x", headers)[0], 415)
+        self.assertEqual(self.request("POST", "/api/create", "x", headers)[0], 415)
         self.assertEqual(self.request("GET", "/missing")[0], 404)
 
     def test_dns_rebinding_host_and_secret_redaction(self):
@@ -146,7 +161,7 @@ class AtomicReviewRepository:
     def link_revision(self, task_id, *, expected, prompt):
         if self.task["review_status"] != expected:
             raise ValueError("Conflict")
-        child = {"id": "t2", "parent_id": task_id, "prompt": prompt, "status": "created"}
+        child = {"id": "t2", "parent_id": None, "prompt": prompt, "status": "created"}
         self.revisions.append(child)
         self.task.update(review_status="revising", revision_task_id="t2")
         return child
@@ -158,7 +173,7 @@ class ReviewTests(unittest.TestCase):
         ReviewService(repo).decide("t1", "changes_requested", "fix output")
         service = ReviewService(repo)
         child = service.revise("t1", "fix output")
-        self.assertEqual(child["parent_id"], "t1")
+        self.assertIsNone(child["parent_id"])
         self.assertEqual(repo.task["status"], "success")
         with self.assertRaises(ValueError):
             service.revise("t1", "duplicate")

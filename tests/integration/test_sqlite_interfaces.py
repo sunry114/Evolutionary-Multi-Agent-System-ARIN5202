@@ -42,6 +42,24 @@ class SQLiteInterfaceTests(unittest.TestCase):
         with patch.dict(os.environ, {"EVO_APPLICATION_FACTORY": "evo.interfaces.sqlite_application:create_application"}):
             self.assertEqual(len(load_application(self.state).snapshot()["tasks"]), 2)
 
+    def test_reassigning_a_draft_invalidates_a_start_with_the_old_assignment(self):
+        draft = self.app.dispatch("create", {"prompt": "Draft report"})["task"]
+        assigned = self.app.dispatch("assign", {"task_id": draft["id"], "agent": "builder"})
+        self.app.dispatch("assign", {"task_id": draft["id"], "agent": "reviewer"})
+        self.assertFalse(self.app.store.claim_start(draft["id"], {}, expected_updated_at=assigned["updated_at"]))
+        current = self.app.store.get_task(draft["id"])
+        self.assertEqual((current["status"], current["assignee_id"]), ("created", "reviewer"))
+        self.assertIsNone(self.app.store.latest_event_payload(draft["id"], "run_config"))
+
+    def test_owner_filters_distinguish_an_agent_and_squad_with_the_same_name(self):
+        self.app.dispatch("configure", {"agents": [{"name": "reports", "specialty": "Review"}],
+                                        "squad": {"name": "reports", "lead": "reports", "members": ["reports"]}})
+        agent = self.app.dispatch("create", {"prompt": "Agent issue", "agent": "reports"})["task"]
+        squad = self.app.dispatch("create", {"prompt": "Squad issue", "squad": "reports"})["task"]
+        for kind, expected in (("agent", agent), ("squad", squad)):
+            items = self.app.dispatch("tasks", {"owner": "reports", "owner_type": kind})["tasks"]
+            self.assertEqual([item["id"] for item in items], [expected["id"]])
+
     def test_cli_review_trace_and_revision_across_processes(self):
         accepted = self.command("review", "t1", "accepted")
         self.assertEqual(accepted.returncode, 0, accepted.stderr)
@@ -57,7 +75,7 @@ class SQLiteInterfaceTests(unittest.TestCase):
         restored = json.loads(query.stdout)
         self.assertEqual(restored["task"]["status"], "success")
         self.assertEqual(restored["task"]["revision_task_id"], child["id"])
-        self.assertEqual(restored["children"][0]["id"], child["id"])
+        self.assertEqual(restored["runs"][1]["id"], child["id"])
         trace = self.command("trace", "t2")
         self.assertEqual(trace.returncode, 0, trace.stderr)
         self.assertEqual([e["event_type"] for e in json.loads(trace.stdout)["events"]],
@@ -70,7 +88,7 @@ class SQLiteInterfaceTests(unittest.TestCase):
         self.app.dispatch("revision", {"task_id": "t1", "prompt": "fix"})
         with self.assertRaises(ValueError):
             SQLiteApplication(self.state).dispatch("revision", {"task_id": "t1", "prompt": "duplicate"})
-        self.assertEqual(len(self.app.store.list_children("t1")), 1)
+        self.assertEqual(len(self.app.issues.detail("t1")["runs"]), 2)
         self.assertEqual(len(self.app.store.list_events("t1")), 3)
 
     def test_concurrent_revisions_create_only_one_child(self):
@@ -83,7 +101,7 @@ class SQLiteInterfaceTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(revise, range(2)))
         self.assertEqual(sum(result is not None for result in results), 1)
-        self.assertEqual(len(self.app.store.list_children("t1")), 1)
+        self.assertEqual(len(self.app.issues.detail("t1")["runs"]), 2)
 
     def test_invalid_input_and_unknown_task_cannot_write(self):
         for op, payload in (
@@ -114,10 +132,12 @@ class SQLiteInterfaceTests(unittest.TestCase):
                                              kind="approval", payload={"tool": "run_python"})
         snapshot = SQLiteApplication(self.state).snapshot()
         self.assertEqual(len(snapshot["tasks"]), 2)
-        self.assertEqual(snapshot["requests"][0]["id"], "r1")
-        self.assertEqual(snapshot["requests"][0]["payload"], {"tool": "run_python"})
+        self.assertNotIn("requests", snapshot)
+        detail = self.app.dispatch("task", {"task_id": "t1"})
+        self.assertEqual(detail["approvals"][0]["id"], "r1")
+        self.assertEqual(detail["approvals"][0]["payload"], {"tool": "run_python"})
         self.assertTrue(snapshot["capabilities"]["answer"])
-        self.assertTrue(snapshot["capabilities"]["run"])
+        self.assertTrue(snapshot["capabilities"]["start"])
         self.assertTrue(snapshot["capabilities"]["resume"])
 
     def test_task_limit_and_failed_task_query_exit(self):
@@ -183,8 +203,8 @@ class SQLiteInterfaceTests(unittest.TestCase):
         status, state = self.http(new_address, "/api/state")
         self.assertEqual(status, 200)
         parent = next(t for t in json.loads(state)["tasks"] if t["id"] == "t1")
-        self.assertEqual(parent["revision_task_id"], child_id)
-        self.assertEqual(parent["status"], "success")
+        self.assertEqual(parent["current_task_id"], child_id)
+        self.assertEqual(parent["status"], "created")
         status, trace = self.http(new_address, "/api/trace", {"task_id": "t1"}, new_token)
         self.assertEqual(status, 200)
         self.assertIn("revision_linked", trace)
@@ -192,7 +212,7 @@ class SQLiteInterfaceTests(unittest.TestCase):
             {"task_id": "t2", "decision": "accepted"}, token)[0], 403)
         self.assertEqual(self.http(new_address, "/api/revision",
             {"task_id": "t1", "prompt": "duplicate"}, new_token)[0], 409)
-        self.assertEqual(len(self.app.store.list_children("t1")), 1)
+        self.assertEqual(len(self.app.issues.detail("t1")["runs"]), 2)
 
     def test_http_validation_and_unavailable_operations(self):
         _, address = self.start_web()
@@ -201,7 +221,7 @@ class SQLiteInterfaceTests(unittest.TestCase):
             ("review", {"task_id": "missing", "decision": "accepted"}, 409),
             ("review", {"task_id": "t1", "decision": "accepted", "feedback": []}, 409),
             ("revision", {"task_id": "t1", "prompt": " "}, 409),
-            ("run", {"prompt": "x"}, 409), ("answer", {"request_id": "r1", "approved": True}, 409),
+            ("create", {"prompt": " "}, 409), ("run", {"prompt": "x"}, 404), ("answer", {"request_id": "r1", "approved": True}, 409),
         ):
             with self.subTest(op=op):
                 self.assertEqual(self.http(address, "/api/" + op, payload, token)[0], expected)
@@ -213,14 +233,14 @@ class SQLiteInterfaceTests(unittest.TestCase):
         self.app.store.save_task(Task("active", "Approve action", owner="builder", status=TaskStatus.RUNNING))
         request_id = ApprovalService(self.app.store).request_approval(
             "active", "builder", "run_python", {"arguments": {"path": "main.py"}, "sha256": "fixture"})
-        result = self.command("answer", request_id, "--approve")
+        result = self.command("answer", "active", request_id, "--approve")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["status"], "approved")
         restored = SQLiteApplication(self.state)
         self.assertEqual(restored.store.get_approval_request(request_id)["status"], "approved")
         self.assertEqual(restored.store.get_action(request_id)["status"], "requested")
         self.assertEqual(restored.store.get_task("active")["status"], "waiting_human")
-        self.assertNotEqual(self.command("answer", request_id, "--deny").returncode, 0)
+        self.assertNotEqual(self.command("answer", "active", request_id, "--deny").returncode, 0)
 
     def test_http_answers_require_csrf_validate_schema_and_persist_denial(self):
         from evo.application.approvals import ApprovalService
@@ -229,11 +249,11 @@ class SQLiteInterfaceTests(unittest.TestCase):
             "active", "builder", "delete_file", {"arguments": {"path": "report.md"}, "sha256": "fixture"})
         child, address = self.start_web()
         token = self.token(address)
-        self.assertEqual(self.http(address, "/api/answer", {"request_id": request_id, "approved": True})[0], 403)
-        for payload in ({"request_id": request_id, "approved": "true"},
-                        {"request_id": request_id, "approved": True, "answer": "yes"}):
+        self.assertEqual(self.http(address, "/api/answer", {"task_id": "active", "request_id": request_id, "approved": True})[0], 403)
+        for payload in ({"task_id": "active", "request_id": request_id, "approved": "true"},
+                        {"task_id": "active", "request_id": request_id, "approved": True, "answer": "yes"}):
             self.assertEqual(self.http(address, "/api/answer", payload, token)[0], 409)
-        self.assertEqual(self.http(address, "/api/answer", {"request_id": request_id, "approved": False}, token)[0], 200)
+        self.assertEqual(self.http(address, "/api/answer", {"task_id": "active", "request_id": request_id, "approved": False}, token)[0], 200)
         self.stop_web(child)
         restored = SQLiteApplication(self.state)
         self.assertEqual(restored.store.get_task("active")["status"], "blocked")

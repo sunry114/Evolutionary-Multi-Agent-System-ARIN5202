@@ -111,9 +111,9 @@ class C14GatewayTests(unittest.TestCase):
         for call in group_calls:
             self.assertNotIn("Private input", call[1]["content"])
             self.assertNotIn("private task bid", call[1]["content"])
-        snapshot = SQLiteApplication(self.state).snapshot()
-        self.assertEqual(sum(m["kind"] == "group" for m in snapshot["messages"]), 4)
-        self.assertNotIn("private task bid", json.dumps(snapshot))
+        history = SQLiteApplication(self.state).dispatch("messages", {})["messages"]
+        self.assertEqual(sum(m["kind"] == "group" for m in history), 4)
+        self.assertNotIn("private task bid", json.dumps(history))
 
     def test_invalid_chat_never_calls_provider_or_saves(self):
         for op, payload in (
@@ -125,7 +125,7 @@ class C14GatewayTests(unittest.TestCase):
             with self.subTest(op=op), self.assertRaises(ValueError):
                 self.app.dispatch(op, payload)
         self.assertEqual(self.provider.calls, [])
-        self.assertEqual(self.app.snapshot()["messages"], [])
+        self.assertEqual(self.app.dispatch("messages", {})["messages"], [])
 
     def test_missing_key_is_actionable_and_does_not_save_incoming_message(self):
         app = SQLiteApplication(self.state)
@@ -133,7 +133,7 @@ class C14GatewayTests(unittest.TestCase):
             with self.assertRaises(ApplicationUnavailable) as error:
                 app.dispatch("dm", {"agent": "builder", "message": "hello"})
         self.assertNotIn("secret", str(error.exception))
-        self.assertEqual(app.snapshot()["messages"], [])
+        self.assertEqual(app.dispatch("messages", {})["messages"], [])
 
     def test_provider_failure_safe_and_saved_human_message_visible_after_restart(self):
         self.provider.fail = True
@@ -159,17 +159,17 @@ class C14GatewayTests(unittest.TestCase):
             store.save_task(Task(name, name, owner="builder", status=TaskStatus.RUNNING))
         request = self.app.approvals.request_clarification("clarify", "Which file?")
         with self.assertRaises(ValueError):
-            self.app.dispatch("answer", {"request_id": request, "answer": ""})
-        answer = self.app.dispatch("answer", {"request_id": request, "answer": "report.md"})
+            self.app.dispatch("answer", {"task_id": "clarify", "request_id": request, "answer": ""})
+        answer = self.app.dispatch("answer", {"task_id": "clarify", "request_id": request, "answer": "report.md"})
         self.assertEqual(answer["status"], "answered")
         with self.assertRaises(ValueError):
-            self.app.dispatch("answer", {"request_id": request, "answer": "duplicate"})
+            self.app.dispatch("answer", {"task_id": "clarify", "request_id": request, "answer": "duplicate"})
         for task, approved in (("deny", False), ("approve", True), ("stale", True)):
             req = self.app.approvals.request_approval(task, "builder", "delete_file", {"fixture": True})
             if task == "stale":
                 with store._transaction() as conn:
                     conn.execute("UPDATE approval_requests SET created_at='2000-01-01T00:00:00+00:00' WHERE id=?", (req,))
-            result = self.app.dispatch("answer", {"request_id": req, "approved": approved})
+            result = self.app.dispatch("answer", {"task_id": task, "request_id": req, "approved": approved})
             self.assertEqual(result["status"], {"deny": "denied", "approve": "approved", "stale": "expired"}[task])
             self.assertEqual(store.get_action(req)["status"], "requested" if task == "approve" else "blocked")
         restored = SQLiteApplication(self.state)
@@ -180,7 +180,7 @@ class C14GatewayTests(unittest.TestCase):
         snapshot = self.app.snapshot()
         for operation in ("dm", "group", "messages", "answer", "review"):
             self.assertTrue(snapshot["capabilities"][operation])
-        self.assertTrue(snapshot["capabilities"]["run"])
+        self.assertTrue(snapshot["capabilities"]["start"])
         self.assertTrue(snapshot["capabilities"]["eval"])
         for operation in ("memory", "metrics"):
             self.assertTrue(snapshot["capabilities"][operation])

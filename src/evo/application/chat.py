@@ -3,7 +3,7 @@
 import json
 from uuid import uuid4
 
-from evo.domain.models import Agent, Message
+from evo.domain.models import Message
 
 
 class ChatService:
@@ -44,18 +44,15 @@ class ChatService:
                                            reply, self.human))
         return reply
 
-    def group_message(self, content):
+    def group_message(self, content, *, task_id=None):
         if not isinstance(content, str) or not content.strip():
             raise ValueError("Message cannot be empty")
         self.messages.save_message(Message(uuid4().hex, "group", self.human,
-                                           content.strip()))
+                                           content.strip(), task_id=task_id))
         replies = {}
         for agent in self.agents.values():
-            # Task bids and action logs may be group-kind records in old stores.
-            # Only explicit chat messages belong in visible group history.
-            history = [record for record in self.messages.list_group_messages()
-                       if not record.get("task_id")]
+            history = self.messages.list_group_messages(task_id=task_id)
             reply = self._reply(agent, history, group=True)
-            self.messages.save_message(Message(uuid4().hex, "group", agent.name, reply))
+            self.messages.save_message(Message(uuid4().hex, "group", agent.name, reply, task_id=task_id))
             replies[agent.name] = reply
         return replies

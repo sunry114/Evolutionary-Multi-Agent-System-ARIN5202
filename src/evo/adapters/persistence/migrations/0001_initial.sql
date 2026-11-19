@@ -1,8 +1,4 @@
 
-PRAGMA foreign_keys = ON;
-
-BEGIN IMMEDIATE;
-
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
@@ -124,5 +120,3 @@ VALUES (
 );
 
 PRAGMA user_version = 1;
-
-COMMIT;

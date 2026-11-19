@@ -97,6 +97,8 @@ class PlatformToolBroker:
         task = self.repository.get_task(task_id)
         if task["owner"] != self.executor.agent:
             raise HarnessError("Tool task ownership mismatch")
+        if name == "delegate":
+            return self.delegation(task_id, self.executor.agent, **arguments, request_id=request_id)
         if name in CRITICAL_DISPATCH:
             return self.executor.execute(task_id, name, arguments, request_id=request_id)
         if request_id is not None or task["status"] != "running":
@@ -113,21 +115,18 @@ class PlatformToolBroker:
                              "sha256": hashlib.sha256(content.encode()).hexdigest()}
             elif name in ("search", "fetch_url"):
                 value = getattr(self.web, name)(**arguments)
-            elif name == "delegate":
-                value = self.delegation(task_id, **arguments)
             else:
                 method = {"publish_artifact": "publish", "list_artifacts": "list_available", "import_artifact": "import_artifact"}[name]
                 value = getattr(self.artifacts, method)(**arguments)
-                if name == "import_artifact":
+                if name == "publish_artifact":
+                    self.repository.append_event(task_id=task_id, event_type="artifact_published",
+                                                 actor=self.executor.agent, payload={
+                                                     "artifact": asdict(value), "path": arguments["path"],
+                                                     "purpose": value.purpose})
+                elif name == "import_artifact":
                     value = {"path": arguments["destination"], "purpose": value.purpose, "sha256": value.sha256}
-            status = "success"
-            if name == "delegate" and value["status"] != "success":
-                # A child approval cannot be replayed as a fresh delegation.
-                # Surface a stopped parent instead of hiding the child failure.
-                status = "blocked" if value["status"] in ("blocked", "waiting_human") else "failed"
-            self.repository.finish_action(action_id, succeeded=status == "success",
-                                          result={"status": status})
-            return {"status": status, "action_id": action_id, "result": jsonable(value)}
+            self.repository.finish_action(action_id, succeeded=True, result={"status": "success"})
+            return {"status": "success", "action_id": action_id, "result": jsonable(value)}
         except Exception:
             self.repository.finish_action(action_id, succeeded=False, result={"error": "tool_failed"})
             raise HarnessError("Platform tool failed") from None

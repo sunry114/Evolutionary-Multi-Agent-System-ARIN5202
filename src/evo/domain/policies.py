@@ -16,6 +16,7 @@ class Limits:
     max_steps_per_task: int = 20
     max_delegation_depth: int = 2
     max_searches_per_task: int = 3
+    max_assignment_rounds: int = 3
 
 
 DEFAULT_LIMITS = Limits()

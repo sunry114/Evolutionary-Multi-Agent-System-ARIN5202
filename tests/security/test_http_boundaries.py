@@ -58,7 +58,7 @@ class HttpBoundaryTests(unittest.TestCase):
                 headers.pop(name, None)
             else:
                 headers[name] = value
-        wire = "POST /api/run HTTP/1.0\r\n" + "".join(
+        wire = "POST /api/create HTTP/1.0\r\n" + "".join(
             k + ": " + v + "\r\n" for k, v in [*headers.items(), *extra]) + "\r\n"
         with socket.create_connection(("127.0.0.1", self.server.server_port), timeout=3) as connection:
             connection.sendall(wire.encode("latin-1") + body)
@@ -125,4 +125,4 @@ class HttpBoundaryTests(unittest.TestCase):
     def test_valid_utf8_object_with_charset_still_works(self):
         body = json.dumps({"message": "\u4f60\u597d"}, ensure_ascii=False).encode("utf-8")
         self.assertEqual(self.send(body, replacements={"Content-Type": "application/json; charset=utf-8"})[0], 200)
-        self.assertEqual(self.app.calls, [("run", {"message": "\u4f60\u597d"})])
+        self.assertEqual(self.app.calls, [("create", {"message": "\u4f60\u597d"})])

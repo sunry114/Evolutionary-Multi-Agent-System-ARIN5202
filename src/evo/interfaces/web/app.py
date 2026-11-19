@@ -7,7 +7,9 @@ from importlib.resources import files
 from evo.interfaces.gateway import ApplicationFailure, ApplicationUnavailable
 
 MAX_BODY = 65536
-OPERATIONS = {"run", "resume", "agents", "dm", "group", "review", "revision", "answer", "eval", "trace", "metrics", "memory", "task", "tasks", "messages"}
+OPERATIONS = {"create", "start", "resume", "configure", "dm", "group", "review", "revision",
+              "answer", "eval", "trace", "metrics", "memory", "task", "tasks", "messages",
+              "assign", "comment", "artifact"}
 
 
 def unique_object(pairs):
@@ -66,7 +68,10 @@ def make_server(application, port=8768):
             if not self.valid_host():
                 return self.reply(403, {"error": "Invalid Host"})
             if self.path == "/":
-                content = files("evo.interfaces.web").joinpath("assets/index.html").read_text(encoding="utf-8")
+                assets = files("evo.interfaces.web").joinpath("assets")
+                content = assets.joinpath("index.html").read_text(encoding="utf-8")
+                content = content.replace("__STYLES__", assets.joinpath("workbench.css").read_text(encoding="utf-8"))
+                content = content.replace("__SCRIPT__", assets.joinpath("workbench.js").read_text(encoding="utf-8"))
                 return self.reply(200, content.replace("__TOKEN__", token), html=True)
             if self.path == "/api/state":
                 try:

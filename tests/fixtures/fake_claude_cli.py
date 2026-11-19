@@ -9,6 +9,53 @@ import time
 from pathlib import Path
 
 
+def delegation_scenario(prompt):
+    mode = prompt["goal"].splitlines()[0]
+    suffix = "-fails" if mode.endswith("-fails") else ""
+    mode = mode.removesuffix(suffix) if suffix else mode
+    previous = prompt["completed_platform_calls"]
+    with socket.socket(socket.AF_UNIX) as channel:
+        channel.connect(os.environ["FAKE_MCP_SOCKET"])
+        with channel.makefile("rb") as reader:
+            def call(name, **arguments):
+                request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                           "params": {"name": name, "arguments": arguments}}
+                channel.sendall(json.dumps(request).encode() + b"\n")
+                result = json.loads(reader.readline())["result"]
+                assert not result["isError"], result
+                return json.loads(result["content"][0]["text"])
+
+            if mode == "fixture-delegation-evidence":
+                if not any(item["tool"] == "run_python" for item in previous):
+                    call("write_file", path="check.py", purpose="code", content="print('checked')\n")
+                    assert call("run_python", path="check.py")["status"] == "waiting_human"
+                    return
+                value = "unverifiable result" if suffix else "verified evidence"
+                call("write_file", path="evidence.md", content=value)
+            elif mode == "fixture-delegation-dependent":
+                call("write_file", path="followup.md", content="review complete")
+            else:
+                if mode == "fixture-delegation-parent":
+                    arguments = {"agent": "reviewer", "description": "fixture-delegation-review" + suffix,
+                                 "path": "review.md", "contains": "Review: verified evidence"}
+                    output, prefix = "report.md", "Analysis: "
+                else:
+                    assert mode == "fixture-delegation-review"
+                    arguments = {"agent": "collector", "description": "fixture-delegation-evidence" + suffix,
+                                 "path": "evidence.md", "contains": "verified evidence"}
+                    output, prefix = "review.md", "Review: "
+                replies = [item["outcome"] for item in previous if item["tool"] == "delegate"]
+                result = call("delegate", **arguments)
+                if not replies:
+                    assert result["status"] == "waiting_dependency"
+                    return
+                assert result == replies[-1]
+                artifact = result["result"]["artifact"]
+                call("import_artifact", artifact_id=artifact["id"], destination=artifact["name"])
+                content = call("read_file", path=artifact["name"])["result"]
+                call("write_file", path=output, content=prefix + content)
+
+
 def main():
     args = sys.argv[1:]
     session = args[args.index("--session-id") + 1]
@@ -43,6 +90,8 @@ def main():
         print(json.dumps({"type": "system", "subtype": "init", "session_id": session,
                           "mcp_servers": [{"name": "evo", "status": "failed"}]}), flush=True)
     else:
+        if mode.startswith("fixture-delegation-"):
+            delegation_scenario(prompt)
         if mode == "mcp":
             with socket.socket(socket.AF_UNIX) as channel:
                 channel.connect(os.environ["FAKE_MCP_SOCKET"])
