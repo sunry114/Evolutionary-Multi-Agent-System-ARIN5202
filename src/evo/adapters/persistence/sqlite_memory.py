@@ -103,6 +103,10 @@ class SQLiteMemoryStore:
                     """
                 )
 
+                if connection.execute("SELECT MAX(version) FROM memory_schema").fetchone()[0] == 1:
+                    connection.execute("ALTER TABLE experiences ADD COLUMN source_issue_id TEXT")
+                    connection.execute(
+                        "INSERT INTO memory_schema VALUES (2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))")
                 connection.commit()
             except Exception:
                 connection.rollback()
@@ -124,6 +128,9 @@ class SQLiteMemoryStore:
                 or not experience.task.strip() or not experience.lesson.strip()
                 or len(experience.task) > 1000 or len(experience.lesson) > 2000
                 or len(experience.evidence) > 2000
+                or (experience.source_issue_id is not None and (
+                    not isinstance(experience.source_issue_id, str) or not experience.source_issue_id.strip()
+                    or len(experience.source_issue_id) > 110))
                 or (experience.failure_category is not None and (
                     not isinstance(experience.failure_category, str) or len(experience.failure_category) > 100))):
             raise ValueError("Invalid or cross-agent experience")
@@ -131,10 +138,10 @@ class SQLiteMemoryStore:
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 connection.execute(
-                    "INSERT INTO experiences(task,outcome,lesson,evidence,failure_category,created_at) "
-                    "VALUES (?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                    "INSERT INTO experiences(task,outcome,lesson,evidence,failure_category,source_issue_id,created_at) "
+                    "VALUES (?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
                     (experience.task, experience.outcome.value, experience.lesson,
-                     experience.evidence, experience.failure_category),
+                     experience.evidence, experience.failure_category, experience.source_issue_id),
                 )
                 connection.commit()
             except Exception:
@@ -149,21 +156,22 @@ class SQLiteMemoryStore:
             return ()
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT task,outcome,lesson,evidence,failure_category,created_at,id "
+                "SELECT task,outcome,lesson,evidence,failure_category,source_issue_id,id "
                 "FROM experiences ORDER BY id DESC LIMIT 500"
             ).fetchall()
         ranked = []
-        seen = set()
         for row in rows:
-            key = " ".join(row["lesson"].lower().split())
             overlap = len(terms & _terms(row["task"]))
-            if overlap and key not in seen:
-                seen.add(key)
+            if overlap:
                 ranked.append((overlap / len(terms), row["id"], row))
         ranked.sort(key=lambda value: (-value[0], -value[1]))
+        unique = {}
+        for _, _, row in ranked:
+            key = " ".join(row["lesson"].lower().split())
+            unique.setdefault(key, row)
         return tuple(Experience(self.agent, row["task"], TaskStatus(row["outcome"]),
-                                row["lesson"], row["evidence"], row["failure_category"])
-                     for _, _, row in ranked[:limit])
+                                row["lesson"], row["evidence"], row["failure_category"], row["source_issue_id"])
+                     for row in list(unique.values())[:limit])
 
     def adjustment(self, query: str) -> float:
         weights = {TaskStatus.SUCCESS: 0.25, TaskStatus.FAILED: -0.25,
@@ -171,11 +179,11 @@ class SQLiteMemoryStore:
         return max(-0.75, min(0.75, sum(weights[item.outcome] for item in self.recall(query))))
 
     def list_recent(self, limit=20):
-        """Bounded human-facing view; does not recall or adjust agent behavior."""
+        """Bounded human-facing view of a single agent's records."""
         if type(limit) is not int or not 1 <= limit <= 50:
             raise ValueError("Invalid memory list limit")
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT task,outcome,lesson,evidence,failure_category,created_at "
+                "SELECT task,outcome,lesson,evidence,failure_category,source_issue_id,created_at "
                 "FROM experiences ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [dict(row, agent=self.agent) for row in rows]

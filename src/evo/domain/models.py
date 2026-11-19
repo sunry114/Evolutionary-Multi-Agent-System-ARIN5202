@@ -56,6 +56,7 @@ class Experience:
     lesson: str
     evidence: str = ""
     failure_category: Optional[str] = None
+    source_issue_id: Optional[str] = None
 
 
 @dataclass(frozen=True)

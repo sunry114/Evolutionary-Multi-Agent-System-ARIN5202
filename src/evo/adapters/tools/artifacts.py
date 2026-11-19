@@ -45,17 +45,38 @@ class ArtifactExchange:
 
     def publish(self, path: str, recipients: Sequence[str], *,
                 purpose: str = "document") -> Artifact:
+        return self._publish(path, recipients, purpose, uuid.uuid4().hex)
+
+    def publish_verified(self, path, recipient, *, purpose, artifact_id, digest) -> Artifact:
+        """Share the verified snapshot under a stable delegation ID."""
+        if not _ARTIFACT_ID.fullmatch(artifact_id) or not _SHA256.fullmatch(digest):
+            raise PathPolicyError("Invalid verified artifact identity")
+        with _directory(self._root) as root:
+            try:
+                os.stat(artifact_id, dir_fd=root, follow_symlinks=False)
+            except FileNotFoundError:
+                return self._publish(path, [recipient], purpose, artifact_id, digest=digest)
+        artifact = self._load(artifact_id)
+        if (artifact.owner, artifact.name, artifact.purpose, artifact.sha256, artifact.recipients) != (
+                self._workspace.agent, Path(path).name, purpose, digest, (recipient,)):
+            raise PathPolicyError("Verified artifact identity changed")
+        return artifact
+
+    def _publish(self, path, recipients, purpose, artifact_id, *, digest=None):
         recipients = _recipients(recipients)
         data = self._workspace._read_bytes(path, purpose=purpose)
         try:
             data.decode("utf-8")
         except UnicodeError:
             raise PathPolicyError("Artifacts must contain UTF-8 text") from None
-        artifact = Artifact(uuid.uuid4().hex, self._workspace.agent,
+        checksum = hashlib.sha256(data).hexdigest()
+        if digest is not None and checksum != digest:
+            raise PathPolicyError("Artifact changed after verification")
+        artifact = Artifact(artifact_id, self._workspace.agent,
                             Path(path).name, purpose, len(data),
-                            hashlib.sha256(data).hexdigest(), recipients)
+                            checksum, recipients)
         manifest = json.dumps(asdict(artifact), ensure_ascii=False).encode("utf-8")
-        staging = ".evo-publish-" + artifact.id
+        staging = ".evo-publish-" + uuid.uuid4().hex
         with _directory(self._root) as root:
             os.mkdir(staging, mode=0o700, dir_fd=root)
             try:
@@ -125,10 +146,7 @@ class ArtifactExchange:
         validate_file_path(destination, artifact.purpose)
         if Path(destination).suffix.lower() != Path(artifact.name).suffix.lower():
             raise PathPolicyError("Imported files must preserve the artifact suffix")
-        with _directory(self._root / artifact.id) as directory:
-            data = _read_at(directory, "content", MAX_FILE_BYTES)
-        if len(data) != artifact.size or hashlib.sha256(data).hexdigest() != artifact.sha256:
-            raise PathPolicyError("Artifact content failed integrity verification")
+        data = self._content(artifact)
         try:
             data.decode("utf-8")
         except UnicodeError:
@@ -136,3 +154,19 @@ class ArtifactExchange:
         self._workspace._write_bytes(destination, data, purpose=artifact.purpose,
                                      overwrite=False)
         return artifact
+
+    def preview(self, artifact_id: str, digest: str) -> dict:
+        artifact = self._load(artifact_id)
+        self._authorize(artifact)
+        if artifact.sha256 != digest:
+            raise PathPolicyError("Artifact does not match the verified snapshot")
+        data = self._content(artifact)
+        return {"name": artifact.name, "content": data[:65536].decode("utf-8", errors="replace"),
+                "truncated": len(data) > 65536}
+
+    def _content(self, artifact):
+        with _directory(self._root / artifact.id) as directory:
+            data = _read_at(directory, "content", MAX_FILE_BYTES)
+        if len(data) != artifact.size or hashlib.sha256(data).hexdigest() != artifact.sha256:
+            raise PathPolicyError("Artifact content failed integrity verification")
+        return data

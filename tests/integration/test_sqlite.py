@@ -420,11 +420,11 @@ class SQLiteMemoryIsolationTests(unittest.TestCase):
             self.assertTrue(researcher.path.is_file())
             self.assertEqual(
                 builder.schema_version(),
-                1,
+                2,
             )
             self.assertEqual(
                 researcher.schema_version(),
-                1,
+                2,
             )
 
     def test_invalid_agent_identifier_is_rejected(self):

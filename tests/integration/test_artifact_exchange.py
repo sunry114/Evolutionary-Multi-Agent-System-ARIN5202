@@ -182,12 +182,12 @@ class ArtifactExchangeTests(unittest.TestCase):
         store = SQLiteStore(self.root / "events.sqlite3")
         memory = SQLiteMemoryStore(self.root, "alice")
         self.assertEqual(store.schema_version(), 1)
-        self.assertEqual(memory.schema_version(), 1)
+        self.assertEqual(memory.schema_version(), 2)
         self.assertEqual(self.alice.list_files(), ())
         for path in ["../memory.sqlite3", "../../../events.sqlite3", "../../../artifacts/a.md"]:
             with self.subTest(path=path), self.assertRaises(PathPolicyError):
                 self.alice.read_file(path)
         self.alice.write_file("ok.md", "ok")
         self.publisher.publish("ok.md", ["bob"])
-        self.assertEqual(memory.schema_version(), 1)
+        self.assertEqual(memory.schema_version(), 2)
         self.assertEqual(store.schema_version(), 1)
