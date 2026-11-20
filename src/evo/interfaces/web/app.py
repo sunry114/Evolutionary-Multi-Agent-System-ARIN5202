@@ -1,6 +1,7 @@
 """Loopback-only server. Backend side effects remain behind ApplicationGateway."""
 import json
 import os
+import re
 import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
@@ -41,13 +42,15 @@ def redact(value):
     return value
 
 
-def make_server(application, port=8768):
+def make_server(application, port=8768, *, application_factory=None, attached_workspaces=()):
     from evo.interfaces.sqlite_application import SQLiteApplication
-    from evo.interfaces.workbench import Workbench
+    from evo.interfaces.web.workspaces import Workspaces
 
-    workbench = Workbench(application) if isinstance(application, SQLiteApplication) else None
-    if workbench:
-        application = workbench
+    workspaces = None
+    if isinstance(application, SQLiteApplication):
+        workspaces = Workspaces(application, application_factory or SQLiteApplication, attached_workspaces)
+    elif attached_workspaces:
+        raise ApplicationUnavailable("Attaching workspaces requires the local SQLite application.")
     token = secrets.token_urlsafe(32)
 
     class Handler(BaseHTTPRequestHandler):
@@ -71,18 +74,35 @@ def make_server(application, port=8768):
         def valid_host(self):
             return self.headers.get_all("Host", []) == [self.server.authority]
 
+        def workspace_route(self):
+            if self.path.startswith("/w/"):
+                match = re.fullmatch(r"/w/([0-9a-f]{32})(/.*)", self.path)
+                if match and workspaces is not None:
+                    workspace_id, path = match.groups()
+                    return workspaces.get(workspace_id), path
+                return None, self.path
+            return workspaces.get("default") if workspaces is not None else application, self.path
+
         def do_GET(self):
             if not self.valid_host():
                 return self.reply(403, {"error": "Invalid Host"})
-            if self.path == "/":
+            if self.path == "/api/workspaces" and workspaces is not None:
+                return self.reply(200, workspaces.snapshot())
+            target, path = self.workspace_route()
+            if target is None:
+                return self.reply(404, {"error": "Workspace not found"})
+            if path == "/":
                 assets = files("evo.interfaces.web").joinpath("assets")
                 content = assets.joinpath("index.html").read_text(encoding="utf-8")
-                content = content.replace("__STYLES__", assets.joinpath("workbench.css").read_text(encoding="utf-8"))
-                content = content.replace("__SCRIPT__", assets.joinpath("workbench.js").read_text(encoding="utf-8"))
+                content = content.replace("<body data-local-template>", "<body>")
+                content = content.replace("/* __STYLES__ */", assets.joinpath("workbench.css").read_text(encoding="utf-8"))
+                content = content.replace("/* __MARKDOWN_IT__ */",
+                                          assets.joinpath("markdown-it.min.js").read_text(encoding="utf-8"))
+                content = content.replace("/* __SCRIPT__ */", assets.joinpath("workbench.js").read_text(encoding="utf-8"))
                 return self.reply(200, content.replace("__TOKEN__", token), html=True)
-            if self.path == "/api/state":
+            if path == "/api/state":
                 try:
-                    return self.reply(200, application.snapshot())
+                    return self.reply(200, target.snapshot())
                 except Exception:
                     return self.reply(500, {"error": "Unable to read application state"})
             return self.reply(404, {"error": "Not found"})
@@ -117,11 +137,15 @@ def make_server(application, port=8768):
                 return self.reply(408, {"error": "Request body read timed out"})
             except (ValueError, UnicodeError, RecursionError):
                 return self.reply(400, {"error": "JSON object required"})
-            operation = self.path.removeprefix("/api/") if self.path.startswith("/api/") else ""
-            if operation not in OPERATIONS:
+            target, path = self.workspace_route()
+            if target is None:
+                return self.reply(404, {"error": "Workspace not found"})
+            operation = path.removeprefix("/api/") if path.startswith("/api/") else ""
+            creating_workspace = self.path == "/api/new-workspace" and workspaces is not None
+            if not creating_workspace and operation not in OPERATIONS:
                 return self.reply(404, {"error": "Unknown operation"})
             try:
-                result = application.dispatch(operation, payload)
+                result = workspaces.create(payload) if creating_workspace else target.dispatch(operation, payload)
                 return self.reply(200, result)
             except ApplicationUnavailable as error:
                 return self.reply(503, {"error": str(error)})
@@ -138,8 +162,8 @@ def make_server(application, port=8768):
         daemon_threads = True
 
         def serve_forever(self, poll_interval=0.5):
-            if workbench:
-                with workbench.worker():
+            if workspaces is not None:
+                with workspaces.worker():
                     return super().serve_forever(poll_interval)
             return super().serve_forever(poll_interval)
 
@@ -153,8 +177,9 @@ def make_server(application, port=8768):
     return server
 
 
-def serve(application, port=8768):
-    with make_server(application, port) as server:
+def serve(application, port=8768, *, application_factory=None, attached_workspaces=()):
+    with make_server(application, port, application_factory=application_factory,
+                     attached_workspaces=attached_workspaces) as server:
         print("Open http://" + server.authority, flush=True)
         try:
             server.serve_forever()

@@ -100,6 +100,8 @@ def parser(*, assessment=False):
         choice.add_argument("--text")
     command = commands.add_parser("web")
     command.add_argument("--port", type=int, default=8768)
+    command.add_argument("--attach-workspace", nargs=2, action="append", default=[], metavar=("NAME", "STATE"),
+                         help="Register an existing workspace directory by name")
     command = commands.add_parser("setup-key", aliases=["setup-hkgai-key"])
     command.add_argument("--provider", choices=("hkgai", "deepseek"), default="hkgai")
     commands.add_parser("provider-info", help="Validate and display non-secret provider settings (offline)")
@@ -146,7 +148,8 @@ def main(argv=None, application=None):
             from evo.interfaces.web.app import serve
             if not 0 <= args.port <= 65535:
                 raise ValueError("Invalid port")
-            serve(app, args.port)
+            serve(app, args.port, application_factory=None if application is not None else load_application,
+                  attached_workspaces=args.attach_workspace)
             return 0
         if application is None and not args.demo:
             from evo.interfaces.sqlite_application import SQLiteApplication

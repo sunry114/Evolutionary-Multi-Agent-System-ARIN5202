@@ -12,9 +12,11 @@ class ScriptedProvider:
     def __init__(self, *results):
         self.results = list(results)
         self.calls = []
+        self.requested_json = []
 
     def complete(self, messages, json_object=False):
         self.calls.append(messages)
+        self.requested_json.append(json_object)
         return self.results.pop(0)
 
 
@@ -48,6 +50,16 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(builder["latest_message"], {"sender": "human", "content": "你好，帮我看看刚才的讨论"})
         self.assertEqual(builder["history"], [{"sender": "human", "content": "讨论构建报告"}])
         self.assertEqual(reviewer["history"], builder["history"] + [{"sender": "builder", "content": "builder reply"}])
+
+    def test_group_accepts_markdown_replies_without_requesting_json(self):
+        prompt = 'Please review the "meeting room" task.'
+        replies = ['**Plan**\n\nI can build it.', 'I will check the `booking` flow.']
+        provider = ScriptedProvider(*replies)
+        service = ChatService(provider, self.store, self.agents)
+
+        self.assertEqual(service.group_message(prompt), dict(zip(("builder", "reviewer"), replies)))
+        self.assertEqual(provider.requested_json, [False, False])
+        self.assertEqual([row["content"] for row in self.store.list_group_messages()], [prompt, *replies])
 
     def test_standalone_greetings_do_not_include_history_or_issue_instructions(self):
         agents = (Agent("captain", "Nominate analyst immediately"), Agent("analyst", "Write report.md now"))

@@ -2,6 +2,8 @@
 
 const el = id => document.getElementById(id);
 const token = document.querySelector('meta[name="csrf-token"]').content;
+const workspaceId = location.pathname.split("/")[2] || "default";
+const apiBase = location.pathname + "api/";
 const laneNames = {
   backlog: "待办池", todo: "待处理", in_progress: "进行中", in_review: "待审查",
   blocked: "已阻塞", done: "已完成", cancelled: "已取消",
@@ -26,6 +28,10 @@ const eventNames = {
 };
 const state = {workspace: null, detail: null, issues: [], tab: "discussion", generation: 0,
   chats: [], groups: [], chatKey: null, messages: [], drafts: new Map(), pending: new Map(), chatErrors: new Map()};
+const markdown = window.markdownit?.({html: false, linkify: true});
+const markdownTags = new Set(["p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "ul", "ol", "li", "hr",
+  "strong", "em", "s", "a", "table", "thead", "tbody", "tr", "th", "td"]);
+if (markdown) markdown.validateLink = href => Boolean(markdownUrl(href));
 
 function node(tag, value, parent, className) {
   const item = document.createElement(tag);
@@ -33,6 +39,76 @@ function node(tag, value, parent, className) {
   if (value !== undefined && value !== null) item.textContent = String(value);
   if (parent) parent.append(item);
   return item;
+}
+
+function markdownUrl(href) {
+  try {
+    const url = new URL(href, document.baseURI);
+    return ["http:", "https:", "mailto:"].includes(url.protocol) ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+function markdownAttributes(element, part) {
+  if (part.tag === "a") {
+    const href = part.attrGet("href");
+    const url = markdownUrl(href);
+    if (!url) return;
+    element.setAttribute("href", href);
+    const title = part.attrGet("title");
+    if (title) element.title = title;
+    if (url.protocol !== "mailto:" && url.origin !== location.origin) {
+      element.target = "_blank";
+      element.rel = "noopener noreferrer";
+    }
+  } else if (part.tag === "ol") {
+    element.start = Number(part.attrGet("start") || 1);
+  } else if (part.tag === "td" || part.tag === "th") {
+    const alignment = part.attrGet("style")?.match(/^text-align:(left|center|right)$/)?.[1];
+    if (alignment) element.dataset.align = alignment;
+  }
+}
+
+function appendMarkdown(parent, parts) {
+  const open = [parent];
+  for (const part of parts) {
+    if (part.hidden) continue;
+    const target = open[open.length - 1];
+    switch (part.type) {
+      case "inline": appendMarkdown(target, part.children); break;
+      case "softbreak":
+      case "hardbreak": node("br", null, target); break;
+      case "image": target.append(markdown.renderer.renderInlineAsText(part.children, markdown.options, {})); break;
+      case "code_inline": node("code", part.content, target); break;
+      case "fence":
+      case "code_block": node("code", part.content, node("pre", null, target)); break;
+      default: {
+        if (!markdownTags.has(part.tag)) {
+          if (part.content) target.append(part.content);
+          break;
+        }
+        if (part.nesting === -1) {
+          open.pop();
+          break;
+        }
+        const wrap = part.tag === "table" ? node("div", null, target, "markdown-table") : target;
+        const element = node(part.tag, null, wrap);
+        markdownAttributes(element, part);
+        if (part.nesting === 1) open.push(element);
+      }
+    }
+  }
+}
+
+function markdownMessage(parent, content, className) {
+  if (!content) return;
+  if (!markdown) {
+    node("div", content, parent, className);
+    return;
+  }
+  const body = node("div", null, parent, className + " markdown-body");
+  appendMarkdown(body, markdown.parse(content, {}));
 }
 
 function button(parent, label, click, style = "") {
@@ -73,8 +149,8 @@ function notice(message = "", error = false) {
   item.hidden = !message;
 }
 
-async function api(operation, payload) {
-  const response = await fetch("/api/" + operation, {
+async function api(operation, payload, base = apiBase) {
+  const response = await fetch(base + operation, {
     method: "POST", headers: {"Content-Type": "application/json", "X-CSRF-Token": token},
     body: JSON.stringify(payload),
   });
@@ -306,8 +382,9 @@ function discussion(panel, detail) {
   if (!detail.messages.length) empty(feed, "还没有讨论");
   for (const item of detail.messages) {
     const title = {group: "群聊", comment: "评论", agent: "委派消息"}[item.kind];
-    feedItem(feed, item.sender === "human" ? "你" : item.sender,
-      [title, when(item.created_at)].filter(Boolean).join(" · "), item.content);
+    const card = feedItem(feed, item.sender === "human" ? "你" : item.sender,
+      [title, when(item.created_at)].filter(Boolean).join(" · "));
+    markdownMessage(card, item.content, "feed-content");
   }
   const form = node("form", "", panel, "stack");
   const message = field(form, "工单讨论", "textarea", "message");
@@ -337,7 +414,8 @@ function logs(panel, detail) {
   const executions = node("div", "", panel, "feed");
   for (const run of detail.executions || []) {
     const card = feedItem(executions, `${run.agent} · ${runNames[run.status]}`,
-      [runKinds[run.kind], when(run.created_at), run.retry_of ? "重试" : ""].filter(Boolean).join(" · "), run.result);
+      [runKinds[run.kind], when(run.created_at), run.retry_of ? "重试" : ""].filter(Boolean).join(" · "));
+    markdownMessage(card, run.result, "feed-content");
     const controls = node("div", "", card, "form-actions");
     const payload = {task_id: detail.issue.id, run_id: run.id};
     if (["queued", "running"].includes(run.status)) {
@@ -424,6 +502,10 @@ const squadMembers = el("squad-members");
 const agentDialog = el("agent-dialog");
 const agentForm = el("agent-form");
 const agentEditFields = el("agent-edit-fields");
+const rosterDialog = el("roster-dialog");
+const rosterForm = el("roster-form");
+const rosterFields = el("roster-fields");
+const rosterRows = el("roster-rows");
 
 function configFeedback(id, message = "", error = false) {
   const feedback = el(id);
@@ -431,6 +513,99 @@ function configFeedback(id, message = "", error = false) {
   feedback.classList.toggle("form-error", error);
   feedback.hidden = !message;
 }
+
+function workspaceUrl(id, view) {
+  const base = id === "default" ? "/" : "/w/" + encodeURIComponent(id) + "/";
+  return base + "#" + view;
+}
+
+const workspaceMenu = el("workspace-menu");
+const workspaceSwitch = el("workspace-switch");
+let workspaceChoices = [];
+
+function renderWorkspaceChoices() {
+  const list = el("workspace-list");
+  list.replaceChildren();
+  const view = ["chat", "workspace"].includes(route().view) ? route().view : "issues";
+  for (const workspace of workspaceChoices) {
+    const choice = link(list, "", workspaceUrl(workspace.id, view));
+    choice.className = "workspace-choice";
+    node("span", Array.from(workspace.name)[0].toUpperCase(), choice, "workspace-mark").setAttribute("aria-hidden", "true");
+    node("span", workspace.name, choice);
+    if (workspace.id === workspaceId) {
+      choice.setAttribute("aria-current", "true");
+      node("span", "✓", choice).setAttribute("aria-hidden", "true");
+      choice.onclick = event => {
+        event.preventDefault();
+        workspaceMenu.open = false;
+        workspaceSwitch.focus();
+      };
+      el("workspace-mark").textContent = Array.from(workspace.name)[0].toUpperCase();
+      el("workspace-name").textContent = workspace.name;
+      workspaceSwitch.title = workspace.name;
+    }
+  }
+}
+
+async function loadWorkspaces() {
+  try {
+    const response = await fetch("/api/workspaces");
+    if (!response.ok) return;
+    const {workspaces} = await response.json();
+    if (JSON.stringify(workspaceChoices) !== JSON.stringify(workspaces)) {
+      workspaceChoices = workspaces;
+      renderWorkspaceChoices();
+    }
+    workspaceMenu.hidden = false;
+  } catch {
+    // Workspace data routes are independent of the workspace selector.
+  }
+}
+
+workspaceMenu.ontoggle = () => {
+  if (workspaceMenu.open) {
+    renderWorkspaceChoices();
+    void loadWorkspaces();
+  }
+};
+document.addEventListener("click", event => {
+  if (workspaceMenu.open && !workspaceMenu.contains(event.target)) workspaceMenu.open = false;
+});
+workspaceMenu.onkeydown = event => {
+  if (event.key === "Escape" && workspaceMenu.open) {
+    event.preventDefault();
+    workspaceMenu.open = false;
+    workspaceSwitch.focus();
+  }
+};
+
+const workspaceDialog = el("workspace-dialog");
+const workspaceForm = el("workspace-form");
+const workspaceSubmit = workspaceForm.querySelector("button[type=submit]");
+el("new-workspace").onclick = () => {
+  workspaceMenu.open = false;
+  workspaceForm.reset();
+  configFeedback("workspace-create-error");
+  workspaceDialog.showModal();
+};
+el("close-workspace").onclick = () => workspaceDialog.close();
+workspaceDialog.oncancel = event => {
+  if (workspaceSubmit.disabled) event.preventDefault();
+};
+workspaceForm.onsubmit = async event => {
+  event.preventDefault();
+  if (workspaceSubmit.disabled) return;
+  const name = workspaceForm.elements.name.value.trim();
+  workspaceSubmit.disabled = el("close-workspace").disabled = true;
+  configFeedback("workspace-create-error");
+  try {
+    const {workspace} = await api("new-workspace", {name}, "/api/");
+    location.assign(workspaceUrl(workspace.id, "workspace"));
+  } catch (error) {
+    configFeedback("workspace-create-error", error.message, true);
+    workspaceSubmit.disabled = el("close-workspace").disabled = false;
+  }
+};
 
 function syncSquadLead() {
   for (const checkbox of squadMembers.querySelectorAll("input")) {
@@ -471,6 +646,7 @@ function renderAgentProfiles() {
   const {agents, agent_details: roles, capabilities} = state.workspace;
   const list = el("agent-profiles");
   list.replaceChildren();
+  el("manage-agents").disabled = capabilities?.configure === false || !roles?.length;
   for (const agent of roles || agents.map(name => ({name, specialty: ""}))) {
     const row = node("li", "", list, "agent-profile");
     avatar(row, agent.name);
@@ -490,6 +666,68 @@ function renderAgentProfiles() {
     edit.disabled = capabilities?.configure === false;
   }
 }
+
+function updateRosterControls() {
+  el("add-agent").disabled = rosterRows.children.length >= 8;
+  for (const remove of rosterRows.querySelectorAll("button")) remove.disabled = rosterRows.children.length <= 1;
+}
+
+function addRosterRow(agent = {name: "", specialty: ""}) {
+  const row = node("div", "", rosterRows, "agent-editor");
+  const header = node("div", "", row, "agent-editor-title");
+  const name = node("input", "", node("label", "Agent 名称", header));
+  name.name = "name";
+  name.maxLength = 64;
+  name.pattern = "[A-Za-z0-9_\\-]{1,64}";
+  name.required = true;
+  name.value = agent.name;
+  button(header, "移除", () => {
+    row.remove();
+    updateRosterControls();
+    el("add-agent").focus();
+  }, "quiet");
+  const specialty = node("textarea", "", node("label", "专长", row));
+  specialty.name = "specialty";
+  specialty.rows = 2;
+  specialty.maxLength = 1000;
+  specialty.required = true;
+  specialty.value = agent.specialty;
+  updateRosterControls();
+  return name;
+}
+
+el("manage-agents").onclick = () => {
+  rosterRows.replaceChildren();
+  for (const agent of state.workspace.agent_details) addRosterRow(agent);
+  configFeedback("roster-error");
+  rosterDialog.showModal();
+};
+el("add-agent").onclick = () => addRosterRow().focus();
+el("close-roster").onclick = () => rosterDialog.close();
+rosterDialog.oncancel = event => {
+  if (rosterFields.disabled) event.preventDefault();
+};
+rosterForm.onsubmit = async event => {
+  event.preventDefault();
+  if (rosterFields.disabled) return;
+  const agents = [...rosterRows.children].map(row => ({
+    name: row.querySelector("input").value.trim(),
+    specialty: row.querySelector("textarea").value.trim(),
+  }));
+  rosterFields.disabled = el("close-roster").disabled = true;
+  configFeedback("roster-error");
+  try {
+    await api("configure", {agents});
+    rosterDialog.close();
+    await load();
+    configFeedback("agent-feedback", "Agent 配置已保存");
+    el("manage-agents").focus();
+  } catch (error) {
+    configFeedback("roster-error", error.message, true);
+  } finally {
+    rosterFields.disabled = el("close-roster").disabled = false;
+  }
+};
 
 function renderWorkspace() {
   const {agents, capabilities} = state.workspace;
@@ -553,7 +791,7 @@ function chatMessage(parent, message) {
   if (message.created_at) {
     node("time", when(message.created_at), meta).dateTime = message.created_at;
   }
-  node("p", message.content, body, "chat-bubble");
+  markdownMessage(body, message.content, "chat-bubble");
 }
 
 function hasPosted(messages, pending) {
@@ -622,8 +860,8 @@ async function load() {
   el("detail-view").hidden = !detail;
   el("workspace-view").hidden = !workspace;
   el("chat-view").hidden = !chatting;
-  el("topbar").hidden = chatting;
-  el("new-issue").hidden = workspace;
+  el("breadcrumb").hidden = chatting;
+  el("new-issue").hidden = workspace || chatting;
   el("section-nav").hidden = workspace;
   el("chat-navigation").hidden = !chatting;
   el("issue-navigation").hidden = chatting;
@@ -651,7 +889,7 @@ async function load() {
     empty(el("issue-panel"), "正在读取工单");
   }
   try {
-    const shell = await fetch("/api/state");
+    const shell = await fetch(apiBase + "state");
     if (!shell.ok) throw Error("无法读取工作区");
     const summary = await shell.json();
     if (generation !== state.generation) return;
@@ -710,7 +948,7 @@ el("owner-filter").onchange = event => {
 };
 el("search").oninput = renderList;
 el("status-filter").onchange = renderList;
-el("refresh").onclick = () => { notice(); void load(); };
+el("refresh").onclick = () => { notice(); void load(); void loadWorkspaces(); };
 window.addEventListener("hashchange", () => {
   state.tab = "discussion";
   notice();
@@ -976,3 +1214,4 @@ window.setInterval(async () => {
   } finally { polling = false; }
 }, 750);
 void load();
+void loadWorkspaces();

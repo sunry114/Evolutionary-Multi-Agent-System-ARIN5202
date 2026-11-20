@@ -5,13 +5,47 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="__TOKEN__">
   <title>Evo · 协作工作台</title>
-  <style nonce="__TOKEN__">__STYLES__</style>
+  <style nonce="__TOKEN__">
+    body[data-local-template] {
+      display: grid; place-items: center; min-height: 100vh; margin: 0;
+      background: #f5f5fa; color: #232235; font: 16px/1.6 system-ui, sans-serif;
+    }
+    body[data-local-template] > .shell, body:not([data-local-template]) > #local-launch { display: none; }
+    #local-launch {
+      width: min(420px, calc(100% - 32px)); box-sizing: border-box; padding: 28px;
+      background: #fff; border: 1px solid #e5e3ee; border-radius: 12px;
+    }
+    #local-launch h1 { margin: 0; font-size: 24px; }
+    #local-launch p { margin: 8px 0 18px; color: #686579; }
+    #local-launch a {
+      display: inline-block; padding: 8px 14px; border-radius: 8px;
+      background: #5141a1; color: #fff; font-weight: 600; text-decoration: none;
+    }
+    #local-launch a:focus-visible { outline: 3px solid #a698e9; outline-offset: 3px; }
+  </style>
+  <style nonce="__TOKEN__">/* __STYLES__ */</style>
 </head>
-<body>
+<body data-local-template>
+  <main id="local-launch">
+    <h1>Evo 工作台</h1>
+    <p>启动 Web 服务后打开工作台。如果使用了其他端口，请打开启动终端显示的地址。</p>
+    <a href="http://127.0.0.1:8769/">打开本地工作台</a>
+  </main>
   <div class="shell">
     <aside class="sidebar">
       <a class="brand" href="#issues" aria-label="Evo 工作台"><span class="brand-mark" aria-hidden="true">E</span></a>
       <nav aria-label="主导航" class="nav">
+        <details class="workspace-menu" id="workspace-menu" hidden>
+          <summary id="workspace-switch" aria-label="切换工作区" aria-describedby="workspace-name">
+            <span id="workspace-mark" class="workspace-mark" aria-hidden="true"></span>
+            <strong id="workspace-name"></strong>
+            <span class="workspace-chevron" aria-hidden="true"></span>
+          </summary>
+          <div class="workspace-menu-panel">
+            <nav id="workspace-list" aria-label="工作区列表"></nav>
+            <button class="button quiet" id="new-workspace" type="button"><span aria-hidden="true">＋</span> 新建工作区</button>
+          </div>
+        </details>
         <a href="#chat" data-route="chat"><span class="rail-icon chat-icon" aria-hidden="true"></span>聊天</a>
         <a href="#issues" data-route="issues"><span class="rail-icon issues-icon" aria-hidden="true"></span>工单</a>
         <a href="#workspace" data-route="workspace"><span class="rail-icon workspace-icon" aria-hidden="true">⚙</span>工作区</a>
@@ -46,7 +80,7 @@
 
     <main tabindex="-1">
       <header class="topbar" id="topbar">
-        <div class="crumb" id="breadcrumb"><span>工作台</span><span aria-hidden="true">/</span><strong>工单</strong></div>
+        <div class="crumb" id="breadcrumb"><strong>工单</strong></div>
         <div class="top-actions">
           <button class="button quiet" id="refresh" type="button">刷新</button>
           <button class="button primary" id="new-issue" type="button"><span aria-hidden="true">＋</span> 新建工单</button>
@@ -119,7 +153,10 @@
             </form>
           </section>
           <section class="card setting workspace-setting" aria-labelledby="agent-settings-title">
-            <h2 id="agent-settings-title">Agent 专长</h2>
+            <div class="section-heading">
+              <h2 id="agent-settings-title">Agent 专长</h2>
+              <button class="button quiet" id="manage-agents" type="button">管理 Agent</button>
+            </div>
             <ul id="agent-profiles" class="agent-profiles"></ul>
             <p id="agent-feedback" class="config-feedback" role="status" hidden></p>
           </section>
@@ -148,6 +185,33 @@
       </section>
     </main>
   </div>
+
+  <dialog id="workspace-dialog" aria-labelledby="new-workspace-title">
+    <form id="workspace-form" class="stack">
+      <div class="dialog-header">
+        <h2 id="new-workspace-title">新建工作区</h2>
+        <button class="button quiet" id="close-workspace" type="button" aria-label="关闭新建工作区">×</button>
+      </div>
+      <label>工作区名称<input name="name" type="text" maxlength="64" required autofocus></label>
+      <p id="workspace-create-error" class="form-error" role="alert" hidden></p>
+      <div class="form-actions"><button class="button primary" type="submit">创建工作区</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="roster-dialog" aria-labelledby="roster-title">
+    <form id="roster-form" class="stack">
+      <div class="dialog-header">
+        <h2 id="roster-title">管理 Agent</h2>
+        <button class="button quiet" id="close-roster" type="button" aria-label="关闭 Agent 管理">×</button>
+      </div>
+      <fieldset id="roster-fields" class="stack settings-fields">
+        <div id="roster-rows" class="stack"></div>
+        <button class="button quiet" id="add-agent" type="button"><span aria-hidden="true">＋</span> 添加 Agent</button>
+        <p id="roster-error" class="form-error" role="alert" hidden></p>
+        <div class="form-actions"><button class="button primary" type="submit">保存 Agent</button></div>
+      </fieldset>
+    </form>
+  </dialog>
 
   <dialog id="create-dialog" aria-labelledby="create-title">
     <form id="create-form" class="stack">
@@ -198,6 +262,7 @@
       </fieldset>
     </form>
   </dialog>
-  <script nonce="__TOKEN__">__SCRIPT__</script>
+  <script nonce="__TOKEN__">/* __MARKDOWN_IT__ */</script>
+  <script nonce="__TOKEN__">/* __SCRIPT__ */</script>
 </body>
 </html>

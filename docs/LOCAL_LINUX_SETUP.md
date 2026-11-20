@@ -10,6 +10,17 @@ bash scripts/start_linux.sh 8769
 
 浏览器地址为 <http://127.0.0.1:8769>。启动脚本使用非 root Linux 用户。WSL 用户可在 Linux 终端中执行相同命令。
 
+## 创建和切换工作区
+
+点击一级导航中的工作区名称，可以切换到其他工作区或新建工作区。现有数据继续显示在「默认工作区」。每个工作区独立保存 Agent、小队、聊天、工单和运行记录，可在「工作区」的「管理 Agent」中设置成员。
+
+已有独立的 SQLite 工作区可以在启动 Web 时登记。登记后使用同一个状态目录启动即可，原数据目录需要保留。请先关闭正在使用该目录的旧 Web 实例。
+
+```bash
+.venv/bin/python -m evo --state .evo/local-workbench web --port 8769 \
+  --attach-workspace "软件工程" .evo/midtest/scenario_1
+```
+
 ## 模型和执行器
 
 课程后端支持 HKGAI 和 DeepSeek。在同一终端选择提供方，并按隐藏提示保存密钥：

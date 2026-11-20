@@ -45,8 +45,10 @@ class ChatService:
             "latest_message. Use the language of their message unless they ask otherwise. Omit speaker labels. "
             "Do not repeat the user's message as a preamble or write dialogue for the user or other agents. "
             "This chat has no execution tools. Do not claim to run tasks, delegate work, or read or write files. "
-            'Return only a JSON object with a nonempty "reply" string.'
+            "Return your reply directly as Markdown."
         )
+        if group:
+            instructions += " Keep your group reply brief."
         context = {"latest_message": {"sender": message.sender, "content": message.content}}
         if greeting:
             instructions += (
@@ -63,13 +65,14 @@ class ChatService:
                 {"sender": row["sender"], "content": row["content"]}
                 for row in history if row["id"] != message.id
             ]
-        result = self.provider.complete(
+        reply = self.provider.complete(
             [{"role": "system", "content": instructions},
-             {"role": "user", "content": json.dumps(context, ensure_ascii=False)}],
-            json_object=True)
-        if not isinstance(result, dict) or not isinstance(result.get("reply"), str):
+             {"role": "user", "content": json.dumps(context, ensure_ascii=False)}])
+        if isinstance(reply, dict):  # Preserve structured replies from injected providers.
+            reply = reply.get("reply")
+        if not isinstance(reply, str):
             raise ValueError("Agent returned an invalid chat reply")
-        reply = result["reply"].strip()
+        reply = reply.strip()
         if not reply:
             raise ValueError("Agent returned an empty chat reply")
         return reply[:2000 if group else 4000]

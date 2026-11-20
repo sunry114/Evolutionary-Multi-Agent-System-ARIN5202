@@ -45,7 +45,7 @@ class FixtureHarness(BaselineHarnessAdapter):
             if request.agent == "reviewer" and run["kind"] == "mention":
                 return "success", "已独立核对证据", "", 0
             self._call(control, request, "write_file", {"path": "report.md", "content": "verified local report"})
-            return "success", "已完成本轮执行", "", 0
+            return "success", "**已完成本轮执行**", "", 0
         revised = "Review feedback:" in request.prompt
         prepare = []
         if not revised:

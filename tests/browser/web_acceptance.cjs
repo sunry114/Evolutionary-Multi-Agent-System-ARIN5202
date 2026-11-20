@@ -51,7 +51,7 @@ async function stop() {
 async function post(page, operation, payload) {
   return page.evaluate(async ({operation, payload}) => {
     const token = document.querySelector('meta[name=csrf-token]').content;
-    const response = await fetch('/api/' + operation, {method: 'POST',
+    const response = await fetch(location.pathname + 'api/' + operation, {method: 'POST',
       headers: {'Content-Type': 'application/json', 'X-CSRF-Token': token}, body: JSON.stringify(payload)});
     return {status: response.status, body: await response.json()};
   }, {operation, payload});
@@ -79,6 +79,22 @@ async function openIssue(page, id, title, url) {
   await page.getByRole('heading', {name: title, exact: true}).waitFor();
 }
 
+async function checkMarkdown(body, rawHtml) {
+  await body.getByRole('heading', {name: 'Markdown 验收'}).waitFor();
+  assert.equal(await body.locator('strong').textContent(), '粗体');
+  assert.equal(await body.locator('pre code').textContent(), '<b>代码文本</b>\n');
+  assert.equal(await body.locator('blockquote').textContent().then(text => text.trim()), '引用文本');
+  assert.equal(await body.getByRole('listitem').textContent(), '列表项');
+  await body.getByRole('cell', {name: '通过'}).waitFor();
+  assert.equal(await body.getByRole('cell', {name: '通过'}).evaluate(cell => getComputedStyle(cell).textAlign), 'right');
+  const link = body.getByRole('link', {name: '正常链接'});
+  assert.equal(await link.getAttribute('href'), 'https://example.com/notes');
+  assert.equal(await link.getAttribute('rel'), 'noopener noreferrer');
+  assert.equal(await body.getByRole('link', {name: '危险链接'}).count(), 0);
+  assert.equal(await body.locator('img').count(), 0);
+  await body.getByText(rawHtml, {exact: true}).waitFor();
+}
+
 async function run() {
   fs.mkdirSync(output, {recursive: true});
   let url = await start();
@@ -92,11 +108,30 @@ async function run() {
   await page.goto(url);
   await page.locator('#notice').filter({hasText: 'SQLite'}).waitFor();
 
+  const preview = await browser.newPage();
+  try {
+    const template = fs.readFileSync(path.join(root, 'src/evo/interfaces/web/assets/index.html'), 'utf8');
+    await preview.setContent(template);
+    const launch = preview.getByRole('link', {name: '打开本地工作台'});
+    await launch.waitFor();
+    assert.equal(await launch.getAttribute('href'), 'http://127.0.0.1:8769/');
+    assert.equal(await preview.locator('.shell').isVisible(), false);
+    assert.equal(await page.locator('#local-launch').isVisible(), false);
+  } finally {
+    await preview.close();
+  }
+  checks.push('Opening the source template shows a launch link instead of an unstyled workbench');
+
   const xss = '<img src=x onerror="window.__injected=true">';
   await createIssue(page, xss);
   assert.equal(await page.locator('img').count(), 0);
   assert.equal(await page.evaluate(() => window.__injected === true), false);
   checks.push('Untrusted issue titles remain plain text');
+  const markdownSample = ['Markdown 格式样本', '', '## Markdown 验收', '', '**粗体** 和 `行内代码`', '',
+    '> 引用文本', '', '- 列表项', '', '```html', '<b>代码文本</b>', '```', '',
+    '| 项目 | 状态 |', '| --- | ---: |', '| 交付 | 通过 |', '',
+    '[正常链接](https://example.com/notes) [危险链接](javascript:blocked)', '', xss, '',
+    '![外部图片](https://example.com/image.png)'].join('\n');
 
   const titleA = 'A · 复核样本报告';
   const titleB = 'B · 慢速工单';
@@ -109,6 +144,11 @@ async function run() {
   await panel.getByLabel('工单讨论').fill('群聊-A-ONLY');
   await panel.getByRole('button', {name: '发送工单群聊'}).click();
   await panel.getByText('reviewer 回复 群聊-A-ONLY', {exact: true}).waitFor();
+  await panel.getByLabel('工单讨论').fill(markdownSample);
+  await panel.getByRole('button', {name: '发送工单群聊'}).click();
+  await checkMarkdown(panel.locator('.markdown-body').filter({hasText: /reviewer 回复.*Markdown 格式样本/}), xss);
+  assert.ok((await post(page, 'task', {task_id: a})).body.messages.some(message => message.content === markdownSample));
+  checks.push('Issue replies render Markdown while stored message text is preserved');
   await inspector.getByLabel('指派给').selectOption('squad:default');
   await inspector.getByRole('button', {name: '确认指派'}).click();
   await inspector.getByRole('link', {name: 'Squad · default'}).waitFor();
@@ -140,6 +180,7 @@ async function run() {
   await panel.getByText('builder · 已停止', {exact: true}).waitFor();
   await panel.getByRole('button', {name: '重试运行'}).click();
   await panel.getByText('builder · 已完成', {exact: true}).waitFor();
+  await panel.locator('.feed-content strong').filter({hasText: /^已完成本轮执行$/}).waitFor();
   details = (await post(page, 'task', {task_id: b})).body;
   assert.deepEqual(details.executions.map(run => [run.status, run.retry_of]), [['completed', running.id], ['stopped', null]]);
   checks.push('View live progress, stop a running job, and retry as a distinct attempt');
@@ -232,6 +273,11 @@ async function run() {
   await page.getByRole('button', {name: '发送消息'}).click();
   await transcript.getByText('builder 回复 另一个私聊', {exact: true}).waitFor();
   assert.doesNotMatch(await transcript.innerText(), /工作区私聊|工作区群聊留档/);
+  await page.getByLabel('聊天消息').fill(markdownSample);
+  await page.getByRole('button', {name: '发送消息'}).click();
+  await checkMarkdown(transcript.locator('.markdown-body').filter({hasText: /builder 回复.*Markdown 格式样本/}), xss);
+  assert.equal(await page.evaluate(() => window.__injected === true), false);
+  checks.push('Chat replies render Markdown with safe links and literal raw HTML');
   await conversations.getByRole('link', {name: /^工作区私聊/}).click();
   await transcript.getByText('builder 回复 工作区私聊', {exact: true}).waitFor();
   await page.reload();
@@ -322,6 +368,77 @@ async function run() {
   assert.doesNotMatch(await panel.innerText(), /工作区私聊/);
   checks.push('Workspace private messages remain outside issue discussion');
 
+  const workspaceMenu = primary.locator('#workspace-switch');
+  const workspaces = page.getByRole('navigation', {name: '工作区列表'});
+  const selectedWorkspace = page.locator('#workspace-name');
+  async function switchWorkspace(name) {
+    await workspaceMenu.click();
+    await workspaces.getByRole('link', {name, exact: true}).click();
+    await selectedWorkspace.getByText(name, {exact: true}).waitFor();
+  }
+  await primary.getByRole('link', {name: '聊天', exact: true}).click();
+  const existingGroup = new URL(await groups.getByRole('link', {name: '分析讨论', exact: true}).getAttribute('href'), page.url());
+  const existingGroupId = existingGroup.hash.split('/').at(-1);
+  await workspaceMenu.click();
+  await page.screenshot({path: path.join(output, 'workspace-switcher.png')});
+  await page.getByRole('button', {name: '新建工作区', exact: true}).click();
+  const workspaceModal = page.getByRole('dialog', {name: '新建工作区'});
+  await workspaceModal.getByLabel('工作区名称').fill('默认工作区');
+  await workspaceModal.getByRole('button', {name: '创建工作区'}).click();
+  await workspaceModal.getByRole('alert').getByText('该工作区名称已存在。').waitFor();
+  await workspaceModal.getByLabel('工作区名称').fill('验收工作区');
+  await workspaceModal.getByRole('button', {name: '创建工作区'}).click();
+  await selectedWorkspace.getByText('验收工作区', {exact: true}).waitFor();
+  const privatePath = new URL(page.url()).pathname;
+  assert.match(privatePath, /^\/w\/[0-9a-f]{32}\/$/);
+  assert.equal((await post(page, 'task', {task_id: a})).status, 409);
+  assert.equal((await post(page, 'messages', {group_id: existingGroupId})).status, 409);
+  assert.equal((await page.request.get(url + '/w/' + '0'.repeat(32) + '/api/state')).status(), 404);
+
+  await profiles.getByRole('button', {name: '管理 Agent'}).click();
+  const roster = page.getByRole('dialog', {name: '管理 Agent'});
+  await roster.getByRole('button', {name: '移除', exact: true}).first().click();
+  await roster.getByRole('button', {name: '添加 Agent'}).click();
+  await roster.getByLabel('Agent 名称').last().fill('private-agent');
+  await roster.getByLabel('专长').last().fill('只负责验收工作区');
+  await roster.getByRole('button', {name: '保存 Agent', exact: true}).click();
+  await profiles.getByText('只负责验收工作区', {exact: true}).waitFor();
+  assert.equal(await lead.inputValue(), 'builder');
+  await primary.getByRole('link', {name: '聊天', exact: true}).click();
+  await transcript.getByText('向 工作区群聊 发送第一条消息', {exact: true}).waitFor();
+  assert.equal(await groups.getByRole('link', {name: '分析讨论', exact: true}).count(), 0);
+  assert.equal(await conversations.getByRole('link').count(), 0);
+  await newGroup.click();
+  await groupDialog.getByLabel('群聊名称').fill('分析讨论');
+  await groupDialog.getByRole('checkbox', {name: 'private-agent'}).check();
+  await groupDialog.getByRole('button', {name: '创建群聊'}).click();
+  await page.getByRole('heading', {name: '分析讨论', exact: true}).waitFor();
+  const newGroupHash = new URL(page.url()).hash;
+  await page.getByLabel('聊天消息').fill('仅限验收工作区');
+  await page.getByRole('button', {name: '发送消息'}).click();
+  await transcript.getByText('private-agent 回复 仅限验收工作区', {exact: true}).waitFor();
+  checks.push('Create and switch workspaces and scope agents, chats, and issue lookups to the workspace URL');
+
+  await primary.getByRole('link', {name: '工单', exact: true}).click();
+  const isolatedTitle = '仅验收区工单';
+  const isolatedIssue = await createIssue(page, isolatedTitle, 'agent:private-agent');
+  await switchWorkspace('默认工作区');
+  assert.equal((await post(page, 'task', {task_id: isolatedIssue})).status, 409);
+  await openIssue(page, b, titleB);
+  await switchWorkspace('验收工作区');
+  await openIssue(page, isolatedIssue, isolatedTitle);
+  await panel.getByText('已完成本轮执行', {exact: true}).waitFor();
+  await stop();
+  url = await start();
+  await page.goto(url + privatePath + newGroupHash);
+  await selectedWorkspace.getByText('验收工作区', {exact: true}).waitFor();
+  await transcript.getByText('private-agent 回复 仅限验收工作区', {exact: true}).waitFor();
+  await switchWorkspace('默认工作区');
+  await groups.getByRole('link', {name: '分析讨论', exact: true}).click();
+  await transcript.getByText('builder 回复 分析群历史', {exact: true}).waitFor();
+  await openIssue(page, b, titleB);
+  checks.push('Keep workspace workers and chat histories isolated across switching and server restart');
+
   await page.setViewportSize({width: 390, height: 844});
   await page.screenshot({path: path.join(output, 'mobile.png'), fullPage: true});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
@@ -343,6 +460,11 @@ async function run() {
     return document.documentElement.scrollWidth <= innerWidth && composer.bottom <= innerHeight;
   }), true);
   await page.screenshot({path: path.join(output, 'chat-mobile.png')});
+  await page.setViewportSize({width: 320, height: 760});
+  await workspaceMenu.click();
+  await workspaces.getByRole('link', {name: '验收工作区', exact: true}).waitFor();
+  assert.equal(await workspaces.evaluate(list => list.getBoundingClientRect().right <= innerWidth), true);
+  await workspaceMenu.press('Escape');
   assert.deepEqual(errors, []);
   checks.push('Mobile workbench and chat composer fit the viewport and emit no JavaScript errors');
   fs.writeFileSync(path.join(output, 'report.json'),

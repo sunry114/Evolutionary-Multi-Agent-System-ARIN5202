@@ -117,6 +117,13 @@ def update_registry(state, default, payload):
                 raise RegistryValidationError("该 Agent 已不在工作区，请刷新后重试。")
             registry = WorkspaceRegistry(
                 tuple(agent if item.name == agent.name else item for item in current.agents), current.squad)
+        elif set(payload) == {"agents"}:
+            current = load_registry(state, default)
+            agents = parse_agents(payload["agents"])
+            names = tuple(agent.name for agent in agents)
+            members = tuple(name for name in current.squad.members if name in names) or names
+            lead = current.squad.lead if current.squad.lead in members else members[0]
+            registry = WorkspaceRegistry(agents, Squad(current.squad.name, lead, members))
         else:
             registry = parse_registry(payload)
         _write_registry(path, registry)
