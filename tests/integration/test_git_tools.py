@@ -76,8 +76,13 @@ class GitIntegrationTests(unittest.TestCase):
         self.assertFalse((self.fs.workspace / "result.txt").exists())
         self.assertEqual(executor.execute("t1", "run_python", {"path": "main.py"})["status"], "success")
         self.assertEqual(self.fs.read_file("result.txt"), "approved")
-        with self.assertRaises(ValueError):
-            executor.execute("t1", "run_python", {"path": "main.py"})
+        # The script created a new input file, so another invocation has a new
+        # workspace scope. It must pause for fresh approval, never run silently.
+        timestamp = (self.fs.workspace / "result.txt").stat().st_mtime_ns
+        again = executor.execute("t1", "run_python", {"path": "main.py"})
+        self.assertEqual(again["status"], "waiting_human")
+        self.assertNotEqual(again["request_id"], waiting["request_id"])
+        self.assertEqual((self.fs.workspace / "result.txt").stat().st_mtime_ns, timestamp)
 
     def test_real_push_wrapper_limits_temporary_header_to_exact_repository(self):
         repository = "https://github.com/example/project.git"

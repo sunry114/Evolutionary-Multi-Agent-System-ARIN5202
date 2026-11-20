@@ -7,7 +7,7 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from evo.adapters.llm.client import ProviderError
 from evo.adapters.tools.docker import DockerPythonRunner
@@ -18,6 +18,7 @@ from evo.application.approvals import ApprovalService
 from evo.application.orchestrator import ArtifactCheck
 from evo.config import HarnessConfig
 from evo.domain.models import Agent
+from evo.domain.policies import MAX_SUBTASK_DESCRIPTION, PlanValidationError
 from evo.interfaces.execution_factory import create_orchestrator
 from evo.interfaces.sqlite_application import SQLiteApplication
 from evo.ports.tools import ExecutionResult
@@ -51,6 +52,74 @@ class ScriptedModel:
 
 
 class TaskRuntimeTests(unittest.TestCase):
+    def test_detailed_plan_executes_without_truncating_requirements(self):
+        description = "Implement and verify the full application. " + "x" * 2200
+        model = ScriptedModel([tool("write_file", path="report.md", content="hello"), done()],
+                              plan={"subtasks": [{"id": "s1", "description": description}]})
+        result = self.run_report(model)
+        self.assertEqual(result["task"]["status"], "success")
+        self.assertEqual(model.planning_calls, 1)
+        self.assertIn(description, model.contexts[0]["goal"])
+        owner = result["subtasks"][0]["owner"]
+        memory = self.coordinator._memory_store(owner).list_recent()
+        self.assertEqual(memory[0]["task"], description)
+
+    def test_oversized_plan_records_specific_safe_diagnostics(self):
+        description = "private-model-content " * 500
+        model = ScriptedModel([], plan={"subtasks": [{"id": "s1", "description": description}]})
+        coordinator = self.build(model)
+        with self.assertRaises(PlanValidationError):
+            coordinator.run("Build a report", task_id="oversized", final_check=ArtifactCheck("report.md"))
+        task = coordinator.store.get_task("oversized")
+        self.assertEqual(task["status"], "failed")
+        self.assertIn("subtasks[0].description", task["result"])
+        self.assertIn(str(len(description)), task["result"])
+        events = coordinator.store.list_events("oversized")
+        failure = next(e["payload"] for e in events if e["event_type"] == "planning_failed")
+        self.assertEqual(failure["reason"], "description_too_long")
+        self.assertEqual(failure["actual"], len(description))
+        self.assertEqual(failure["limit"], MAX_SUBTASK_DESCRIPTION)
+        self.assertNotIn("private-model-content", str(events) + str(task))
+        self.assertEqual(model.planning_calls, 3)
+        self.assertEqual(coordinator.store.list_children("oversized"), [])
+
+    def test_planning_failure_records_safe_reason_without_starting_execution(self):
+        for code, attempts in (("invalid_completion", 3), ("authentication", 1)):
+            with self.subTest(code=code):
+                model = Mock()
+                model.complete.side_effect = ProviderError("secret provider detail", code=code)
+                coordinator = self.build(model)
+                task_id = "planning-" + code
+                with self.assertRaises(ProviderError):
+                    coordinator.run("Write report.md", task_id=task_id,
+                                    final_check=ArtifactCheck("report.md"))
+                self.assertEqual(model.complete.call_count, attempts)
+                task = coordinator.store.get_task(task_id)
+                self.assertEqual(task["status"], "failed")
+                self.assertIn(code, task["result"])
+                events = coordinator.store.list_events(task_id)
+                failure = next(e for e in events if e["event_type"] == "planning_failed")
+                self.assertEqual(failure["payload"]["code"], code)
+                self.assertNotIn("secret provider detail", str(events) + str(task))
+                self.assertEqual(coordinator.store.list_children(task_id), [])
+
+    def test_invalid_plan_recovers_and_executes_verified_delivery(self):
+        class RecoveringModel(ScriptedModel):
+            def complete(self, messages, json_object=False):
+                if "Decompose the goal" in messages[0]["content"] and self.planning_calls == 0:
+                    self.planning_calls += 1
+                    raise ProviderError("private output", code="invalid_completion")
+                return super().complete(messages, json_object=json_object)
+
+        model = RecoveringModel([tool("write_file", path="report.md", content="hello"), done()])
+        result = self.run_report(model)
+        self.assertEqual(result["task"]["status"], "success")
+        self.assertEqual(model.planning_calls, 2)
+        events = self.coordinator.store.list_events(result["task"]["id"])
+        retries = [e for e in events if e["event_type"] == "planning_attempt_failed"]
+        self.assertEqual(len(retries), 1)
+        self.assertEqual(retries[0]["payload"]["code"], "invalid_completion")
+
     def test_planner_questions_use_the_team_coordinator(self):
         model = ScriptedModel([], plan={"question": "Which source file should we use?"})
         coordinator = create_orchestrator(self.state, agents=(Agent("dev", "Build"), Agent("lead", "Coordinate")),
@@ -126,7 +195,7 @@ class TaskRuntimeTests(unittest.TestCase):
     def test_three_consecutive_invalid_actions_fail_explicitly_before_timeout(self):
         model = ScriptedModel([{"tool": "write_file"}] * 3)
         result = self.run_report(model)
-        self.assertEqual(result["subtasks"][0]["result"], "Harness failed: invalid_decision_limit")
+        self.assertIn("Harness failed: invalid_decision_limit [missing_type]", result["subtasks"][0]["result"])
         self.assertEqual(len(model.contexts), 3)
 
     def test_verification_feedback_repairs_bad_delivery(self):
@@ -191,7 +260,7 @@ class TaskRuntimeTests(unittest.TestCase):
         self.assertEqual(len(model.contexts), 3)
 
     def test_latency_recording_preserves_maximum_tool_budget(self):
-        model = ScriptedModel([tool("list_files")] * 127 + [
+        model = ScriptedModel([tool("write_file", path="part-%d.md" % i, content=str(i)) for i in range(127)] + [
             {**tool("write_file", path="report.md", content="hello"), "finish": True, "text": "Done"}])
         self.assertEqual(self.run_report(model, budget=128)["task"]["status"], "success")
 
@@ -277,6 +346,160 @@ class TaskRuntimeTests(unittest.TestCase):
                                tool("write_file", path="report.md", content="hello"), done()])
         self.assertEqual(self.run_report(model)["task"]["status"], "success")
 
+    def test_repeated_successful_python_call_reuses_evidence_without_executing_again(self):
+        model = ScriptedModel([
+            tool("write_file", path="verify.py", purpose="code", content="print('PASS')\n"),
+            tool("run_python", path="verify.py"),
+            tool("read_file", path="verify.py", purpose="code"),
+            tool("run_python", path="verify.py"),
+            tool("write_file", path="report.md", content="hello"), done()])
+        with patch.object(DockerPythonRunner, "run_python", return_value=ExecutionResult(0, "PASS", "")) as runner:
+            first = self.run_report(model)
+            approval = self.coordinator.store.list_pending_requests()[0]
+            ApprovalService(self.coordinator.store).answer(approval["id"], {"approved": True})
+            final = self.coordinator.resume(first["task"]["id"])
+            self.assertEqual(final["task"]["status"], "success")
+            runner.assert_called_once_with("verify.py", approved=True)
+            cached = model.contexts[4]["completed_platform_calls"][-1]["outcome"]
+            self.assertTrue(cached["replayed"])
+            self.assertEqual(cached["action_id"], approval["id"])
+            self.assertEqual(cached["result"]["stdout"], "PASS")
+            self.assertEqual(self.coordinator.store.list_pending_requests(), [])
+
+    def test_repeated_failed_test_reuses_failure_then_source_repair_gets_fresh_approval(self):
+        model = ScriptedModel([
+            tool("write_file", path="verify.py", purpose="code", content="print('test')\n"),
+            tool("write_file", path="module.py", purpose="code", content="VALUE=1\n"),
+            tool("run_python", path="verify.py"), tool("run_python", path="verify.py"),
+            tool("edit_file", path="module.py", purpose="code", old_text="VALUE=1", new_text="VALUE=2"),
+            tool("run_python", path="verify.py"), tool("write_file", path="report.md", content="hello"), done()])
+        with patch.object(DockerPythonRunner, "run_python", side_effect=[
+                ExecutionResult(1, "", "AssertionError"), ExecutionResult(0, "passed", "")]) as runner:
+            first = self.run_report(model)
+            old = self.coordinator.store.list_pending_requests()[0]
+            ApprovalService(self.coordinator.store).answer(old["id"], {"approved": True})
+            second = self.coordinator.resume(first["task"]["id"])
+            self.assertEqual(second["task"]["status"], "waiting_human")
+            self.assertEqual(runner.call_count, 1)
+            cached = model.contexts[4]["completed_platform_calls"][-1]["outcome"]
+            self.assertTrue(cached["replayed"])
+            self.assertEqual(cached["result"]["exit_code"], 1)
+            new = self.coordinator.store.list_pending_requests()[0]
+            self.assertNotEqual(old["id"], new["id"])
+            ApprovalService(self.coordinator.store).answer(new["id"], {"approved": True})
+            final = self.coordinator.resume(first["task"]["id"])
+            self.assertEqual(final["task"]["status"], "success")
+            self.assertEqual(runner.call_count, 2)
+
+    def test_source_repair_can_rerun_unchanged_tests_with_a_new_approval(self):
+        model = ScriptedModel([
+            tool("write_file", path="inventory.py", purpose="code", content="VALUE=1\n"),
+            tool("write_file", path="verify.py", purpose="code", content="import inventory\nassert inventory.VALUE==2\n"),
+            tool("run_python", path="verify.py"),
+            tool("edit_file", path="inventory.py", purpose="code", old_text="VALUE=1", new_text="VALUE=2"),
+            tool("run_python", path="verify.py"),
+            tool("write_file", path="report.md", content="hello"), done()])
+        with patch.object(DockerPythonRunner, "run_python", side_effect=[
+                ExecutionResult(1, "", "AssertionError"), ExecutionResult(0, "passed", "")]) as runner:
+            first = self.run_report(model)
+            approval = self.coordinator.store.list_pending_requests()[0]
+            ApprovalService(self.coordinator.store).answer(approval["id"], {"approved": True})
+            second = self.coordinator.resume(first["task"]["id"])
+            self.assertEqual(second["task"]["status"], "waiting_human")
+            replacement = self.coordinator.store.list_pending_requests()[0]
+            self.assertNotEqual(approval["id"], replacement["id"])
+            self.assertEqual(approval["payload"]["sha256"], replacement["payload"]["sha256"])
+            self.assertNotEqual(approval["payload"]["workspace_sha256"], replacement["payload"]["workspace_sha256"])
+            ApprovalService(self.coordinator.store).answer(replacement["id"], {"approved": True})
+            final = self.coordinator.resume(first["task"]["id"])
+            self.assertEqual(final["task"]["status"], "success")
+            self.assertEqual(runner.call_count, 2)
+
+    def test_legacy_script_only_approval_is_replaced_without_running_code(self):
+        model = ScriptedModel([tool("write_file", path="verify.py", purpose="code", content="print('ok')\n"),
+                               tool("run_python", path="verify.py"), tool("run_python", path="verify.py"),
+                               tool("write_file", path="report.md", content="hello"), done()])
+        with patch.object(DockerPythonRunner, "run_python", return_value=ExecutionResult(0, "ok", "")) as runner:
+            first = self.run_report(model)
+            approval = self.coordinator.store.list_pending_requests()[0]
+            old_payload = dict(approval["payload"])
+            old_payload.pop("workspace_sha256")
+            encoded = json.dumps(old_payload, sort_keys=True, separators=(",", ":"))
+            with self.coordinator.store._transaction() as connection:
+                connection.execute("UPDATE approval_requests SET payload_json=? WHERE id=?", (encoded, approval["id"]))
+                connection.execute("UPDATE actions SET arguments_json=? WHERE id=?", (encoded, approval["id"]))
+            ApprovalService(self.coordinator.store).answer(approval["id"], {"approved": True})
+            second = self.coordinator.resume(first["task"]["id"])
+            self.assertEqual(second["task"]["status"], "waiting_human")
+            runner.assert_not_called()
+            replacement = self.coordinator.store.list_pending_requests()[0]
+            self.assertNotEqual(replacement["id"], approval["id"])
+            ApprovalService(self.coordinator.store).answer(replacement["id"], {"approved": True})
+            final = self.coordinator.resume(first["task"]["id"])
+            self.assertEqual(final["task"]["status"], "success")
+            runner.assert_called_once()
+
+    def test_truncated_response_recovers_with_chunked_writes_and_verified_final_digest(self):
+        error = ProviderError("private unfinished source", code="invalid_completion", details={
+            "completion_reason": "truncated", "finish_reason": "length",
+            "content_chars": 27948, "completion_tokens": 8192})
+        final = {**tool("write_file", path="report.md", content="llo", append=True),
+                 "finish": True, "text": "Delivered in chunks"}
+        model = ScriptedModel([error, tool("write_file", path="report.md", content="he"), final])
+        result = self.run_report(model)
+        self.assertEqual(result["task"]["status"], "success")
+        self.assertIn("truncated", model.contexts[1]["feedback"])
+        self.assertIn("append:true", model.contexts[1]["feedback"])
+        self.assertEqual(model.contexts[1]["completed_platform_calls"], [])
+        self.assertEqual(len(model.contexts[2]["completed_platform_calls"]), 1)
+        path = self.state / "tasks" / result["task"]["id"] / "agents/builder/workspace/report.md"
+        self.assertEqual(path.read_text(), "hello")
+        records = list((self.state / "harness").glob("*.json"))
+        record = json.loads(records[0].read_text())
+        invalid = next(e for e in record["events"] if e["kind"] == "invalid_decision")
+        self.assertEqual(invalid["payload"]["completion_reason"], "truncated")
+        self.assertEqual(invalid["payload"]["completion_tokens"], 8192)
+        self.assertEqual(record["tool_calls"], 2)
+        self.assertEqual(len(record["artifacts"]), 1)
+        import hashlib
+        self.assertEqual(record["artifacts"][0]["sha256"], hashlib.sha256(b"hello").hexdigest())
+        self.assertNotIn("private unfinished source", str(record))
+
+    def test_repeated_truncation_reports_the_cause_without_running_tools(self):
+        errors = [ProviderError("private source", code="invalid_completion", details={
+            "completion_reason": "truncated", "finish_reason": "length",
+            "content_chars": 27948, "completion_tokens": 8192}) for _ in range(3)]
+        model = ScriptedModel(errors)
+        result = self.run_report(model)
+        child = result["subtasks"][0]
+        self.assertEqual(child["status"], "failed")
+        self.assertIn("invalid_decision_limit [truncated]", child["result"])
+        events = self.coordinator.store.list_events(child["id"])
+        failure = next(e["payload"] for e in events if e["event_type"] == "harness_error")
+        self.assertEqual(failure["completion_reason"], "truncated")
+        self.assertEqual(failure["completion_tokens"], 8192)
+        self.assertNotIn("private source", str(events))
+        records = list((self.state / "harness").glob("*.json"))
+        self.assertEqual(json.loads(records[0].read_text())["tool_calls"], 0)
+
+    def test_json_correction_uses_third_attempt_and_resets_after_a_written_chunk(self):
+        def malformed():
+            return ProviderError("private malformed response", code="invalid_completion",
+                                 details={"completion_reason": "invalid_json", "finish_reason": "stop"})
+        final = {**tool("write_file", path="report.md", content="llo", append=True),
+                 "finish": True, "text": "Verified delivery"}
+        model = ScriptedModel([malformed(), malformed(), tool("write_file", path="report.md", content="he"),
+                               malformed(), malformed(), final])
+        result = self.run_report(model)
+        self.assertEqual(result["task"]["status"], "success")
+        self.assertIn("no trailing braces", model.contexts[2]["feedback"])
+        self.assertEqual(model.contexts[2]["completed_platform_calls"], [])
+        self.assertEqual(len(model.contexts[5]["completed_platform_calls"]), 1)
+        record = json.loads(next((self.state / "harness").glob("*.json")).read_text())
+        invalid = [e["payload"]["consecutive"] for e in record["events"] if e["kind"] == "invalid_decision"]
+        self.assertEqual(invalid, [1, 2, 1, 2])
+        self.assertEqual(record["tool_calls"], 2)
+
     def test_model_claim_alone_never_succeeds(self):
         model = ScriptedModel([done()] * 10)
         result = self.run_report(model, budget=1)
@@ -292,7 +515,8 @@ class TaskRuntimeTests(unittest.TestCase):
         self.assertNotIn("secret detail", str(self.coordinator.store.list_events(result["subtasks"][0]["id"])))
 
     def test_more_than_twenty_tool_calls_respect_configured_budget(self):
-        model = ScriptedModel([tool("list_files")] * 22 + [tool("write_file", path="report.md", content="hello"), done()])
+        model = ScriptedModel([tool("write_file", path="part-%d.md" % i, content=str(i)) for i in range(22)] +
+                              [tool("write_file", path="report.md", content="hello"), done()])
         self.assertEqual(self.run_report(model, budget=24)["task"]["status"], "success")
 
     def test_tool_limit_stops_side_effects(self):

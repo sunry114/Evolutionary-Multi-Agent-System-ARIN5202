@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from evo.domain.models import Agent, Subtask
-from evo.domain.policies import validate_plan
+from evo.domain.policies import MAX_SUBTASK_DESCRIPTION, PlanValidationError, validate_plan
 
 
 @dataclass(frozen=True)
@@ -32,11 +32,12 @@ class StoredClarificationRequests:
 
 
 class Planner:
-    def __init__(self, provider, agents, approval=None, *, discussion_loader=None):
+    def __init__(self, provider, agents, approval=None, *, discussion_loader=None, events=None):
         self.provider = provider
         self.agents = tuple(agents)
         self.approval = approval
         self.discussion_loader = discussion_loader
+        self.events = events
 
     def _clarify(self, question, task_id):
         if self.approval is None or not task_id:
@@ -65,8 +66,7 @@ class Planner:
                                  + ", ".join(missing) + ".", task_id)
         specs = {agent.name: agent.specialty for agent in self.agents}
         discussion = self.discussion_loader(task_id) if self.discussion_loader and task_id else []
-        result = self.provider.complete(
-            [{"role": "system", "content":
+        messages = [{"role": "system", "content":
               "Decompose the goal into 1 to 5 independently verifiable subtasks. "
               "Use IDs s1, s2, etc. Dependencies may refer only to earlier IDs. "
               "Default to one owner and one subtask for writing, summarizing, translating, "
@@ -86,34 +86,76 @@ class Planner:
               "specific artifact, target or constraint needed to produce a "
               "verifiable result. If it is absent or ambiguous, return one "
               "clarification question instead of inventing it. Return JSON "
-              "{question:null,subtasks:[{id,description,skills,depends_on}]}"},
+              '{"question":null,"subtasks":[{"id":"s1",'
+              '"description":"Describe the requested deliverable concisely",'
+              '"skills":["agent name or specialty"],"depends_on":[]}]}. '
+              'Each description must be at most %d characters; keep all required constraints.'
+              % MAX_SUBTASK_DESCRIPTION},
              {"role": "user", "content": json.dumps(
                  {"goal": goal, "agents": specs, "required_inputs": required_inputs,
                   "team_discussion": discussion},
-                 ensure_ascii=False)}],
-            json_object=True)
+                 ensure_ascii=False)}]
+        for attempt in range(3):
+            try:
+                result = self.provider.complete(messages, json_object=True)
+            except Exception as error:
+                if getattr(error, "code", None) != "invalid_completion":
+                    raise
+                reason = "invalid_completion"
+                failure = error
+            else:
+                try:
+                    plan = self._parse_result(result)
+                except ValueError as error:
+                    reason = "invalid_plan"
+                    failure = error
+                else:
+                    if plan.question:
+                        return self._clarify(plan.question, task_id)
+                    return plan
+            if self.events is not None and task_id:
+                details = failure.details if isinstance(failure, PlanValidationError) else {}
+                self.events.append_event(
+                    task_id=task_id, event_type="planning_attempt_failed", actor="planner",
+                    payload={"attempt": attempt + 1, "code": reason, "retrying": attempt < 2, **details})
+            if attempt == 2:
+                raise failure
+            feedback = ("Validation error: " + str(failure) + ". "
+                        if isinstance(failure, PlanValidationError) else "")
+            messages = messages[:2] + [{"role": "user", "content": feedback +
+                "The previous response was invalid. Return only a valid JSON object: "
+                '{"question":null,"subtasks":[{"id":"s1","description":"Deliver the result",'
+                '"skills":[],"depends_on":[]}]}. Use double-quoted keys and strings, '
+                "JSON null, and arrays for skills and depends_on. Use 1 to 5 sequential IDs, "
+                "descriptions of at most %d characters, and only earlier dependencies. "
+                "If a critical input is missing, return a nonempty question instead."
+                % MAX_SUBTASK_DESCRIPTION}]
+
+    @staticmethod
+    def _parse_result(result):
         if not isinstance(result, dict):
-            raise ValueError("Planner must return a JSON object")
+            raise PlanValidationError("not_object", "Planner must return a JSON object", field="response")
         question = result.get("question")
         if question is not None:
             if not isinstance(question, str) or not question.strip():
-                raise ValueError("Invalid clarification question")
-            return self._clarify(question, task_id)
+                raise PlanValidationError("invalid_question", "question must be null or a nonblank string", field="question")
+            return PlanResult(question=question)
         raw = result.get("subtasks")
         if not isinstance(raw, list):
-            raise ValueError("Planner returned invalid subtasks")
+            raise PlanValidationError("invalid_subtasks", "subtasks must be an array", field="subtasks")
         subtasks = []
-        for item in raw:
+        for index, item in enumerate(raw):
+            field = "subtasks[%d]" % index
             if not isinstance(item, dict):
-                raise ValueError("Planner returned invalid subtask")
+                raise PlanValidationError("invalid_subtask", field + " must be an object", field=field)
             skills, dependencies = item.get("skills", []), item.get("depends_on", [])
             if (not isinstance(skills, list) or not all(isinstance(s, str) for s in skills)
                     or not isinstance(dependencies, list)
                     or not all(isinstance(d, str) for d in dependencies)):
-                raise ValueError("Invalid skills or dependencies")
+                raise PlanValidationError("invalid_lists", field + ".skills and .depends_on must be arrays of strings", field=field)
             identifier, description = item.get("id"), item.get("description")
             if not isinstance(identifier, str) or not isinstance(description, str):
-                raise ValueError("Invalid subtask ID or description")
+                raise PlanValidationError("invalid_fields", field + ".id and .description must be strings", field=field)
             subtasks.append(Subtask(identifier, description, tuple(skills), tuple(dependencies)))
         validate_plan(subtasks)
         return PlanResult(tuple(subtasks))

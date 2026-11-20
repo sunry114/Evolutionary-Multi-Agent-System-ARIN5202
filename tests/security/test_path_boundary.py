@@ -19,6 +19,20 @@ class PathBoundaryTests(unittest.TestCase):
         self.other = WorkspaceFilesystem(self.root / "state", "bob")
         self.other.write_file("private.txt", "Bob's secret")
 
+    def test_append_preserves_chunks_and_enforces_total_byte_limit_atomically(self):
+        self.fs.write_file("nested/code.py", "print('", purpose="code")
+        self.fs.write_file("nested/code.py", "你好')\n", purpose="code", append=True)
+        self.assertEqual(self.fs.read_file("nested/code.py", purpose="code"), "print('你好')\n")
+        original = (self.fs.workspace / "nested/code.py").read_bytes()
+        with self.assertRaises(PathPolicyError):
+            self.fs.write_file("nested/code.py", "x" * 32, purpose="code", append=True)
+        self.assertEqual((self.fs.workspace / "nested/code.py").read_bytes(), original)
+        with self.assertRaises(ValueError):
+            self.fs.write_file("nested/code.py", "lost", purpose="code", append=True, overwrite=False)
+        self.assertEqual((self.fs.workspace / "nested/code.py").read_bytes(), original)
+        self.fs.write_file("new.md", "first", append=True)
+        self.assertEqual(self.fs.read_file("new.md"), "first")
+
     def test_nested_crud_limits_and_private_modes(self):
         self.fs.write_file("notes/结果.MD", "你好")
         self.assertEqual(self.fs.read_file("notes/结果.MD"), "你好")
@@ -48,6 +62,7 @@ class PathBoundaryTests(unittest.TestCase):
                 for operation in (
                     lambda: self.fs.read_file(path),
                     lambda: self.fs.write_file(path, "attack"),
+                    lambda: self.fs.write_file(path, "attack", append=True),
                     lambda: self.fs.delete_file(path, approved=True),
                     lambda: self.fs.list_files(path),
                 ):
@@ -83,6 +98,7 @@ class PathBoundaryTests(unittest.TestCase):
             with self.subTest(path=path):
                 for operation in [lambda: self.fs.read_file(path),
                                   lambda: self.fs.write_file(path, "attack"),
+                                  lambda: self.fs.write_file(path, "attack", append=True),
                                   lambda: self.fs.delete_file(path, approved=True)]:
                     with self.assertRaises((ValueError, OSError)):
                         operation()
@@ -120,6 +136,7 @@ class PathBoundaryTests(unittest.TestCase):
             with self.subTest(path=path):
                 for operation in [lambda: self.fs.read_file(path),
                                   lambda: self.fs.write_file(path, "attack"),
+                                  lambda: self.fs.write_file(path, "attack", append=True),
                                   lambda: self.fs.delete_file(path, approved=True)]:
                     with self.assertRaises((ValueError, OSError)):
                         operation()

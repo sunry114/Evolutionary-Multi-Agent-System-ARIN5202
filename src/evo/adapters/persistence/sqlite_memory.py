@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterator
 
 from evo.domain.models import Experience
+from evo.domain.policies import MAX_SUBTASK_DESCRIPTION
 from evo.domain.statuses import TaskStatus
 
 
@@ -122,7 +123,7 @@ class SQLiteMemoryStore:
                 or not isinstance(experience.task, str) or not isinstance(experience.lesson, str)
                 or not isinstance(experience.evidence, str)
                 or not experience.task.strip() or not experience.lesson.strip()
-                or len(experience.task) > 1000 or len(experience.lesson) > 2000
+                or len(experience.task) > MAX_SUBTASK_DESCRIPTION or len(experience.lesson) > 2000
                 or len(experience.evidence) > 2000
                 or (experience.failure_category is not None and (
                     not isinstance(experience.failure_category, str) or len(experience.failure_category) > 100))):

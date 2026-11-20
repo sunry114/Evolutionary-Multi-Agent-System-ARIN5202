@@ -22,11 +22,25 @@ class WorkspacePort(Protocol):
 
     agent: str
 
-    def read_file(self, path: str, *, purpose: str = "document") -> str:
+    def input_digest(self) -> str:
+        """Hash bounded workspace inputs for execution approval scope."""
+        ...
+
+    def read_file(self, path: str, *, purpose: str = "document",
+                  start_line: int = 1, max_lines: int | None = None) -> str:
+        ...
+
+    def edit_file(self, path: str, old_text: str, new_text: str, *, purpose: str = "document") -> None:
+        ...
+
+    def search_files(self, query: str, path: str = ".", max_results: int = 20) -> Mapping[str, object]:
+        ...
+
+    def check_python(self, path: str) -> Mapping[str, object]:
         ...
 
     def write_file(self, path: str, content: str, *, purpose: str = "document",
-                   overwrite: bool = True) -> None:
+                   overwrite: bool = True, append: bool = False) -> None:
         ...
 
     def list_files(self, path: str = ".") -> Sequence[str]:
@@ -84,6 +98,10 @@ class ToolPort(Protocol):
 
 class ToolError(RuntimeError):
     """Safe-to-report tool infrastructure or policy failure."""
+
+
+class ToolCleanupError(ToolError):
+    """A tool runtime may still exist; quarantine instead of retrying."""
 
 
 @dataclass(frozen=True)

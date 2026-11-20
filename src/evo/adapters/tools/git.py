@@ -12,7 +12,7 @@ import uuid
 from evo.adapters.tools.docker import DockerPythonRunner
 from evo.adapters.tools.filesystem import _directory, _read_at, validate_file_path, PURPOSE_SUFFIXES
 from evo.adapters.tools.linux import isolation_arguments
-from evo.ports.tools import ExecutionResult, ToolError
+from evo.ports.tools import ExecutionResult, ToolError, ToolCleanupError
 
 DEFAULT_GIT_IMAGE = (
     "alpine/git:2.49.1@sha256:"
@@ -164,7 +164,7 @@ class DockerGitTools(DockerPythonRunner):
         finally:
             removed = self._capture(base + ["rm", "--force", name], 10, 4096)
             if removed.exit_code or removed.timed_out or removed.output_limited:
-                raise ToolError("Git cleanup failed; inspect containers named evo-git-* before retrying")
+                raise ToolCleanupError("Git cleanup failed; inspect containers named evo-git-* before retrying")
 
     def init(self):
         self.validate_local_repository(allow_missing=True)

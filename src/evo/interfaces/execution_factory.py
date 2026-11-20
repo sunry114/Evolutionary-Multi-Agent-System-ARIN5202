@@ -135,12 +135,17 @@ def create_orchestrator(state, *, agents, store=None, provider=None,
         return list(reversed(context))
 
     coordinator = Orchestrator(
-        store, Planner(provider, agents, approval, discussion_loader=discussion_context),
+        store, Planner(provider, agents, approval, discussion_loader=discussion_context, events=store),
         assignment, harness_factory,
         workspace_factory, agents=agents, memory_factory=memory_factory,
         limits=replace(DEFAULT_LIMITS, max_steps_per_task=config.max_tool_calls),
         scoped_workspace_factory=scoped_workspace, handoff_factory=ArtifactExchange,
         execution_config={"harness": asdict(config), "assignment": strategy,
+                          "decision_protocol": (("native_functions" if getattr(provider, "native_tools", False) is True
+                                                 else "json_actions") if config.adapter == "provider" else config.adapter),
                           "model": asdict(model) if model else None,
+                          "provider": ({key: getattr(provider_config, key)
+                                        for key in ("provider", "model", "base_url", "timeout", "retries")}
+                                       if provider_config else None),
                           "workspace_scope": "agent" if config.adapter == "baseline" else "task"})
     return coordinator

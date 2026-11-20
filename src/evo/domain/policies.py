@@ -32,20 +32,45 @@ class Limits:
 
 
 DEFAULT_LIMITS = Limits()
+MAX_SUBTASK_DESCRIPTION = 8000
+
+
+class PlanValidationError(ValueError):
+    """Safe validation details built locally, never from model response text."""
+
+    code = "invalid_plan"
+
+    def __init__(self, reason, message, **details):
+        super().__init__(message)
+        self.details = {"reason": reason, **details}
 
 
 def validate_plan(subtasks: Sequence, limits: Limits = DEFAULT_LIMITS) -> None:
     """Require sequential IDs and dependencies on earlier subtasks only."""
     if not 1 <= len(subtasks) <= limits.max_plan_subtasks:
-        raise ValueError("Plan must contain 1 to 5 subtasks")
+        raise PlanValidationError("subtask_count", "Plan must contain 1 to 5 subtasks",
+                                  field="subtasks", actual=len(subtasks), limit=limits.max_plan_subtasks)
     seen = set()
     for index, task in enumerate(subtasks, 1):
-        if task.id != "s%d" % index or not task.description.strip():
-            raise ValueError("Invalid subtask ID or description")
-        if len(task.description) > 1000 or len(set(task.depends_on)) != len(task.depends_on):
-            raise ValueError("Invalid subtask description or duplicate dependency")
+        field = "subtasks[%d]" % (index - 1)
+        if task.id != "s%d" % index:
+            raise PlanValidationError("subtask_id", field + ".id must be s%d" % index,
+                                      field=field + ".id")
+        if not task.description.strip():
+            raise PlanValidationError("empty_description", field + ".description must not be blank",
+                                      field=field + ".description")
+        if len(task.description) > MAX_SUBTASK_DESCRIPTION:
+            raise PlanValidationError(
+                "description_too_long",
+                field + ".description has %d characters; maximum is %d"
+                % (len(task.description), MAX_SUBTASK_DESCRIPTION),
+                field=field + ".description", actual=len(task.description), limit=MAX_SUBTASK_DESCRIPTION)
+        if len(set(task.depends_on)) != len(task.depends_on):
+            raise PlanValidationError("duplicate_dependency", field + ".depends_on contains duplicates",
+                                      field=field + ".depends_on")
         if any(dependency not in seen for dependency in task.depends_on):
-            raise ValueError("Dependencies must reference earlier subtasks")
+            raise PlanValidationError("dependency_order", field + ".depends_on must reference earlier subtasks",
+                                      field=field + ".depends_on")
         seen.add(task.id)
 
 

@@ -111,6 +111,39 @@ class ApprovalTests(unittest.TestCase):
             self.executor.execute("t1", "run_python", {"path": "main.py"}, request_id=request_id)
         self.python.run_python.assert_not_called()
 
+    def test_changed_dependency_invalidates_approval_even_when_script_is_unchanged(self):
+        self.fs.write_file("helper.py", "VALUE = 1\n", purpose="code")
+        request_id = self.request()
+        self.approval.answer(request_id, {"approved": True})
+        self.fs.edit_file("helper.py", "VALUE = 1", "VALUE = 2", purpose="code")
+        with self.assertRaises(ValueError):
+            self.executor.execute("t1", "run_python", {"path": "main.py"}, request_id=request_id)
+        self.python.run_python.assert_not_called()
+        self.store.transition_task("t1", "running", expected="waiting_human")
+        replacement = self.request()
+        self.assertNotEqual(replacement, request_id)
+        old = self.store.get_approval_request(request_id)["payload"]
+        new = self.store.get_approval_request(replacement)["payload"]
+        self.assertEqual(old["sha256"], new["sha256"])
+        self.assertNotEqual(old["workspace_sha256"], new["workspace_sha256"])
+
+    def test_repaired_dependency_can_rerun_fixed_tests_only_with_new_approval(self):
+        self.fs.write_file("helper.py", "VALUE = 1\n", purpose="code")
+        self.python.run_python.return_value = ExecutionResult(1, "", "failed test")
+        request_id = self.request()
+        self.approval.answer(request_id, {"approved": True})
+        first = self.executor.execute("t1", "run_python", {"path": "main.py"}, request_id=request_id)
+        self.assertEqual(first["status"], "failed")
+        self.fs.edit_file("helper.py", "VALUE = 1", "VALUE = 2", purpose="code")
+        replacement = self.request()
+        self.assertNotEqual(replacement, request_id)
+        self.assertEqual(self.python.run_python.call_count, 1)
+        self.approval.answer(replacement, {"approved": True})
+        self.python.run_python.return_value = ExecutionResult(0, "passed", "")
+        second = self.executor.execute("t1", "run_python", {"path": "main.py"}, request_id=replacement)
+        self.assertEqual(second["status"], "success")
+        self.assertEqual(self.python.run_python.call_count, 2)
+
     def test_cross_task_agent_action_or_payload_cannot_consume_approval(self):
         request_id = self.request()
         self.approval.answer(request_id, {"approved": True})

@@ -1,7 +1,10 @@
 import unittest
+from unittest.mock import Mock
 
 from evo.application.planner import Planner
+from evo.adapters.llm.client import ProviderError
 from evo.domain.models import Agent
+from evo.domain.policies import MAX_SUBTASK_DESCRIPTION, PlanValidationError
 
 
 class Provider:
@@ -81,6 +84,83 @@ class PlannerTests(unittest.TestCase):
         for subtasks in cases:
             with self.subTest(subtasks=subtasks), self.assertRaises(ValueError):
                 Planner(Provider({"subtasks": subtasks}), self.agents).plan("Goal")
+
+    def test_invalid_completion_and_plan_recover_with_bounded_feedback(self):
+        provider, events = Mock(), Mock()
+        provider.complete.side_effect = [
+            ProviderError("private output", code="invalid_completion"),
+            {"subtasks": [{"id": "s2", "description": "Wrong ID"}]},
+            {"subtasks": [{"id": "s1", "description": "Build"}]}]
+        plan = Planner(provider, self.agents, events=events).plan("Goal", task_id="root")
+        self.assertEqual(plan.subtasks[0].id, "s1")
+        self.assertEqual(provider.complete.call_count, 3)
+        self.assertEqual([c.kwargs["payload"] for c in events.append_event.call_args_list], [
+            {"attempt": 1, "code": "invalid_completion", "retrying": True},
+            {"attempt": 2, "code": "invalid_plan", "retrying": True,
+             "reason": "subtask_id", "field": "subtasks[0].id"}])
+        messages = provider.complete.call_args.args[0]
+        self.assertEqual(len(messages), 3)
+        self.assertIn('"goal": "Goal"', messages[1]["content"])
+        self.assertIn("previous response was invalid", messages[2]["content"])
+        self.assertNotIn("private output", str(events.mock_calls) + str(messages))
+
+    def test_detailed_software_plan_preserves_descriptions_over_old_limit(self):
+        descriptions = ["a" * 2212, "b" * 829, "c" * 1007]
+        provider = Provider({"question": None, "subtasks": [
+            {"id": "s%d" % (i + 1), "description": description,
+             "skills": ["builder"], "depends_on": ["s%d" % n for n in range(1, i + 1)]}
+            for i, description in enumerate(descriptions)]})
+        result = Planner(provider, self.agents).plan("Build and verify a software application")
+        self.assertEqual([s.description for s in result.subtasks], descriptions)
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(result.subtasks[2].depends_on, ("s1", "s2"))
+
+    def test_description_limit_feedback_names_field_and_counts_without_content(self):
+        provider, events = Mock(), Mock()
+        description = "sensitive details " * 500
+        provider.complete.return_value = {"subtasks": [{"id": "s1", "description": description}]}
+        with self.assertRaises(PlanValidationError) as raised:
+            Planner(provider, self.agents, events=events).plan("Goal", task_id="root")
+        self.assertEqual(raised.exception.details, {
+            "reason": "description_too_long", "field": "subtasks[0].description",
+            "actual": len(description), "limit": MAX_SUBTASK_DESCRIPTION})
+        feedback = provider.complete.call_args.args[0][-1]["content"]
+        self.assertIn("subtasks[0].description", feedback)
+        self.assertIn(str(len(description)), feedback)
+        self.assertIn(str(MAX_SUBTASK_DESCRIPTION), feedback)
+        self.assertNotIn("sensitive details", feedback + str(events.mock_calls) + str(raised.exception))
+        self.assertEqual(events.append_event.call_args.kwargs["payload"]["reason"], "description_too_long")
+
+    def test_description_boundary_and_dependency_rules_remain_enforced(self):
+        valid = {"subtasks": [{"id": "s1", "description": "x" * MAX_SUBTASK_DESCRIPTION}]}
+        self.assertEqual(len(Planner._parse_result(valid).subtasks[0].description), MAX_SUBTASK_DESCRIPTION)
+        for dependencies, reason in ((["s1"], "dependency_order"), (["s1", "s1"], "duplicate_dependency")):
+            with self.subTest(dependencies=dependencies), self.assertRaises(PlanValidationError) as raised:
+                Planner._parse_result({"subtasks": [{"id": "s1", "description": "Build", "depends_on": dependencies}]})
+            self.assertEqual(raised.exception.details["reason"], reason)
+
+    def test_persistent_invalid_completion_stops_after_three_attempts(self):
+        provider, events = Mock(), Mock()
+        provider.complete.side_effect = ProviderError("private", code="invalid_completion")
+        with self.assertRaises(ProviderError):
+            Planner(provider, self.agents, events=events).plan("Goal", task_id="root")
+        self.assertEqual(provider.complete.call_count, 3)
+        self.assertFalse(events.append_event.call_args.kwargs["payload"]["retrying"])
+
+    def test_authentication_and_clarification_store_failures_are_not_retried(self):
+        provider = Mock()
+        provider.complete.side_effect = ProviderError("private", code="authentication")
+        with self.assertRaises(ProviderError):
+            Planner(provider, self.agents).plan("Goal")
+        self.assertEqual(provider.complete.call_count, 1)
+        provider.reset_mock(side_effect=True)
+        provider.complete.return_value = {"question": "Which file?"}
+        approval = Mock()
+        approval.request_clarification.side_effect = ValueError("Store unavailable")
+        with self.assertRaisesRegex(ValueError, "Store unavailable"):
+            Planner(provider, self.agents, approval).plan("Goal", task_id="root")
+        self.assertEqual(provider.complete.call_count, 1)
+        self.assertEqual(approval.request_clarification.call_count, 1)
 
 
 if __name__ == "__main__":

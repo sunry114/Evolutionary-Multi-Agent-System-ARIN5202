@@ -3,10 +3,21 @@ import unittest
 
 from evo.adapters.persistence.sqlite_memory import SQLiteMemoryStore
 from evo.domain.models import Experience
+from evo.domain.policies import MAX_SUBTASK_DESCRIPTION
 from evo.domain.statuses import TaskStatus
 
 
 class MemoryTests(unittest.TestCase):
+    def test_task_description_uses_the_planner_limit(self):
+        with tempfile.TemporaryDirectory() as root:
+            memory = SQLiteMemoryStore(root, "builder")
+            description = "x" * MAX_SUBTASK_DESCRIPTION
+            memory.add(Experience("builder", description, TaskStatus.SUCCESS, "Verified delivery"))
+            self.assertEqual(memory.list_recent()[0]["task"], description)
+            with self.assertRaises(ValueError):
+                memory.add(Experience("builder", description + "x", TaskStatus.SUCCESS, "Verified delivery"))
+            self.assertEqual(len(memory.list_recent()), 1)
+
     def test_recall_is_relevant_deduplicated_bounded_and_outcome_aware(self):
         with tempfile.TemporaryDirectory() as root:
             memory = SQLiteMemoryStore(root, "builder")

@@ -10,7 +10,7 @@ import uuid
 
 from evo.adapters.tools.filesystem import WorkspaceFilesystem, validate_file_path
 from evo.adapters.tools.linux import DEFAULT_IMAGE, create_arguments, validate_image
-from evo.ports.tools import ExecutionResult, ToolError
+from evo.ports.tools import ExecutionResult, ToolError, ToolCleanupError
 
 
 class DockerPythonRunner:
@@ -135,4 +135,4 @@ class DockerPythonRunner:
         finally:
             removed = self._capture(base + ["rm", "--force", name], 10, 4096)
             if removed.exit_code or removed.timed_out or removed.output_limited:
-                raise ToolError("Docker cleanup failed; inspect containers named evo-python-* before retrying")
+                raise ToolCleanupError("Docker cleanup failed; inspect containers named evo-python-* before retrying")

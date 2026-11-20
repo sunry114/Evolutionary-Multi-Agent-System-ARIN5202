@@ -63,6 +63,30 @@ class ProviderTests(unittest.TestCase):
             with self.subTest(content=content, finish=finish), self.assertRaises(ProviderError):
                 ChatProvider(ProviderConfig(), lambda *a: response(content, finish)).complete([], json_object=True)
 
+    def test_completion_diagnostics_distinguish_truncation_and_malformed_json(self):
+        for content, finish, reason in (("private unfinished data", "length", "truncated"),
+                                         ("private malformed data", "stop", "invalid_json"),
+                                         ("  ", "stop", "empty_content"),
+                                         ("[]", "stop", "not_object"),
+                                         (None, "stop", "invalid_content")):
+            with self.subTest(reason=reason):
+                raw = {**response(content, finish), "usage": {"completion_tokens": 8192}}
+                with self.assertRaises(ProviderError) as raised:
+                    ChatProvider(ProviderConfig(), lambda *a: raw).complete([], json_object=True)
+                self.assertEqual(raised.exception.code, "invalid_completion")
+                self.assertEqual(raised.exception.details["completion_reason"], reason)
+                self.assertEqual(raised.exception.details["completion_tokens"], 8192)
+                self.assertNotIn("private", str(raised.exception) + str(raised.exception.details))
+
+    def test_completion_diagnostics_discard_arbitrary_provider_text(self):
+        error = ProviderError("safe", details={"completion_reason": "secret", "finish_reason": "secret",
+                                             "content_chars": "secret", "completion_tokens": -1, "body": "secret"})
+        self.assertEqual(error.details, {})
+        for raw in ({}, {"choices": []}, {"choices": [{"message": {"content": "secret"}, "finish_reason": []}]}):
+            with self.subTest(raw=raw), self.assertRaises(ProviderError) as raised:
+                ChatProvider(ProviderConfig(), lambda *a: raw).complete([], json_object=True)
+            self.assertNotIn("secret", str(raised.exception) + str(raised.exception.details))
+
     def test_configuration_boundary(self):
         for config in ({"provider": "other"}, {"base_url": "http://api1.hkgai.net"},
                        {"base_url": "https://attacker.test"}, {"timeout": float("nan")},

@@ -8,6 +8,7 @@ import json
 import os
 import threading
 import uuid
+import copy
 from dataclasses import asdict
 from pathlib import Path
 
@@ -143,6 +144,10 @@ class ManagedHarness:
             for key in ("pending", "context", "artifacts", "tool_calls", "baseline_index"):
                 record[key] = previous[key]
             record["model_turns"] = previous.get("model_turns", 0)
+            record["invalid_decisions"] = previous.get("invalid_decisions", 0)
+            record["model_feedback"] = previous.get("model_feedback", "")
+            if "progress_state" in previous:
+                record["progress_state"] = previous["progress_state"]
             record["parent_run_id"] = previous["run_id"]
         control = _Control(record, (lease, agent_lease))
         try:
@@ -236,9 +241,26 @@ class ManagedHarness:
                 self._event(control, "tool_call", {"name": name})
             try:
                 result = self.broker.call(request.task_id, name, arguments, request_id=request_id)
+                if result.get("replayed") is True:
+                    prior = next((call["outcome"] for call in reversed(control.record["context"])
+                                  if call["outcome"].get("action_id") == result.get("action_id")
+                                  and not call["outcome"].get("replayed")), None)
+                    if prior is not None:
+                        # Recover original stdout/stderr if this checkpoint has
+                        # it. The repository otherwise supplies safe metadata.
+                        result["result"] = copy.deepcopy(prior.get("result"))
+            except HarnessCleanupError:
+                raise
             except ToolCallRejected as error:
                 result = {"status": "failed", "error": error.code}
                 hints = {
+                    "action_already_completed": "This approval was already consumed and its action completed. "
+                                                "Do not replay the old approval checkpoint; inspect the latest run.",
+                    "tool_inputs_changed": "Execution inputs changed after approval, or this approval predates "
+                                           "workspace input checks. No code ran. Request run_python again for a new "
+                                           "approval bound to the current inputs; never reuse the old approval.",
+                    "edit_rejected": "The exact edit did not match once. Read the relevant file range and "
+                                     "supply a unique old_text. The file was not changed.",
                     "tool_file_missing": "The target file does not exist. Create it with write_file or import_artifact before retrying; no action ran and no approval was consumed.",
                     "tool_preparation_failed": "The action could not be prepared. Check its arguments, file path and purpose using workspace tools before retrying; no action ran and no approval was consumed.",
                     "path_rejected": "Use a relative workspace path without .. or symlinks. The file suffix must match its purpose; see write_file's allowed suffix list. Changing directories will not fix a suffix mismatch.",
@@ -248,10 +270,15 @@ class ManagedHarness:
                     self.broker.repository.append_event(
                         task_id=request.task_id, event_type="tool_preparation_rejected",
                         actor=request.agent, payload={"name": name, "code": error.code})
-            except Exception:
+            except Exception as error:
                 control.failure = "platform_tool_error"
                 control.stop.set()
-                result = {"status": "failed", "error": "platform_tool_rejected"}
+                category = type(error).__name__
+                if category not in {"ConflictError", "HarnessError", "ToolError", "ValueError", "TypeError",
+                                    "PermissionError", "FileNotFoundError", "OSError", "KeyError"}:
+                    category = "unexpected_exception"
+                self._event(control, "platform_tool_exception", {"name": name, "exception_type": category})
+                result = {"status": "failed", "error": "platform_tool_rejected", "exception_type": category}
             encoded = json.dumps(self._clean(result), ensure_ascii=False)
             if len(encoded.encode()) > 16384:
                 detail = result.get("result")
@@ -271,7 +298,7 @@ class ManagedHarness:
                 else:
                     control.record["pending"] = None
                     control.record["context"].append(self._clean({"tool": name, "arguments": arguments, "outcome": result}))
-                    if name in ("write_file", "import_artifact") and result.get("status") == "success":
+                    if name in ("write_file", "edit_file", "import_artifact") and result.get("status") == "success":
                         artifact = result["result"]
                         control.record["artifacts"] = [a for a in control.record["artifacts"] if a["path"] != artifact["path"]] + [artifact]
                 self._event(control, "tool_result", {"name": name, "status": result.get("status"),
@@ -288,7 +315,7 @@ class ManagedHarness:
                 if outcome["status"] == "waiting_human":
                     status, error = "waiting_human", ""
                 elif (self.adapter_name in ("claude_code", "provider")
-                      and outcome.get("error") in ("tool_file_missing", "tool_preparation_failed")):
+                      and outcome.get("error") in ("tool_file_missing", "tool_preparation_failed", "tool_inputs_changed")):
                     # A file may disappear while waiting for approval. This
                     # failed before claim/execution, so let the model repair it.
                     status, text, error, exit_code = self._execute(control, request)

@@ -10,7 +10,7 @@ from pathlib import PurePosixPath
 from evo.domain.models import Experience, Message, Task
 from evo.domain.evidence import ArtifactCheck
 from evo.domain.statuses import TaskStatus
-from evo.domain.policies import DEFAULT_LIMITS, validate_execution_budget, team_coordinator
+from evo.domain.policies import DEFAULT_LIMITS, PlanValidationError, validate_execution_budget, team_coordinator
 from evo.ports.harness import ArtifactRef, ResumeRef, RunRequest, ToolCall, identifier
 
 
@@ -162,9 +162,31 @@ class Orchestrator:
             self._move(root_id, "assigned", owner="collective")
             self._move(root_id, "running")
             return self._drive(root_id)
-        except Exception:
+        except Exception as error:
             if self.store.get_task(root_id)["status"] == "planning":
-                self._move(root_id, "failed", result="Planning failed")
+                # Never persist exception text: provider bodies can contain secrets.
+                hints = {
+                    "invalid_completion": "模型连续返回空白、截断或非法 JSON，请检查模型服务或切换配置后重试。",
+                    "invalid_response": "模型接口返回格式错误，请检查接口配置。",
+                    "authentication": "模型服务认证失败，请检查 API 密钥。",
+                    "permission": "模型服务拒绝访问，请检查模型权限。",
+                    "endpoint": "模型接口不存在，请检查服务地址。",
+                    "rate_limit": "模型服务限流，请稍后重试。",
+                    "connection": "无法连接模型服务，请检查网络和服务状态。",
+                    "tls": "模型服务证书校验失败，请检查系统证书。",
+                    "http_error": "模型服务 HTTP 请求失败，请检查服务状态。",
+                }
+                code = getattr(error, "code", None)
+                if code not in hints:
+                    code = "invalid_plan" if isinstance(error, ValueError) else "planning_error"
+                hint = hints.get(code, "规划结果未通过校验。" if code == "invalid_plan"
+                                 else "规划处理失败，请检查服务配置。")
+                details = {}
+                if isinstance(error, PlanValidationError):
+                    hint = "规划结果未通过校验：" + str(error)
+                    details = error.details
+                self._event(root_id, "planning_failed", {"code": code, "message": hint, **details})
+                self._move(root_id, "failed", result="Planning failed [" + code + "]: " + hint)
             raise
 
     def _request(self, task_id, owner, description, actions):
@@ -298,9 +320,36 @@ class Orchestrator:
                     "authentication", "permission", "endpoint", "rate_limit", "http_error",
                     "tls", "connection", "invalid_response"))
                 code = outcome.error if outcome.error in safe_errors else "execution_failed"
+                details = {}
+                suffix = ""
+                if code == "invalid_decision_limit":
+                    invalid = [e.payload for e in events if e.kind == "invalid_decision"]
+                    last = invalid[-1] if invalid else {}
+                    reasons = {
+                        "truncated": "模型输出达到 token 上限被截断，请分段生成文件。",
+                        "empty_content": "模型连续返回空白回复。",
+                        "invalid_json": "模型连续返回非法 JSON。",
+                        "not_object": "模型连续返回非对象的 JSON。",
+                        "invalid_content": "模型回复内容类型错误。",
+                        "unsupported_finish": "模型回复以不支持的方式结束。",
+                        "malformed_envelope": "模型接口返回结构错误。",
+                        "invalid_tool_call": "模型连续返回无效函数调用，请检查动作参数和模型兼容性。",
+                    }
+                    reason = last.get("completion_reason")
+                    if reason in reasons:
+                        details = {"completion_reason": reason}
+                        for key in ("content_chars", "completion_tokens"):
+                            if type(last.get(key)) is int:
+                                details[key] = last[key]
+                        suffix = " [" + reason + "]: " + reasons[reason]
+                    issues = {"missing_type", "invalid_type", "unknown_tool", "arguments_not_object"}
+                    issue = last.get("action_issue")
+                    if not suffix and issue in issues:
+                        details = {"action_issue": issue}
+                        suffix = " [" + issue + "]: 模型动作未匹配工具协议，未执行被拒绝的动作。"
                 self._event(task_id, "harness_error", {"code": code,
-                            "exit_code": outcome.exit_code if type(outcome.exit_code) is int else None})
-                self._move(task_id, "failed", result="Harness failed: " + code)
+                            "exit_code": outcome.exit_code if type(outcome.exit_code) is int else None, **details})
+                self._move(task_id, "failed", result="Harness failed: " + code + suffix)
         except Exception:
             if self.store.get_task(task_id)["status"] == "running":
                 self._move(task_id, "failed", result="Execution or verification failed")

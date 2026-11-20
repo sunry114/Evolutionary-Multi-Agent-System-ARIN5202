@@ -6,7 +6,7 @@ from pathlib import PurePosixPath
 from typing import Mapping
 
 from evo.domain.policies import CRITICAL_TOOLS
-from evo.ports.tools import ExecutionResult, ToolError
+from evo.ports.tools import ExecutionResult, ToolError, ToolCleanupError
 from evo.adapters.tools.filesystem import PURPOSE_SUFFIXES
 
 
@@ -16,6 +16,14 @@ class ActionPreparationError(ValueError):
     def __init__(self, code):
         self.code = code
         super().__init__(code)
+
+
+class ActionAlreadyCompleted(ActionPreparationError):
+    """A matching approved action has a durable result; never execute it again."""
+
+    def __init__(self, action):
+        super().__init__("action_already_completed")
+        self.action = action
 
 
 class ActionExecutor:
@@ -53,6 +61,8 @@ class ActionExecutor:
             purpose = "code" if name == "run_python" else args["purpose"]
             content = self.workspace.read_file(args["path"], purpose=purpose)
             payload["sha256"] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            if name == "run_python":
+                payload["workspace_sha256"] = self.workspace.input_digest()
         if name == "git_commit":
             self.git.validate_commit(args["paths"], args["message"])
             payload["sha256"] = {}
@@ -81,19 +91,41 @@ class ActionExecutor:
             payload = self._prepare(name, arguments)
         except FileNotFoundError:
             raise ActionPreparationError("tool_file_missing") from None
+        except ToolCleanupError:
+            raise
         except (ToolError, ValueError, TypeError, OSError):
             raise ActionPreparationError("tool_preparation_failed") from None
         critical = name in CRITICAL_TOOLS or (name == "git_commit" and self.require_commit_approval)
         if critical:
             if request_id is None:
                 request_id = self.approval.request_approval(task_id, self.agent, name, payload)
-            self.approval.check_scope(request_id, task_id, self.agent, name, payload)
+            try:
+                self.approval.check_scope(request_id, task_id, self.agent, name, payload)
+            except ValueError:
+                previous = self.repository.get_approval_request(request_id)
+                if (previous["task_id"] == task_id and previous["agent"] == self.agent
+                        and previous["action"] == name and name == "run_python"
+                        and previous["payload"].get("arguments") == payload["arguments"]):
+                    raise ActionPreparationError("tool_inputs_changed") from None
+                raise
             decision = self.approval.get_answer(request_id)
             if decision is None:
                 return {"status": "waiting_human", "request_id": request_id}
             if decision["status"] != "approved":
                 return {"status": "blocked", "request_id": request_id}
-            if not self.approval.claim(request_id, task_id, self.agent, name, payload):
+            previous = self.repository.get_action(request_id)
+            if previous["status"] in ("success", "failed"):
+                raise ActionAlreadyCompleted(previous)
+            try:
+                claimed = self.approval.claim(request_id, task_id, self.agent, name, payload)
+            except ValueError:
+                # Another consumer may have completed between the read and
+                # atomic claim. A running/unknown outcome must still stop.
+                previous = self.repository.get_action(request_id)
+                if previous["status"] in ("success", "failed"):
+                    raise ActionAlreadyCompleted(previous) from None
+                raise
+            if not claimed:
                 return {"status": "blocked", "request_id": request_id}
             action_id = request_id
         else:
@@ -123,6 +155,10 @@ class ActionExecutor:
                 summary, succeeded = {}, True
             else:
                 raise ToolError("Invalid tool execution result")
+        except ToolCleanupError:
+            self.repository.finish_action(action_id, succeeded=False, result={"error": "cleanup_failed"},
+                                          fail_task_on_error=False)
+            raise
         except (ToolError, PermissionError, ValueError, OSError):
             summary, succeeded = {"error": "tool_failed"}, False
             result = None

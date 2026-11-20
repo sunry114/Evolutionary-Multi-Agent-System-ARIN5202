@@ -56,7 +56,12 @@ def isolation_arguments(workspace: Path, name: str, *, network: str = "none") ->
 
 
 def create_arguments(workspace: Path, name: str, image_id: str, script: str) -> list[str]:
+    # -I intentionally drops host/PYTHONPATH paths. Add only container-local
+    # project paths so multi-file programs and tests can import their modules.
+    bootstrap = ("import os,runpy,sys; p=sys.argv[1]; "
+                 "sys.path[:0]=list(dict.fromkeys([os.path.dirname(p),'/workspace'])); "
+                 "sys.argv=[p]; runpy.run_path(p,run_name='__main__')")
     return isolation_arguments(workspace, name) + [
         "--env", "PYTHONDONTWRITEBYTECODE=1", "--entrypoint", "python",
-        image_id, "-I", "-B", "-u", "/workspace/" + script,
+        image_id, "-I", "-B", "-u", "-c", bootstrap, "/workspace/" + script,
     ]

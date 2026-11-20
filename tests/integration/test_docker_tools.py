@@ -3,6 +3,7 @@ import os
 import tempfile
 import subprocess
 import unittest
+from unittest.mock import Mock
 from pathlib import Path
 
 from evo.adapters.tools.docker import DockerPythonRunner
@@ -12,6 +13,42 @@ from evo.adapters.tools.linux import DEFAULT_IMAGE
 
 @unittest.skipUnless(os.environ.get("EVO_DOCKER_TESTS") == "1", "Set EVO_DOCKER_TESTS=1 for real Docker tests")
 class DockerIntegrationTests(unittest.TestCase):
+    def test_same_approved_python_inputs_return_recorded_result_without_second_execution(self):
+        from evo.adapters.persistence.sqlite_store import SQLiteStore
+        from evo.application.approvals import ApprovalService
+        from evo.application.executor import ActionExecutor
+        from evo.adapters.harness.mcp_bridge import PlatformToolBroker
+        from evo.domain.models import Task
+        from evo.domain.statuses import TaskStatus
+        store = SQLiteStore(self.root / "duplicate-test.sqlite3")
+        store.save_task(Task("duplicate", "Synthetic repeated invocation", owner="alice", status=TaskStatus.RUNNING))
+        approval = ApprovalService(store)
+        self.fs.write_file("verify.py", "print('verified-once')\n", purpose="code")
+        runner = Mock(wraps=self.runner)
+        broker = PlatformToolBroker(ActionExecutor(store, approval, agent="alice", workspace=self.fs,
+                                                   python=runner, git=Mock()))
+        pending = broker.call("duplicate", "run_python", {"path": "verify.py"})
+        self.assertEqual(pending["status"], "waiting_human")
+        approval.answer(pending["request_id"], {"approved": True})
+        first = broker.call("duplicate", "run_python", {"path": "verify.py"}, request_id=pending["request_id"])
+        self.assertEqual(first["status"], "success")
+        second = broker.call("duplicate", "run_python", {"path": "verify.py"})
+        self.assertEqual(second["status"], "success")
+        self.assertTrue(second["replayed"])
+        self.assertEqual(second["action_id"], first["action_id"])
+        self.assertEqual(second["result"]["exit_code"], 0)
+        runner.run_python.assert_called_once_with("verify.py", approved=True)
+        self.assertEqual(store.list_pending_requests(), [])
+
+    def test_multifile_projects_import_siblings_and_workspace_packages(self):
+        self.fs.write_file("maths.py", "def total(q, p): return q * p\n", purpose="code")
+        self.fs.write_file("pkg/__init__.py", "VALUE = 42\n", purpose="code")
+        self.fs.write_file("tests/verify.py", "from maths import total\nfrom pkg import VALUE\n"
+                           "assert total(3, 4) == 12\nassert VALUE == 42\nprint('project imports passed')\n", purpose="code")
+        result = self.runner.run_python("tests/verify.py", approved=True)
+        self.assertEqual(result.exit_code, 0, result.stderr)
+        self.assertIn("project imports passed", result.stdout)
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
