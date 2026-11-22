@@ -1,4 +1,4 @@
-"""Bound both pipes and stdin, enforce deadlines, kill the entire process group."""
+"""Read bounded process output and enforce process deadlines."""
 
 import os
 import selectors
@@ -7,17 +7,22 @@ import subprocess
 import time
 from dataclasses import dataclass
 
+from .output import TOOL_PREVIEW_BYTES
+
 
 @dataclass(frozen=True)
 class ProcessOutcome:
     exit_code: int
     reason: str = ""
+    stderr: str = ""
 
 
-def capture(process, prompt, *, timeout, limit, stop, on_line, max_line_bytes=1024 * 1024):
+def capture(process, prompt, *, timeout, max_event_bytes, stop, on_line, keep_stderr=False):
     deadline = time.monotonic() + timeout
     incoming = bytearray()
-    written = total = 0
+    stderr = bytearray()
+    stderr_truncated = False
+    written = 0
     reason = ""
     data = prompt.encode("utf-8")
     try:
@@ -48,25 +53,28 @@ def capture(process, prompt, *, timeout, limit, stop, on_line, max_line_bytes=10
                     chunk = os.read(stream.fileno(), 8192)
                     if not chunk:
                         selector.unregister(stream)
-                        if name == "stdout" and incoming:
+                        if name == "stdout" and incoming and not incoming.isspace():
                             on_line(bytes(incoming))
-                            incoming.clear()
                         continue
-                    total += len(chunk)
-                    if total > limit:
-                        reason = "output_limit"
-                        break
                     if name == "stderr":
-                        continue  # Drain, count, and discard; never log raw diagnostics.
-                    incoming.extend(chunk)
-                    if len(incoming) > max_line_bytes:
-                        reason = "protocol_error"
+                        if keep_stderr:
+                            stderr.extend(chunk)
+                            if len(stderr) > TOOL_PREVIEW_BYTES:
+                                del stderr[:-TOOL_PREVIEW_BYTES]
+                                stderr_truncated = True
+                        continue
+                    parts = chunk.split(b"\n")
+                    for index, part in enumerate(parts):
+                        if len(incoming) + len(part) > max_event_bytes:
+                            reason = "event_size_limit"
+                            break
+                        incoming.extend(part)
+                        if index < len(parts) - 1:
+                            if incoming and not incoming.isspace():
+                                on_line(bytes(incoming))
+                            incoming.clear()
+                    if reason:
                         break
-                    while b"\n" in incoming:
-                        line, _, rest = incoming.partition(b"\n")
-                        incoming[:] = rest
-                        if line.strip():
-                            on_line(bytes(line))
                 if reason:
                     break
             if not reason:
@@ -84,4 +92,7 @@ def capture(process, prompt, *, timeout, limit, stop, on_line, max_line_bytes=10
         for stream in (process.stdin, process.stdout, process.stderr):
             if not stream.closed:
                 stream.close()
-    return ProcessOutcome(process.returncode, reason)
+    diagnostic = stderr.decode("utf-8", errors="replace")
+    if stderr_truncated:
+        diagnostic = "[Earlier stderr truncated]\n" + diagnostic
+    return ProcessOutcome(process.returncode, reason, diagnostic)

@@ -25,11 +25,14 @@ class ProxyTests(unittest.TestCase):
                                  "body": json.loads(self.rfile.read(int(self.headers["Content-Length"])))})
                 status = 302 if self.server.redirect else 200
                 self.send_response(status)
-                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Type", getattr(self.server, "content_type", "application/json"))
                 self.send_header("Location", "https://unapproved.example/")
                 self.send_header("Set-Cookie", "private=value")
                 self.end_headers()
-                self.wfile.write(json.dumps(getattr(self.server, "reply", {"ok": True})).encode())
+                body = getattr(self.server, "raw_reply", None)
+                if body is None:
+                    body = json.dumps(getattr(self.server, "reply", {"ok": True})).encode()
+                self.wfile.write(body)
 
         self.upstream = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.upstream.redirect = False
@@ -94,6 +97,26 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(self.request()[0], 502)
         self.assertEqual(self.received, [])
 
+    def test_later_stream_is_complete_after_crossing_eight_mib_across_requests(self):
+        self.upstream.content_type = "text/event-stream"
+        self.upstream.raw_reply = b"data: " + b"x" * (5 * 1024 * 1024) + b"\n\nevent: message_stop\n\n"
+        for _ in range(2):
+            status, _, body = self.request()
+            self.assertEqual(status, 200)
+            self.assertTrue(body == self.upstream.raw_reply)
+
+    def test_single_response_over_limit_does_not_affect_next_response(self):
+        self.upstream.raw_reply = b"x" * (8 * 1024 * 1024 + 1)
+        self.assertEqual(self.request()[0], 502)
+        self.upstream.raw_reply = b'{"ok":true}'
+        self.assertEqual(self.request()[2], self.upstream.raw_reply)
+
+    def test_empty_success_response_returns_gateway_error(self):
+        self.upstream.raw_reply = b""
+        for kind in ("application/json", "text/event-stream"):
+            self.upstream.content_type = kind
+            self.assertEqual(self.request()[0], 502)
+
 
 class HKGAIProxyTests(unittest.TestCase):
     request = ProxyTests.request
@@ -142,3 +165,11 @@ class HKGAIProxyTests(unittest.TestCase):
         status, _, _ = self.request(body={"messages": [{"role": "user", "content": [{"type": "image"}]}]})
         self.assertEqual(status, 502)
         self.assertEqual(self.received, [])
+
+    def test_translated_responses_have_independent_size_limits(self):
+        text = "x" * (3 * 1024 * 1024)
+        self.upstream.reply["choices"][0]["message"]["content"] = text
+        for _ in range(2):
+            status, _, body = self.request()
+            self.assertEqual(status, 200)
+            self.assertTrue(json.loads(body)["content"][0]["text"] == text)

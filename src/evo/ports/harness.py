@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Mapping, Protocol
 
 
+MAX_RUN_PROMPT_BYTES = 32768
+
+
 class HarnessError(RuntimeError):
     """Safe-to-report lifecycle, configuration or protocol failure."""
 
@@ -50,7 +53,7 @@ class RunRequest:
         if not self.workspace.is_absolute():
             raise ValueError("Harness workspace must be absolute")
         if (not isinstance(self.prompt, str) or not self.prompt.strip()
-                or len(self.prompt.encode("utf-8")) > 32768
+                or len(self.prompt.encode("utf-8")) > MAX_RUN_PROMPT_BYTES
                 or not isinstance(self.role, str) or len(self.role.encode("utf-8")) > 8192
                 or not isinstance(self.memory, tuple) or len(self.memory) > 8
                 or any(not isinstance(x, str) or len(x.encode("utf-8")) > 8192 for x in self.memory)

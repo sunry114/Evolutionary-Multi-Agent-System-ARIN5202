@@ -5,6 +5,15 @@ from uuid import uuid4
 from evo.domain.models import Message
 
 
+def parse_issue_title(payload):
+    if "title" not in payload:
+        return None
+    title = payload["title"]
+    if not isinstance(title, str) or len(title.strip().splitlines()) != 1:
+        raise ValueError("Issue title must be a non-empty single line")
+    return title.strip()
+
+
 def issue_lane(task):
     if task["status"] == "created":
         return "draft"
@@ -52,8 +61,11 @@ class IssueService:
         negotiations = []
         logs = []
         artifacts = []
+        source_group = None
         for event in events:
             kind = event["event_type"]
+            if kind == "issue_group_linked" and event["task_id"] == issue_id:
+                source_group = event["payload"]
             if kind.startswith("assignment_"):
                 negotiations.append(event)
             elif kind not in ("issue_config", "run_config", "memory_context"):
@@ -68,8 +80,10 @@ class IssueService:
             "issue": issue, "task": by_id[task_id], "current": current, "runs": runs, "tree": tasks,
             "children": [task for task in tasks if task["parent_id"] == task_id],
             "lane": issue_lane(current), "next_action": self._next_action(current, approvals),
-            "messages": [message for message in messages if message["kind"] in ("comment", "group", "agent")],
+            "messages": [message for message in messages
+                         if message["kind"] in ("comment", "group", "agent", "run_error")],
             "approvals": approvals, "negotiations": negotiations, "logs": logs, "artifacts": artifacts,
+            "source_group": source_group,
         }
 
     def comment(self, task_id, content):

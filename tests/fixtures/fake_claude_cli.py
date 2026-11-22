@@ -129,12 +129,41 @@ def main():
     builtins = ["Bash", "Read", "Write"] if mode.startswith("native_issue") else []
     print(json.dumps({"type": "system", "subtype": "init", "session_id": session, "tools": builtins,
                       "mcp_servers": [{"name": "evo", "status": "connected"}]}), flush=True)
+    if mode == "native_issue_api_error":
+        error = "API Error: 401 fixture-credential authentication rejected"
+        print(json.dumps({"type": "system", "subtype": "api_retry", "session_id": session,
+                          "error": "authentication_failed"}))
+        print(json.dumps({"type": "assistant", "session_id": session, "is_api_error_message": True,
+                          "message": {"content": [{"type": "text", "text": error}]}}))
+        print(json.dumps({"type": "result", "subtype": "success", "session_id": session,
+                          "is_error": True, "result": error}))
+        return 1
+    if mode == "native_issue_result_errors":
+        print(json.dumps({"type": "result", "subtype": "error_during_execution", "session_id": session,
+                          "is_error": True, "errors": ["Connection closed by the model API", "Request ID: fixture"]}))
+        return 1
+    if mode == "native_issue_stderr":
+        sys.stderr.write("x" * 10000 + "\nUnable to connect with fixture-credential\n")
+        return 1
+    if mode == "native_issue_api_timeout":
+        print(json.dumps({"type": "system", "subtype": "api_retry", "session_id": session,
+                          "error": "connection_error"}), flush=True)
+        time.sleep(60)
+        return 1
     if mode == "blocked_native":
         print(json.dumps({"type": "system", "subtype": "init", "session_id": session, "tools": ["Bash"]}), flush=True)
     elif mode == "failed_mcp":
         print(json.dumps({"type": "system", "subtype": "init", "session_id": session,
                           "mcp_servers": [{"name": "evo", "status": "failed"}]}), flush=True)
     else:
+        if mode in ("large_stream", "oversized_event"):
+            if mode == "large_stream":
+                for _ in range(1025):
+                    os.write(2, b"x" * 8192)
+            event = json.dumps({"type": "assistant", "session_id": session, "message": {"content": [
+                {"type": "text", "text": "x" * 17000}]}})
+            for _ in range(520 if mode == "large_stream" else 1):
+                print(event)
         if mode == "system_status_updates":
             status = json.dumps({"type": "system", "subtype": "status", "session_id": session})
             for _ in range(520):
@@ -143,20 +172,29 @@ def main():
             for item in prompt.get("archived_inputs", []):
                 fixture = Path(os.environ["FAKE_MCP_SOCKET"]).parent / item["path"].removeprefix("/broker/")
                 assert fixture.read_text() == "Previous output"
-            for name in ("Bash", "Write", "Read"):
-                tool_id = "test_" + name
+            tools = ("Bash", "Write", "Read")
+            if mode == "native_issue_many_tools":
+                tools *= 8
+            for index, name in enumerate(tools):
+                tool_id = "test_" + str(index)
                 print(json.dumps({"type": "assistant", "session_id": session, "message": {"content": [
                     {"type": "tool_use", "name": name, "id": tool_id, "input": {}}]}}), flush=True)
+                output = "fixture result"
+                if mode == "native_issue_long_tool_output" and name == "Bash":
+                    output = [{"type": "text", "text": "fixture-credential " + "长" * 5000 + "tail"}]
                 print(json.dumps({"type": "user", "session_id": session, "message": {"content": [
-                    {"type": "tool_result", "tool_use_id": tool_id, "content": "fixture result"}]}}), flush=True)
+                    {"type": "tool_result", "tool_use_id": tool_id, "content": output,
+                     "is_error": mode == "native_issue_many_tools" and index == 0}]}}), flush=True)
         if mode.startswith("fixture-delegation-") or mode.partition("\n")[0] in (INCIDENT_REPORT, INCIDENT_REVIEW):
             delegation_scenario(prompt)
-        if mode in ("mcp", "missing_git_repository"):
+        if mode in ("mcp", "missing_git_repository", "large_mcp"):
             with socket.socket(socket.AF_UNIX) as channel:
                 channel.connect(os.environ["FAKE_MCP_SOCKET"])
                 with channel.makefile("rb") as reader:
                     call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                             "params": {"name": "write_file", "arguments": {"path": "fake.md", "content": "from MCP"}}}
+                    if mode == "large_mcp":
+                        call["params"] = {"name": "read_file", "arguments": {"path": "large.md"}}
                     if mode == "missing_git_repository":
                         status = {**call, "params": {"name": "git_status"}}
                         channel.sendall(json.dumps(status).encode() + b"\n")
@@ -171,10 +209,16 @@ def main():
                     channel.sendall(json.dumps(call).encode() + b"\n")
                     result = json.loads(reader.readline())
                     assert not result["result"]["isError"]
+                    if mode == "large_mcp":
+                        value = json.loads(result["result"]["content"][0]["text"])["result"]
+                        assert value == "a" * 65536 + "end of tool result"
         print(json.dumps({"type": "assistant", "session_id": session,
                           "message": {"content": [{"type": "text", "text": "fixture response"}]}}), flush=True)
+        result = "fixture-credential" if mode == "secret" else "fixture success"
+        if mode == "native_issue_many_tools":
+            result = "x" * 10000 + "\nThe first tool failed. The remaining steps finished."
         print(json.dumps({"type": "result", "session_id": session, "is_error": mode == "error_result",
-                          "result": "fixture-credential" if mode == "secret" else "fixture success"}), flush=True)
+                          "result": result}), flush=True)
         if builtins:
             path = "../outside.md" if mode == "native_issue_bad_export" else "hello-world.md"
             print(json.dumps({"type": "evo_artifact", "path": path,

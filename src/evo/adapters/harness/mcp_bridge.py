@@ -10,6 +10,8 @@ from dataclasses import asdict, is_dataclass
 
 from evo.ports.harness import HarnessError, ToolInputError
 
+from .container_client import MCP_RESPONSE_BYTES
+
 
 def schema(properties, required=()):
     return {"type": "object", "properties": properties, "required": list(required),
@@ -184,7 +186,13 @@ class MCPBridge:
                     except Exception:
                         response = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Invalid MCP request"}}
                     if response is not None:
-                        self.wfile.write(json.dumps(response, ensure_ascii=False).encode() + b"\n")
+                        encoded = json.dumps(response, ensure_ascii=False).encode() + b"\n"
+                        if len(encoded) > MCP_RESPONSE_BYTES:
+                            encoded = json.dumps({
+                                "jsonrpc": "2.0", "id": response["id"],
+                                "error": {"code": -32000, "message": "MCP response exceeds its message limit"},
+                            }).encode() + b"\n"
+                        self.wfile.write(encoded)
                         self.wfile.flush()
 
         self.server = _Server(str(path), Handler)

@@ -134,7 +134,7 @@ textarea { width: 100%; resize: vertical; min-height: 74px; }
 }
 .issue-row:last-child { border-radius: 0 0 12px 12px; }
 .issue-row:hover { text-decoration: none; background: #f7f4ff; }
-.title-cell { font-weight: 650; overflow-wrap: anywhere; min-width: 0; }
+.title-cell { font-weight: 650; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .owner-cell { color: #5c526f; overflow-wrap: anywhere; }
 .issue-key, .row-date { color: var(--muted); font-size: 11px; }
 .row-date { text-align: right; }
@@ -161,6 +161,7 @@ textarea { width: 100%; resize: vertical; min-height: 74px; }
 .tab { color: var(--muted); border: 0; border-bottom: 2px solid transparent; background: transparent; padding: 13px 8px 11px; white-space: nowrap; font-weight: 650; }
 .tab[aria-pressed="true"] { color: var(--accent); border-bottom-color: var(--accent); }
 .panel { padding: 17px; min-width: 0; }
+.discussion-source { margin-bottom: 12px; }
 .inspector { display: grid; gap: 12px; min-width: 0; }
 .inspector .card { padding: 14px; }
 .inspector dl { display: grid; grid-template-columns: 68px minmax(0, 1fr); gap: 8px 6px; margin: 12px 0 0; align-items: baseline; }

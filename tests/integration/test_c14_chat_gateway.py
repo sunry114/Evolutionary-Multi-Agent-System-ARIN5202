@@ -183,6 +183,55 @@ class C14GatewayTests(unittest.TestCase):
         self.assertEqual(self.provider.calls, [])
         self.assertEqual(self.app.dispatch("messages", {})["messages"], [])
 
+    def test_named_group_issue_import_copies_messages_and_keeps_source_history(self):
+        group = self.app.dispatch("new-group", {"name": "RealSE", "members": ["builder"]})["group"]
+        other = SQLiteApplication(self.state / "other")
+        foreign = other.dispatch("new-group", {"name": "RealSE", "members": ["builder"]})["group"]
+        self.app.dispatch("group", {"group_id": group["id"], "message": "Keep the @builder exchange"})
+        original = self.app.store.list_group_messages(group_id=group["id"])
+        with self.http_service() as (request, token):
+            invalid = {"prompt": "Work from a group", "group_id": foreign["id"], "agent": "builder"}
+            self.assertEqual(request("/api/create", invalid, token)[0], 409)
+            self.assertEqual(self.app.store.list_tasks(), [])
+            payload = {"prompt": "Work from RealSE", "group_id": group["id"]}
+            status, draft = request("/api/create", payload, token)
+            self.assertEqual(status, 200)
+            issue_id = json.loads(draft)["task"]["id"]
+            self.app.dispatch("group", {"group_id": group["id"], "message": "Later discussion"})
+            status, detail = request("/api/task", {"task_id": issue_id}, token)
+            self.assertEqual(status, 200)
+        detail = json.loads(detail)
+        self.assertEqual(detail["source_group"], {"id": group["id"], "name": "RealSE"})
+        keys = ("kind", "sender", "content", "created_at")
+        self.assertEqual([tuple(row[key] for key in keys) for row in detail["messages"]],
+                         [tuple(row[key] for key in keys) for row in original])
+        self.assertEqual(detail["executions"], [])
+        history = self.app.store.list_group_messages(group_id=group["id"])
+        self.assertEqual(history[:len(original)], original)
+        self.assertEqual(len(history), len(original) + 2)
+
+    def test_http_links_existing_issue_once_and_keeps_its_discussion(self):
+        first = self.app.dispatch("new-group", {"name": "RealSE", "members": ["builder"]})["group"]
+        second = self.app.dispatch("new-group", {"name": "Other", "members": ["builder"]})["group"]
+        self.app.dispatch("group", {"group_id": first["id"], "message": "Group requirement"})
+        with self.http_service() as (request, token):
+            _, created = request("/api/create", {"prompt": "Already created"}, token)
+            issue_id = json.loads(created)["task"]["id"]
+            status, _ = request("/api/comment", {"task_id": issue_id, "message": "Existing comment"}, token)
+            self.assertEqual(status, 200)
+            payload = {"task_id": issue_id, "group_id": first["id"]}
+            self.assertEqual(request("/api/link-group", payload)[0], 403)
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                statuses = list(pool.map(lambda _: request("/api/link-group", payload, token)[0], range(2)))
+            self.assertEqual(statuses, [200, 200])
+            self.assertEqual(request("/api/link-group", {**payload, "group_id": second["id"]}, token)[0], 409)
+            _, detail = request("/api/task", {"task_id": issue_id}, token)
+        detail = json.loads(detail)
+        self.assertEqual(detail["source_group"], {"id": first["id"], "name": "RealSE"})
+        self.assertEqual([row["content"] for row in detail["messages"]],
+                         ["Group requirement", "Persisted agent reply", "Existing comment"])
+        self.assertEqual(detail["executions"], [])
+
     def test_missing_key_is_actionable_and_does_not_save_incoming_message(self):
         app = SQLiteApplication(self.state)
         with patch("evo.adapters.llm.credentials.load_key", side_effect=ValueError("secret")):

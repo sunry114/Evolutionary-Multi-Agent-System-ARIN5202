@@ -74,13 +74,14 @@ class SQLiteMigrationTests(unittest.TestCase):
                 connection.commit()
 
             store = SQLiteStore(database)
-            self.assertEqual(store.schema_version(), 9)
+            self.assertEqual(store.schema_version(), 11)
             revision = store.get_task("revision")
             self.assertIsNone(revision["parent_id"])
             self.assertEqual((revision["assignee_id"], revision["routing_mode"]), ("builder", "direct"))
             self.assertEqual(store.issue_id("revision"), "original")
             issue, = store.list_issues()
             self.assertEqual((issue["id"], issue["current_task_id"]), ("original", "revision"))
+            self.assertEqual((issue["title"], issue["prompt"]), (None, "Report"))
             settings = {"checks": {"s1": {"path": "report.md", "exact": "done"}}, "memory_enabled": False}
             self.assertEqual(store.latest_event_payload("revision", "issue_config"), settings)
             self.assertEqual(store.latest_event_payload("original", "issue_config"), settings)
@@ -128,11 +129,11 @@ class SQLiteMigrationTests(unittest.TestCase):
             first = SQLiteStore(database)
 
             self.assertTrue(database.is_file())
-            self.assertEqual(first.schema_version(), 9)
+            self.assertEqual(first.schema_version(), 11)
 
             second = SQLiteStore(database)
 
-            self.assertEqual(second.schema_version(), 9)
+            self.assertEqual(second.schema_version(), 11)
 
             with closing(sqlite3.connect(database)) as connection:
                  rows = connection.execute(
@@ -145,7 +146,7 @@ class SQLiteMigrationTests(unittest.TestCase):
 
             self.assertEqual(
                 rows,
-                [(1, "0001_initial"), (2, "0002_issues"), (3, "0003_routing"), (4, "0004_delegations"), (5, "0005_workbench"), (6, "0006_squad_routing"), (7, "0007_issue_runs"), (8, "0008_chat_threads"), (9, "0009_group_chats")],
+                list(enumerate(MIGRATIONS, start=1)),
             )
 
     def test_foreign_keys_busy_timeout_and_schema_version(self):
@@ -159,7 +160,7 @@ class SQLiteMigrationTests(unittest.TestCase):
 
             self.assertEqual(settings["foreign_keys"], 1)
             self.assertEqual(settings["busy_timeout"], 4321)
-            self.assertEqual(settings["user_version"], 9)
+            self.assertEqual(settings["user_version"], 11)
 
     def test_connection_is_released_and_directory_can_be_removed(self):
         temp = tempfile.mkdtemp()

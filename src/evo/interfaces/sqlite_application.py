@@ -9,7 +9,7 @@ from evo.adapters.persistence.sqlite_store import SQLiteStore
 from evo.application.reviews import ReviewService
 from evo.application.approvals import ApprovalService
 from evo.application.chat import ChatService, parse_group_chat
-from evo.application.issues import IssueService
+from evo.application.issues import IssueService, parse_issue_title
 from evo.domain.models import Agent, Task
 from evo.application.artifact_checks import parse_checks
 from evo.domain.routing import issue_route
@@ -26,7 +26,7 @@ CAPABILITIES = {name: True
                 for name in ("tasks", "task", "trace", "review", "revision",
                              "create", "start", "resume", "dm", "group", "answer", "memory",
                              "eval", "metrics", "messages", "configure", "assign", "comment", "artifact",
-                             "chat-threads", "new-chat", "new-group")}
+                             "chat-threads", "new-chat", "new-group", "link-group")}
 
 
 def required_text(payload, name):
@@ -90,22 +90,26 @@ class SQLiteApplication:
         return assignee_type, assignee_id, mode.value
 
     def create_task(self, payload, *, after_insert=None):
-        if set(payload) - {"prompt", "agent", "squad", "checks", "no_memory", "from_group"}:
+        if set(payload) - {"title", "prompt", "agent", "squad", "checks", "no_memory", "from_group", "group_id"}:
             raise ValueError("Invalid issue fields")
+        title = parse_issue_title(payload)
         prompt = required_text(payload, "prompt")
         assignee_type, assignee_id, mode = self._assignment(payload, required=False)
         no_memory = payload.get("no_memory", False)
         from_group = payload.get("from_group", False)
+        group_id = required_text(payload, "group_id") if "group_id" in payload else None
         if type(no_memory) is not bool or type(from_group) is not bool:
             raise ValueError("Invalid issue options")
+        if from_group and group_id is not None:
+            raise ValueError("Choose one group to attach")
         checks = parse_checks(payload["checks"]) if "checks" in payload else {}
         task_id = uuid.uuid4().hex
         config = {"checks": {key: asdict(value) for key, value in checks.items()},
                   "memory_enabled": not no_memory}
         with self._chat_lock:
             self.store.save_task(Task(task_id, prompt, assignee_type=assignee_type,
-                                      assignee_id=assignee_id, routing_mode=mode),
-                                 issue_config=config, from_group=from_group, after_insert=after_insert)
+                                      assignee_id=assignee_id, routing_mode=mode, title=title),
+                                 issue_config=config, from_group=from_group, group_id=group_id, after_insert=after_insert)
         return {"status": "created", "task": self.store.get_task(task_id)}
 
     def start_task(self, task_id):
@@ -293,6 +297,15 @@ class SQLiteApplication:
             raise ValueError("Unknown operation")
         if operation == "create":
             return self.create_task(payload)
+        if operation == "link-group":
+            if set(payload) == {"task_id", "group_id"}:
+                group_id = required_text(payload, "group_id")
+            elif set(payload) == {"task_id", "from_group"} and payload["from_group"] is True:
+                group_id = None
+            else:
+                raise ValueError("Choose one group to attach")
+            with self._chat_lock:
+                return {"source_group": self.store.link_issue_group(required_text(payload, "task_id"), group_id)}
         if operation == "assign":
             if set(payload) - {"task_id", "agent", "squad"}:
                 raise ValueError("Invalid assignment fields")

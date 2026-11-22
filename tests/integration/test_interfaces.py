@@ -29,7 +29,8 @@ class CliTests(unittest.TestCase):
                 patch.dict(os.environ, {"EVO_APPLICATION_FACTORY": ""}), \
                 patch("evo.interfaces.execution_factory.load_key", side_effect=ValueError("missing credential")):
             with contextlib.redirect_stdout(io.StringIO()) as output:
-                self.assertEqual(main(["--state", state, "create", "hello", "--agent", "builder"]), 0)
+                self.assertEqual(main(["--state", state, "create", "Write the report\nInclude a summary",
+                                       "--title", "Build report", "--agent", "builder"]), 0)
             issue = json.loads(output.getvalue())
             issue_id = issue["task"]["id"]
             with contextlib.redirect_stdout(io.StringIO()) as output:
@@ -39,6 +40,8 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(main(["--state", state, "task", issue_id]), 0)
             detail = json.loads(output.getvalue())
             self.assertEqual(detail["task"]["status"], "created")
+            self.assertEqual(detail["issue"]["title"], "Build report")
+            self.assertEqual(detail["issue"]["prompt"], "Write the report\nInclude a summary")
             self.assertEqual(detail["executions"][0]["status"], "queued")
 
     def test_commands_map_to_backend(self):
@@ -144,6 +147,12 @@ class WebTests(unittest.TestCase):
         self.assertIn("textContent", page)
         self.assertNotIn("innerHTML", page)
         self.assertIn("协作工作台", page)
+
+    def test_running_server_keeps_the_page_loaded_at_startup(self):
+        initial = self.request("GET", "/")
+        self.assertEqual(initial[0], 200)
+        with patch("evo.interfaces.web.app.files", side_effect=OSError("Assets unavailable after startup")):
+            self.assertEqual(self.request("GET", "/"), initial)
 
 
 class AtomicReviewRepository:

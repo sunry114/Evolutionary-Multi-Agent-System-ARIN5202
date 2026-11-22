@@ -14,7 +14,6 @@ class ModelProxy:
         proxy = self
         self.endpoint = urlsplit(model.endpoint)
         self.requests = 0
-        self.bytes = 0
         self.lock = threading.Lock()
         self.connections = set()
 
@@ -26,6 +25,7 @@ class ModelProxy:
 
             def do_POST(self):
                 connection = None
+                response_started = False
                 try:
                     self.connection.settimeout(timeout)
                     incoming = urlsplit(self.path)
@@ -90,40 +90,57 @@ class ModelProxy:
                             raise ValueError()
                         translated = from_chat(json.loads(data), model.model)
                         encoded = as_sse(translated) if payload.get("stream") else json.dumps(translated).encode()
-                        with proxy.lock:
-                            proxy.bytes += len(data) + len(encoded)
-                            if proxy.bytes > max_bytes:
-                                raise ValueError()
-                        self.send_response(200)
-                        self.send_header("Content-Type", "text/event-stream" if payload.get("stream") else "application/json")
-                        self.send_header("Content-Length", str(len(encoded)))
-                        self.end_headers()
-                        self.wfile.write(encoded)
+                        if len(encoded) > max_bytes:
+                            raise ValueError()
+                        response_started = True
+                        self.send_body(200, "text/event-stream" if payload.get("stream") else "application/json", encoded)
                         return
+                    content_type = response.getheader("Content-Type", "application/json")
+                    expected = response.length
+                    if expected is not None and expected > max_bytes:
+                        raise ValueError()
+                    if response.status != 200 or content_type.split(";", 1)[0].strip().lower() != "text/event-stream":
+                        data = response.read(max_bytes + 1)
+                        if (len(data) > max_bytes or (expected is not None and len(data) != expected)
+                                or (response.status == 200 and not data)):
+                            raise ValueError()
+                        response_started = True
+                        self.send_body(response.status, content_type, data)
+                        return
+                    data = response.read1(min(8192, max_bytes))
+                    if not data:
+                        raise ValueError()
+                    response_started = True
                     self.send_response(response.status)
-                    self.send_header("Content-Type", response.getheader("Content-Type", "application/json"))
+                    self.send_header("Content-Type", content_type)
                     self.end_headers()
-                    while True:
-                        data = response.read1(8192)
-                        if not data:
-                            break
-                        with proxy.lock:
-                            proxy.bytes += len(data)
-                            if proxy.bytes > max_bytes:
-                                return
+                    sent = 0
+                    while data:
+                        if sent + len(data) > max_bytes:
+                            return
                         self.wfile.write(data)
                         self.wfile.flush()
+                        sent += len(data)
+                        data = response.read1(min(8192, max_bytes - sent + 1))
                 except Exception:
                     # Details can contain auth headers or provider response bodies.
-                    try:
-                        self.send_error(502, "Model request failed")
-                    except OSError:
-                        pass
+                    if not response_started:
+                        try:
+                            self.send_error(502, "Model request failed")
+                        except OSError:
+                            pass
                 finally:
                     if connection:
                         with proxy.lock:
                             proxy.connections.discard(connection)
                         connection.close()
+
+            def send_body(self, status, content_type, data):
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
 
         class Server(socketserver.ThreadingUnixStreamServer):
             daemon_threads = True

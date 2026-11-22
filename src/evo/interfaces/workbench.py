@@ -13,7 +13,7 @@ from evo.adapters.tools.artifacts import ArtifactExchange
 from evo.domain.models import Experience
 from evo.domain.statuses import TaskStatus
 from evo.interfaces.sqlite_application import required_text
-from evo.ports.harness import HarnessCleanupError, HarnessError, RunRequest, ToolInputError
+from evo.ports.harness import MAX_RUN_PROMPT_BYTES, HarnessCleanupError, HarnessError, RunRequest, ToolInputError
 
 
 class Workbench:
@@ -66,16 +66,18 @@ class Workbench:
         run_id, issue_id = run["id"], run["issue_id"]
         agent = run["agent"]
         status, result = "failed", "Execution failed"
+        reply = ""
         stage = "preparing the run"
         handle = None
         try:
             issue = self._issue(issue_id)
-            agents = self._agents()
-            assignee = self._assignee(issue, agents)
-            squad = self.application.registry.squad
-            coordinating = (issue["assignee_type"] == "squad" and assignee and assignee.name == agent
-                            and run["kind"] != "mention")
-            targets = {name: member for name, member in agents.items() if name in squad.members} if coordinating else agents
+            self.application._refresh_registry()
+            registry = self.application.registry
+            agents = {member.name: member for member in registry.agents}
+            squad = registry.squad
+            assigned_to_squad = issue["assignee_type"] == "squad"
+            coordinating = assigned_to_squad and agent == squad.lead and run["kind"] != "mention"
+            targets = {name: agents[name] for name in squad.members} if coordinating else agents
 
             def comment(content):
                 if not content.strip() or len(content) > 8000:
@@ -99,15 +101,18 @@ class Workbench:
             trigger = next((row["content"] for row in detail["messages"] if row["id"] == run["comment_id"]), "")
             issue_text = issue["description"].encode()[:5000].decode(errors="ignore")
             trigger = trigger.encode()[:14000].decode(errors="ignore")
-            comments = "\n".join(f"{m['sender']}: {m['content'][:1500]}" for m in detail["messages"][-8:])
-            comments = comments.encode()[-5000:].decode(errors="ignore")
-            prompt = f"Issue:\n{issue_text}\n\nTriggering comment:\n{trigger}\n\nRecent comments:\n{comments}"
+            prompt = f"Issue:\n{issue_text}\n\nTriggering comment:\n{trigger}"
             role = run["agent_role"] + " Follow the triggering comment when present. Report results on this issue."
-            if coordinating:
-                roster = ", ".join(f"@{name}" for name in targets if name != agent)
-                role += (f" You lead the Squad. Use post_issue_comment with one of {roster} to hand off work. "
-                         "After dispatching, stop and leave the issue in progress. When member results arrive, "
-                         "coordinate the next step or move the issue to in_review once its goal is met.")
+            if assigned_to_squad:
+                roster = "\n".join(f"@{name}{' (lead)' if name == squad.lead else ''}: {agents[name].specialty}"
+                                   for name in squad.members)
+                prompt += f"\n\nSquad: {squad.name}\nMembers and responsibilities:\n{roster}"
+                role += (f" Your handle is @{agent}. Use the Squad roster and responsibilities to decide how to collaborate. "
+                         "Use post_issue_comment with an @mention to hand off work or ask a teammate for input.")
+            prompt += "\n\nRecent comments:\n"
+            history_limit = min(5000, MAX_RUN_PROMPT_BYTES - len(prompt.encode()))
+            comments = "\n".join(f"{m['sender']}: {m['content'][:1500]}" for m in detail["messages"][-8:]).encode()
+            prompt += comments[max(0, len(comments) - history_limit):].decode(errors="ignore")
             config = self.store.latest_event_payload(issue_id, "issue_config") or {}
             memory = SQLiteMemoryStore(self.application.state, agent) if config.get("memory_enabled", True) else None
             lessons = tuple(item.lesson for item in memory.recall(issue_text)) if memory else ()
@@ -123,13 +128,20 @@ class Workbench:
                 outcome = harness.cancel(handle) if stopping else harness.wait(handle, timeout=0.25)
                 for event in harness.events(handle, after=cursor):
                     cursor = event.sequence
-                    if event.kind == "assistant" and event.payload.get("text"):
-                        self.store.append_event(task_id=run_id, event_type="issue_run_output", actor=agent,
+                    if event.kind == "terminal_output":
+                        reply = event.payload["text"]
+                    elif event.kind in ("assistant", "api_retry") and event.payload.get("text"):
+                        event_type = "issue_run_api_retry" if event.kind == "api_retry" else "issue_run_output"
+                        self.store.append_event(task_id=run_id, event_type=event_type, actor=agent,
                                                 payload={"result": event.payload["text"]})
                     elif event.kind == "native_tool":
                         self.store.append_event(task_id=run_id, event_type="issue_run_tool", actor=agent,
                                                 payload=event.payload)
+                    elif event.kind == "tool_result":
+                        self.store.append_event(task_id=run_id, event_type="issue_run_platform_tool", actor=agent,
+                                                payload=event.payload)
                 if outcome is not None:
+                    reply = reply or outcome.text
                     break
             if outcome.error == "cleanup_failed":
                 status, result = "interrupted", "Runtime cleanup could not be confirmed"
@@ -143,7 +155,7 @@ class Workbench:
                     self.store.append_event(task_id=run_id, event_type="artifact_published", actor=agent,
                                             payload={"path": evidence.path, "purpose": evidence.purpose,
                                                      "artifact": asdict(snapshot)})
-                status, result = "completed", outcome.text
+                status, result = "completed", reply
                 if memory and outcome.artifacts:
                     artifact = outcome.artifacts[0].path
                     memory.add(Experience(agent, issue_text[:1000], TaskStatus.SUCCESS, "Produced " + artifact,
@@ -158,11 +170,12 @@ class Workbench:
                 if handle is not None:
                     try:
                         cleanup = harness.cancel(handle)
+                        reply = reply or cleanup.text
                         if cleanup.error == "cleanup_failed":
                             status, result = "interrupted", "Runtime cleanup could not be confirmed"
                     except Exception:
                         status, result = "interrupted", "Runtime cleanup could not be confirmed"
-        self.queue.finish(run, status, result, assignee=self._assignee(self._issue(issue_id)))
+        self.queue.finish(run, status, result, reply=reply, assignee=self._assignee(self._issue(issue_id)))
 
     def _list(self, rows):
         return [{**row, "lane": issue_status(row)} for row in rows]
@@ -177,7 +190,7 @@ class Workbench:
         if operation in ("answer", "resume", "review", "revision"):
             raise ValueError("Use the issue status and run controls")
         if operation == "create":
-            if set(payload) - {"prompt", "agent", "squad", "from_group", "no_memory"}:
+            if set(payload) - {"title", "prompt", "agent", "squad", "from_group", "group_id", "no_memory"}:
                 raise ValueError("Invalid issue fields")
             agents = self._agents()
             squad = self.application.registry.squad

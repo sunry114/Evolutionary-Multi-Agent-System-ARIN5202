@@ -34,6 +34,7 @@ def parser(*, assessment=False):
         "--file", required=True, help="JSON object with agents and squad")
     command = commands.add_parser("create", help="Save an issue for an agent or Squad")
     command.add_argument("prompt")
+    command.add_argument("--title", help="Short issue title")
     assignee = command.add_mutually_exclusive_group()
     assignee.add_argument("--agent")
     assignee.add_argument("--squad")
@@ -168,6 +169,8 @@ def main(argv=None, application=None):
             if checks_file and expect_file:
                 raise ValueError("Choose checks file or expected file and text")
             payload = {"prompt": args.prompt, "from_group": args.from_group}
+            if args.title is not None:
+                payload["title"] = args.title
             if getattr(args, "no_memory", False):
                 payload["no_memory"] = True
             if args.agent is not None:

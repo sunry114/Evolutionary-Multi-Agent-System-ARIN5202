@@ -29,7 +29,8 @@ class ConflictError(StorageError, ValueError):
 
 
 MIGRATIONS = ("0001_initial", "0002_issues", "0003_routing", "0004_delegations", "0005_workbench",
-              "0006_squad_routing", "0007_issue_runs", "0008_chat_threads", "0009_group_chats")
+              "0006_squad_routing", "0007_issue_runs", "0008_chat_threads", "0009_group_chats", "0010_harness_events",
+              "0011_issue_titles")
 
 ANCESTORS = """
     WITH RECURSIVE chain AS (
@@ -214,20 +215,53 @@ class SQLiteStore:
     # ------------------------------------------------------------------
 
     def save_task(self, task: Task, *, issue_config: Optional[Mapping[str, object]] = None,
-                  from_group: bool = False, after_insert=None) -> None:
+                  from_group: bool = False, group_id: Optional[str] = None, after_insert=None) -> None:
         with self._transaction() as connection:
             self._insert_task(connection, task)
             if issue_config is not None:
-                if from_group:
-                    updated = connection.execute(
-                        "UPDATE messages SET task_id = ? WHERE kind = 'group' AND task_id IS NULL AND group_id IS NULL",
-                        (task.id,))
-                    if updated.rowcount == 0:
-                        raise ValueError("No unassigned group discussion")
+                if from_group or group_id is not None:
+                    self._link_issue_group(connection, task.id, group_id)
                 self._insert_event(connection, task_id=task.id, event_type="issue_config",
                                    actor="human", payload=issue_config)
             if after_insert:
                 after_insert(connection, task.id)
+
+    def link_issue_group(self, task_id, group_id):
+        with self._transaction() as connection:
+            issue_id = self._issue_id(connection, task_id)
+            existing = connection.execute(
+                "SELECT payload_json FROM events WHERE task_id = ? AND event_type = 'issue_group_linked' "
+                "ORDER BY id DESC LIMIT 1",
+                (issue_id,)).fetchone()
+            if existing is not None:
+                source = _decode_json(existing["payload_json"])
+                if source["id"] != group_id:
+                    raise ConflictError("The issue already has a linked group")
+                return source
+            return self._link_issue_group(connection, issue_id, group_id)
+
+    def _link_issue_group(self, connection, issue_id, group_id):
+        if group_id is None:
+            updated = connection.execute(
+                "UPDATE messages SET task_id = ? WHERE kind = 'group' AND task_id IS NULL AND group_id IS NULL",
+                (issue_id,))
+            if updated.rowcount == 0:
+                raise ValueError("No unassigned group discussion")
+            source = {"id": None, "name": "工作区群聊"}
+        else:
+            group = connection.execute("SELECT name FROM group_chats WHERE id = ?", (group_id,)).fetchone()
+            if group is None:
+                raise RecordNotFoundError("Group chat was not found")
+            connection.execute("""
+                INSERT INTO messages(id, kind, sender, task_id, content, created_at)
+                SELECT lower(hex(randomblob(16))), kind, sender, ?, content, created_at
+                FROM messages WHERE group_id = ? AND task_id IS NULL AND kind = 'group'
+                ORDER BY created_at, id
+            """, (issue_id, group_id))
+            source = {"id": group_id, "name": group["name"]}
+        self._insert_event(connection, task_id=issue_id, event_type="issue_group_linked",
+                           actor="human", payload=source)
+        return source
 
     def _insert_task(self, connection, task):
         now = _utc_now()
@@ -239,6 +273,7 @@ class SQLiteStore:
                 INSERT INTO tasks(
                     id,
                     description,
+                    title,
                     owner,
                     parent_id,
                     status,
@@ -249,11 +284,12 @@ class SQLiteStore:
                     assignee_id,
                     routing_mode
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task.id,
                     task.description,
+                    task.title,
                     task.owner,
                     task.parent_id,
                     status,
@@ -309,6 +345,7 @@ class SQLiteStore:
                     t.id,
                     t.description,
                     t.description AS prompt,
+                    t.title,
                     t.owner,
                     t.parent_id,
                     t.status,
@@ -556,7 +593,7 @@ class SQLiteStore:
                     UNION ALL
                     SELECT workers.issue_id, t.id FROM workers JOIN tasks t ON t.parent_id = workers.id
                 )
-                SELECT original.id, original.description AS prompt, latest.id AS current_task_id,
+                SELECT original.id, original.title, original.description AS prompt, latest.id AS current_task_id,
                        latest.status, latest.result, latest.assignee_type,
                        CASE WHEN latest.assignee_type = 'squad' THEN COALESCE(:squad_name, latest.assignee_id)
                             ELSE latest.assignee_id END AS assignee_id,
@@ -779,6 +816,22 @@ class SQLiteStore:
 
     # ------------------------------------------------------------------
     # Events / trace
+
+    def append_harness_event(self, run_id, kind, payload):
+        with self._transaction() as connection:
+            connection.execute("""
+                INSERT INTO harness_events (run_id, sequence, kind, payload_json)
+                SELECT ?, COALESCE(MAX(sequence), 0) + 1, ?, ?
+                FROM harness_events WHERE run_id = ?
+            """, (run_id, kind, _json_object(payload), run_id))
+
+    def list_harness_events(self, run_id, after):
+        with self._connect() as connection:
+            return [{"sequence": row["sequence"], "kind": row["kind"], "payload": _decode_json(row["payload_json"])}
+                    for row in connection.execute("""
+                        SELECT sequence, kind, payload_json FROM harness_events
+                        WHERE run_id = ? AND sequence > ? ORDER BY sequence
+                    """, (run_id, after))]
     # ------------------------------------------------------------------
 
     def _insert_event(

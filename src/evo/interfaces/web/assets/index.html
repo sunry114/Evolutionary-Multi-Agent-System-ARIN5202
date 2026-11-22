@@ -93,7 +93,7 @@
           <span id="issue-count" class="count"></span>
         </div>
         <div class="list-controls">
-          <label class="search"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="搜索标题或工单 ID" aria-label="搜索工单"></label>
+          <label class="search"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="搜索主题或工单 ID" aria-label="搜索工单"></label>
           <label class="select-control">负责人 <select id="owner-filter"><option value="">全部</option></select></label>
           <label class="select-control">状态 <select id="status-filter" aria-label="按状态筛选"><option value="">全部</option></select></label>
         </div>
@@ -216,12 +216,26 @@
   <dialog id="create-dialog" aria-labelledby="create-title">
     <form id="create-form" class="stack">
       <div class="dialog-header"><h2 id="create-title">新建工单</h2><button id="close-create" class="button quiet" type="button" aria-label="关闭新建窗口">×</button></div>
+      <label>主题<input name="title" type="text" required autofocus placeholder="简要概括工单"></label>
       <label>目标与要求<textarea name="prompt" required rows="4" placeholder="描述要完成的工作和交付要求"></textarea></label>
       <label>指派给<select name="assignee"></select></label>
-      <label class="check"><input type="checkbox" name="from_group">关联工作区待归档的群聊</label>
+      <label>关联群聊<select name="group" aria-describedby="create-group-hint"></select></label>
+      <p class="muted" id="create-group-hint" aria-live="polite">自建群导入关联时已有的聊天记录。</p>
       <label class="check"><input type="checkbox" name="no_memory">关闭本工单的个人记忆</label>
       <p id="create-error" class="form-error" role="alert" hidden></p>
       <div class="form-actions"><button class="button primary" type="submit">创建工单</button></div>
+    </form>
+  </dialog>
+  <dialog id="link-group-dialog" aria-labelledby="link-group-title">
+    <form id="link-group-form" class="stack">
+      <div class="dialog-header">
+        <h2 id="link-group-title">关联群聊</h2>
+        <button id="close-link-group" class="button quiet" type="button" aria-label="关闭关联群聊">×</button>
+      </div>
+      <label>群聊<select name="group" aria-describedby="link-group-hint" required autofocus></select></label>
+      <p class="muted" id="link-group-hint" aria-live="polite"></p>
+      <p class="form-error" id="link-group-error" role="alert" hidden></p>
+      <div class="form-actions"><button class="button primary" type="submit">关联群聊</button></div>
     </form>
   </dialog>
   <dialog id="agent-dialog" aria-labelledby="agent-edit-title">

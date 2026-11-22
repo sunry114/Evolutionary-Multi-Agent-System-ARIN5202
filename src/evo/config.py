@@ -61,7 +61,7 @@ class HarnessConfig:
     cli_path: str = "claude"
     cli_version: str = "2.1.311"
     timeout: float = 180
-    max_output_bytes: int = 4 * 1024 * 1024
+    max_event_bytes: int = 32 * 1024 * 1024
     max_tool_calls: int = 20
     native_issue_tools: bool = False
 
@@ -72,7 +72,7 @@ class HarnessConfig:
                 or not re.fullmatch(r"2\.\d+\.\d+", self.cli_version)
                 or type(self.timeout) not in (int, float) or not math.isfinite(self.timeout)
                 or not 0 < self.timeout <= 600
-                or type(self.max_output_bytes) is not int or not 1024 <= self.max_output_bytes <= 8 * 1024 * 1024
+                or type(self.max_event_bytes) is not int or not 1024 <= self.max_event_bytes <= 32 * 1024 * 1024
                 or type(self.max_tool_calls) is not int or not 1 <= self.max_tool_calls <= 20
                 or type(self.native_issue_tools) is not bool
                 or (self.native_issue_tools and self.adapter != "claude_code")):

@@ -5,6 +5,7 @@ import re
 from dataclasses import replace
 
 from evo.adapters.harness.baseline import BaselineHarnessAdapter
+from evo.adapters.harness.output import output_preview
 from evo.interfaces import execution_factory
 from evo.interfaces.sqlite_application import SQLiteApplication
 from evo.ports.harness import ToolCall
@@ -37,8 +38,17 @@ class FixtureHarness(BaselineHarnessAdapter):
             with self.broker.repository._connect() as connection:
                 run = connection.execute("SELECT kind,retry_of FROM issue_runs WHERE id=?", (request.task_id,)).fetchone()
             self._event(control, "assistant", {"text": "正在处理 " + request.agent})
+            if "模拟模型连接中断" in request.prompt:
+                self._event(control, "api_retry", {"text": "Claude Code API retry: connection_error"})
+                terminal = "API Error: 模型连接中断\n\n" + "x" * 9000 + "\n\nClaude Code 错误末尾"
+                self._event(control, "terminal_output", {"text": terminal})
+                return "failed", terminal[:8192], "cli_failed", 1
             if "慢速工单" in request.prompt and not run["retry_of"] and control.stop.wait(12):
                 return "cancelled", "", "", None
+            if "慢速工单" in request.prompt and run["retry_of"]:
+                preview, truncated = output_preview("工具诊断样本\n" + "x" * 9000)
+                self._event(control, "native_tool", {"name": "Bash", "status": "completed",
+                                                       "output": preview, "output_truncated": truncated})
             if request.agent == "researcher" and run["kind"] == "assignment":
                 self._call(control, request, "post_issue_comment", {"content": "@reviewer 独立核对证据"})
                 return "success", "已发给复核员", "", 0

@@ -17,8 +17,10 @@ const tabNames = {discussion: "讨论", logs: "运行记录", artifacts: "产物
 const eventNames = {
   issue_run_queued: "运行入队", issue_run_started: "运行开始", issue_run_stop_requested: "请求停止",
   issue_run_finished: "运行结束", issue_run_output: "Agent 进度", issue_run_tool: "Claude Code 原生工具",
+  issue_run_platform_tool: "平台工具", issue_run_api_retry: "Claude Code API 重试",
   issue_status_changed: "工单状态变更", issue_review_requested: "请求转待审查",
-  issue_assigned: "更新负责人", plan_created: "生成执行计划", task_created: "创建任务", task_transition: "更新状态",
+  issue_assigned: "更新负责人", issue_group_linked: "关联群聊", plan_created: "生成执行计划",
+  task_created: "创建任务", task_transition: "更新状态",
   routing_call: "路由模型调用", memory_recorded: "记录个人经验",
   harness_started: "启动执行器", harness_paused: "执行暂停", harness_finished: "执行结束", action_started: "工具启动",
   action_completed: "工具结束", objective_verified: "通过产物验收", artifact_published: "共享产物", orchestration_error: "执行异常",
@@ -182,7 +184,7 @@ function chatUrl(id) { return "#chat/" + encodeURIComponent(id); }
 function groupChatUrl(id) { return "#chat/group/" + encodeURIComponent(id); }
 function ownerUrl(name, type) { return name ? "#owner/" + type + "/" + encodeURIComponent(name) : "#issues"; }
 function issueKey(id) { return "EVO-" + id.slice(-7).toUpperCase(); }
-function title(task) { return task.prompt.split("\n")[0]; }
+function issueTitle(issue) { return issue.title || issue.prompt.split("\n")[0]; }
 function when(iso) { return iso ? new Date(iso).toLocaleString("zh-CN", {month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit"}) : ""; }
 function empty(parent, text) { node("p", text, parent, "empty"); }
 
@@ -237,7 +239,8 @@ function renderList() {
   const issues = state.issues.filter(issue =>
     (!filter || issue.lane === filter) &&
     (current.view !== "attention" || needsAttention.includes(issue.lane)) &&
-    (!query || [issue.prompt, issue.id, issueKey(issue.id)].some(value => value.toLowerCase().includes(query))));
+    (!query || [issueTitle(issue), issue.prompt, issue.id, issueKey(issue.id)]
+      .some(value => value.toLowerCase().includes(query))));
   el("issue-count").textContent = issues.length + " 张";
   const list = el("issue-list");
   list.replaceChildren();
@@ -256,7 +259,7 @@ function renderList() {
     for (const item of matches) {
       const row = link(group, "", issueUrl(item.id), "issue-row");
       node("span", issueKey(item.id), row, "issue-key");
-      node("span", title(item), row, "title-cell");
+      node("span", issueTitle(item), row, "title-cell");
       node("span", item.assignee_id ? (item.assignee_type === "squad" ? "Squad · " : "") + item.assignee_id : "未指派", row, "owner-cell");
       node("time", when(item.updated_at), row, "row-date");
     }
@@ -378,10 +381,18 @@ function feedItem(parent, heading, metadata, body) {
 }
 
 function discussion(panel, detail) {
+  if (detail.source_group) {
+    const source = node("p", "关联群聊 · ", panel, "muted discussion-source");
+    const {id, name} = detail.source_group;
+    link(source, name, id ? groupChatUrl(id) : chatUrl("group"));
+  } else if (state.workspace.capabilities?.["link-group"]) {
+    const source = node("div", "", panel, "discussion-source");
+    button(source, "关联群聊", control => openLinkGroup(control, detail.issue.id));
+  }
   const feed = node("div", "", panel, "feed");
   if (!detail.messages.length) empty(feed, "还没有讨论");
   for (const item of detail.messages) {
-    const title = {group: "群聊", comment: "评论", agent: "委派消息"}[item.kind];
+    const title = {group: "群聊", comment: "评论", agent: "委派消息", run_error: "运行未完成"}[item.kind];
     const card = feedItem(feed, item.sender === "human" ? "你" : item.sender,
       [title, when(item.created_at)].filter(Boolean).join(" · "));
     markdownMessage(card, item.content, "feed-content");
@@ -429,15 +440,18 @@ function logs(panel, detail) {
   if (!detail.logs.length) empty(feed, "暂无运行记录");
   for (const event of [...detail.logs, ...detail.negotiations].sort((a, b) => b.id - a.id)) {
     const payload = event.payload;
-    const toolStatus = {started: "开始", completed: "完成", failed: "失败"};
-    const text = event.event_type === "issue_run_tool" ? payload.name + " · " + toolStatus[payload.status]
+    const isTool = ["issue_run_tool", "issue_run_platform_tool"].includes(event.event_type);
+    const toolStatus = {started: "开始", completed: "完成", success: "完成", failed: "失败",
+      blocked: "已阻塞", waiting_human: "等待处理", waiting_dependency: "等待依赖"};
+    const text = isTool ? [payload.name, toolStatus[payload.status]].filter(Boolean).join(" · ")
       : payload.reason || (typeof payload.result === "string" ? payload.result : payload.result?.message);
     const item = feedItem(feed, eventNames[event.event_type] || event.event_type,
       [event.actor, issueKey(event.task_id), when(event.created_at)].filter(Boolean).join(" · "),
       text);
     const expand = node("details", "", item);
-    node("summary", "查看事件详情", expand);
-    node("pre", JSON.stringify(payload, null, 2), expand, "output");
+    const truncated = payload.output_truncated || payload.outcome?.output_truncated;
+    node("summary", truncated ? "查看工具输出预览（已截断）" : "查看事件详情", expand);
+    node("pre", payload.output ?? JSON.stringify(payload, null, 2), expand, "output");
   }
 }
 
@@ -484,14 +498,16 @@ function renderActivity() {
 }
 
 function renderDetail(detail) {
+  const {issue} = detail;
+  const title = issueTitle(issue);
   const item = el("issue-heading");
   item.replaceChildren();
   const metadata = node("div", "", item, "issue-meta");
-  node("span", issueKey(detail.issue.id), metadata, "issue-key");
+  node("span", issueKey(issue.id), metadata, "issue-key");
   lane(metadata, detail.lane);
-  node("h1", title(detail.issue), item);
-  const rest = detail.issue.prompt.split("\n").slice(1).join("\n").trim();
-  if (rest) node("p", rest, item);
+  node("h1", title, item);
+  const description = issue.title ? issue.prompt : issue.prompt.slice(title.length).trim();
+  if (description) node("p", description, item);
   renderActivity();
   renderInspector(detail);
 }
@@ -1063,26 +1079,108 @@ chatForm.onsubmit = async event => {
 
 const dialog = el("create-dialog");
 const form = el("create-form");
-el("new-issue").onclick = () => {
+const newIssue = el("new-issue");
+const linkGroupDialog = el("link-group-dialog");
+const linkGroupForm = el("link-group-form");
+const linkGroupSubmit = linkGroupForm.querySelector("button[type=submit]");
+const closeLinkGroup = el("close-link-group");
+
+async function loadIssueGroups(picker, hint, emptyLabel) {
+  picker.replaceChildren();
+  option(picker, emptyLabel, "");
+  option(picker, "工作区群聊（转入待归档消息）", "default");
+  hint.textContent = "自建群导入关联时已有的聊天记录。";
+  picker.disabled = true;
+  try {
+    const {groups = []} = await api("chat-threads", {});
+    for (const group of groups) option(picker, group.name, group.id);
+  } catch {
+    hint.textContent = "群聊列表加载失败。关闭窗口后可重新打开。";
+  } finally {
+    picker.disabled = false;
+  }
+}
+
+function issueGroupPayload(group) {
+  if (group === "default") return {from_group: true};
+  return group ? {group_id: group} : {};
+}
+
+async function openLinkGroup(control, issueId) {
+  if (linkGroupDialog.open || linkGroupForm.elements.group.disabled) return;
+  linkGroupForm.dataset.issueId = issueId;
+  configFeedback("link-group-error");
+  control.disabled = linkGroupSubmit.disabled = true;
+  const groups = loadIssueGroups(linkGroupForm.elements.group, el("link-group-hint"), "选择群聊");
+  linkGroupDialog.showModal();
+  try {
+    await groups;
+    if (linkGroupDialog.open) linkGroupForm.elements.group.focus();
+  } finally {
+    control.disabled = linkGroupSubmit.disabled = false;
+  }
+}
+
+closeLinkGroup.onclick = () => linkGroupDialog.close();
+linkGroupDialog.oncancel = event => {
+  if (closeLinkGroup.disabled) event.preventDefault();
+};
+linkGroupForm.onsubmit = async event => {
+  event.preventDefault();
+  const group = linkGroupForm.elements.group.value;
+  if (!group || linkGroupSubmit.disabled) return;
+  const {issueId} = linkGroupForm.dataset;
+  if (route().view !== "issue" || route().key !== issueId) {
+    linkGroupDialog.close();
+    return;
+  }
+  const before = location.hash;
+  const draft = el("issue-panel").querySelector('textarea[name="message"]')?.value;
+  closeLinkGroup.disabled = linkGroupSubmit.disabled = true;
+  configFeedback("link-group-error");
+  try {
+    await api("link-group", {task_id: issueId, ...issueGroupPayload(group)});
+    linkGroupDialog.close();
+    if (before === location.hash) {
+      state.tab = "discussion";
+      await load();
+      const message = el("issue-panel").querySelector('textarea[name="message"]');
+      if (before === location.hash && draft && message) message.value = draft;
+    }
+  } catch (error) {
+    configFeedback("link-group-error", error.message, true);
+  } finally {
+    closeLinkGroup.disabled = linkGroupSubmit.disabled = false;
+  }
+};
+
+newIssue.onclick = async () => {
   form.reset();
   const select = form.elements.assignee;
   select.replaceChildren();
   option(select, "先不指派", "");
   if (state.workspace?.squad) option(select, "Squad · " + state.workspace.squad.name, "squad:" + state.workspace.squad.name);
   for (const agent of state.workspace?.agents || []) option(select, "Agent · " + agent, "agent:" + agent);
+  newIssue.disabled = true;
   el("create-error").hidden = true;
+  const groups = loadIssueGroups(form.elements.group, el("create-group-hint"), "不关联群聊");
   dialog.showModal();
+  try {
+    await groups;
+  } finally {
+    newIssue.disabled = false;
+  }
 };
 el("close-create").onclick = () => dialog.close();
 form.onsubmit = async event => {
   event.preventDefault();
   const submit = form.querySelector('button[type="submit"]');
-  const {prompt, assignee, from_group, no_memory} = Object.fromEntries(new FormData(form));
+  const {title, prompt, assignee, group, no_memory} = Object.fromEntries(new FormData(form));
   const error = el("create-error");
   submit.disabled = true;
   error.hidden = true;
   try {
-    const payload = {prompt, from_group: Boolean(from_group)};
+    const payload = {title, prompt, ...issueGroupPayload(group)};
     if (no_memory) payload.no_memory = true;
     if (assignee) {
       const [type, id] = assignee.split(":");
@@ -1180,7 +1278,7 @@ for (const operation of ["memory", "eval"]) {
 
 let polling = false;
 window.setInterval(async () => {
-  if (polling || !state.workspace?.capabilities?.issue_runs || document.hidden || dialog.open) return;
+  if (polling || !state.workspace?.capabilities?.issue_runs || document.hidden || dialog.open || linkGroupDialog.open) return;
   const active = route();
   if (["workspace", "chat"].includes(active.view) || (active.view === "issue" && !state.detail)) return;
   const generation = state.generation;

@@ -11,7 +11,8 @@ from evo.interfaces.gateway import ApplicationFailure, ApplicationUnavailable
 MAX_BODY = 65536
 OPERATIONS = {"create", "start", "configure", "dm", "group",
               "eval", "trace", "metrics", "memory", "task", "tasks", "messages",
-              "assign", "comment", "artifact", "issue-status", "stop-run", "retry-run", "chat-threads", "new-chat", "new-group"}
+              "assign", "comment", "artifact", "issue-status", "stop-run", "retry-run", "chat-threads", "new-chat",
+              "new-group", "link-group"}
 
 
 def unique_object(pairs):
@@ -52,6 +53,14 @@ def make_server(application, port=8768, *, application_factory=None, attached_wo
     elif attached_workspaces:
         raise ApplicationUnavailable("Attaching workspaces requires the local SQLite application.")
     token = secrets.token_urlsafe(32)
+    # Load the page with the API so edits on disk take effect together at restart.
+    assets = files("evo.interfaces.web").joinpath("assets")
+    page = assets.joinpath("index.html").read_text(encoding="utf-8")
+    page = page.replace("<body data-local-template>", "<body>")
+    page = page.replace("/* __STYLES__ */", assets.joinpath("workbench.css").read_text(encoding="utf-8"))
+    page = page.replace("/* __MARKDOWN_IT__ */", assets.joinpath("markdown-it.min.js").read_text(encoding="utf-8"))
+    page = page.replace("/* __SCRIPT__ */", assets.joinpath("workbench.js").read_text(encoding="utf-8"))
+    page = page.replace("__TOKEN__", token)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -92,14 +101,7 @@ def make_server(application, port=8768, *, application_factory=None, attached_wo
             if target is None:
                 return self.reply(404, {"error": "Workspace not found"})
             if path == "/":
-                assets = files("evo.interfaces.web").joinpath("assets")
-                content = assets.joinpath("index.html").read_text(encoding="utf-8")
-                content = content.replace("<body data-local-template>", "<body>")
-                content = content.replace("/* __STYLES__ */", assets.joinpath("workbench.css").read_text(encoding="utf-8"))
-                content = content.replace("/* __MARKDOWN_IT__ */",
-                                          assets.joinpath("markdown-it.min.js").read_text(encoding="utf-8"))
-                content = content.replace("/* __SCRIPT__ */", assets.joinpath("workbench.js").read_text(encoding="utf-8"))
-                return self.reply(200, content.replace("__TOKEN__", token), html=True)
+                return self.reply(200, page, html=True)
             if path == "/api/state":
                 try:
                     return self.reply(200, target.snapshot())

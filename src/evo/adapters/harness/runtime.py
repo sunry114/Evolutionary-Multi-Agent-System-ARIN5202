@@ -7,7 +7,6 @@ import json
 import os
 import threading
 import uuid
-from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
 
@@ -15,6 +14,8 @@ from evo.adapters.tools.filesystem import _directory, _read_at, _write_at
 from evo.config import HarnessConfig
 from evo.ports.harness import (ArtifactRef, HarnessCleanupError, HarnessError, HarnessEvent, ResumeRef,
                                RunHandle, RunRequest, RunResult, ToolInputError, identifier)
+
+from .output import output_preview
 
 
 def request_record(request):
@@ -83,14 +84,9 @@ class ManagedHarness:
 
     def _event(self, control, kind, payload=None):
         with control.lock:
-            events = control.record["events"]
-            if kind != "result" and (len(events) >= 511 or
-                    len(json.dumps(control.record).encode()) + len(json.dumps(payload or {}).encode()) > 1536 * 1024):
-                control.failure = "event_limit"
-                control.stop.set()
-                raise HarnessError("Harness event limit exceeded")
-            events.append({"sequence": len(events) + 1, "kind": kind, "payload": self._clean(payload or {})})
-            self._save(control)
+            if kind != "assistant":
+                self._save(control)
+            self.broker.repository.append_harness_event(control.record["run_id"], kind, self._clean(payload or {}))
 
     def start(self, request):
         return self._spawn(request)
@@ -134,7 +130,7 @@ class ManagedHarness:
         run_id = uuid.uuid4().hex
         record = {"run_id": run_id, "adapter": self.adapter_name, "identity": self._identity(),
                   "request": saved_request, "native_session_id": str(uuid.uuid4()),
-                  "events": [], "result": None, "pending": None, "inflight": None,
+                  "result": None, "pending": None, "inflight": None,
                   "context": [], "artifacts": [], "tool_calls": 0, "baseline_index": 0}
         if previous:
             for key in ("pending", "context", "artifacts", "tool_calls", "baseline_index"):
@@ -175,11 +171,11 @@ class ManagedHarness:
             raise HarnessError("Invalid event cursor")
         with self._lock:
             control = self._active.get(handle.run_id)
-        if control is not None:
-            with control.lock:
-                return tuple(HarnessEvent(**deepcopy(event)) for event in control.record["events"][after:])
-        record = self._load(handle.run_id)
-        return tuple(HarnessEvent(**event) for event in record["events"] if event["sequence"] > after)
+        if control is None:
+            record = self._load(handle.run_id)
+            if "events" in record:  # Checkpoints written before the separate event stream.
+                return tuple(HarnessEvent(**event) for event in record["events"] if event["sequence"] > after)
+        return tuple(HarnessEvent(**event) for event in self.broker.repository.list_harness_events(handle.run_id, after))
 
     @staticmethod
     def _result(value):
@@ -241,10 +237,14 @@ class ManagedHarness:
                 control.failure = "platform_tool_error"
                 control.stop.set()
                 result = {"status": "failed", "error": "platform_tool_rejected"}
-            encoded = json.dumps(self._clean(result), ensure_ascii=False)
-            if len(encoded.encode()) > 16384:
-                result = {"status": result.get("status", "failed"), "action_id": result.get("action_id"),
-                          "output_truncated": True, "result": self._clean(encoded[:8192])}
+            result = self._clean(result)
+            encoded = json.dumps(result, ensure_ascii=False)
+            preview, truncated = output_preview(encoded)
+            recorded = result
+            if truncated:
+                recorded = {"status": result.get("status", "failed"), "action_id": result.get("action_id"),
+                            "output_truncated": True, "result": preview}
+            recovery_result = recorded if len(encoded.encode()) > 16384 else result
             with control.lock:
                 if not control.failure:
                     control.record["inflight"] = None
@@ -254,7 +254,8 @@ class ManagedHarness:
                                                  "request_id": result[continuation_key]}
                 else:
                     control.record["pending"] = None
-                    control.record["context"].append(self._clean({"tool": name, "arguments": arguments, "outcome": result}))
+                    control.record["context"].append(self._clean(
+                        {"tool": name, "arguments": arguments, "outcome": recovery_result}))
                     if name in ("write_file", "import_artifact") and result.get("status") == "success":
                         artifact = result["result"]
                         control.record["artifacts"] = [a for a in control.record["artifacts"] if a["path"] != artifact["path"]] + [artifact]
@@ -262,8 +263,8 @@ class ManagedHarness:
                                                        "request_id": result.get("request_id"),
                                                        "delegation_id": result.get("delegation_id"),
                                                        "action_id": result.get("action_id"),
-                                                       "outcome": self._clean(result)})
-            return self._clean(result)
+                                                       "outcome": recorded})
+            return result
 
     def _worker(self, control, request):
         status, text, error, exit_code = "failed", "", "harness_failed", None

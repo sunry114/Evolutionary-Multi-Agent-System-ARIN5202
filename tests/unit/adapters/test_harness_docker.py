@@ -1,4 +1,6 @@
 import base64
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,7 +8,7 @@ from unittest.mock import Mock, patch
 
 from evo.adapters.harness.container_client import export_artifacts
 from evo.adapters.harness.docker_cli import DockerCLITransport
-from evo.adapters.harness.process import ProcessOutcome
+from evo.adapters.harness.process import ProcessOutcome, capture
 from evo.adapters.tools.filesystem import WorkspaceFilesystem
 from evo.config import HarnessConfig
 from evo.ports.harness import HarnessError
@@ -58,6 +60,15 @@ class DockerHarnessCommandTests(unittest.TestCase):
             with self.assertRaises(HarnessError):
                 self.transport.run([], "", self.state, stop=lambda: "", on_line=lambda x: None)
             process.assert_not_called()
+
+    def test_stream_counts_each_record_even_when_one_read_contains_multiple_records(self):
+        program = "import sys; sys.stdout.buffer.write(b'a' * 1024 + b'\\n' + b'b' * 1024)"
+        process = subprocess.Popen([sys.executable, "-c", program], stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        lines = []
+        result = capture(process, "", timeout=3, max_event_bytes=1024, stop=lambda: "", on_line=lines.append)
+        self.assertEqual(result, ProcessOutcome(0))
+        self.assertEqual(lines, [b"a" * 1024, b"b" * 1024])
 
     def test_docker_artifact_export_selects_regular_text_under_output_root(self):
         output = self.state / "output"

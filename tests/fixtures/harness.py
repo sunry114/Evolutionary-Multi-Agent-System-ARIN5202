@@ -34,8 +34,8 @@ class FakeCLITransport:
         self.command = [sys.executable, str(Path(__file__).with_name("fake_claude_cli.py"))] + args
         process = subprocess.Popen(self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, env=env, start_new_session=True)
-        return capture(process, prompt, timeout=self.config.timeout, limit=self.config.max_output_bytes,
-                       stop=stop, on_line=on_line)
+        return capture(process, prompt, timeout=self.config.timeout, max_event_bytes=self.config.max_event_bytes,
+                       stop=stop, on_line=on_line, keep_stderr=True)
 
 
 class HarnessFixture(unittest.TestCase):

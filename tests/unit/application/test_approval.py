@@ -48,7 +48,7 @@ class ApprovalTests(unittest.TestCase):
         self.assertEqual(restored.get_task("t1")["status"], "waiting_human")
         self.assertEqual(restored.get_action(request_id)["status"], "requested")
         self.assertIsNone(ApprovalService(restored).get_answer(request_id))
-        self.assertEqual(restored.schema_version(), 9)
+        self.assertEqual(restored.schema_version(), 11)
 
     def test_concurrent_identical_requests_share_one_pending_request(self):
         with ThreadPoolExecutor(max_workers=4) as pool:

@@ -60,6 +60,48 @@ class IssueRunsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             app.dispatch("create", {"prompt": "Wrong squad", "squad": "unknown"})
 
+    def test_squad_roster_reaches_the_leader_and_mentioned_agents(self):
+        registry = self.app.application.registry.payload()
+        registry["agents"].append({"name": "external", "specialty": "Outside the Squad"})
+        self.app.dispatch("configure", registry)
+        issue_id = self.create()["task"]["id"]
+        self.app.dispatch("assign", {"task_id": issue_id, "squad": "default"})
+        requests = []
+
+        def create_harness(_state, _store, run, *, comment, **_kwargs):
+            harness = Mock()
+            harness.events.return_value = ()
+            harness.wait.return_value = RunResult("success", "Work complete")
+
+            def start(request):
+                requests.append(request)
+                if run["issue_id"] == issue_id and run["kind"] == "assignment":
+                    comment("@builder Prepare the deliverable")
+
+            harness.start.side_effect = start
+            return Mock(workspace=Path(self.state)), harness
+
+        with patch("evo.interfaces.execution_factory.create_issue_harness", side_effect=create_harness):
+            for kind, agent in (("assignment", "researcher"), ("mention", "builder"), ("handoff", "researcher")):
+                run = self.app.queue.claim()
+                self.assertEqual((run["kind"], run["agent"]), (kind, agent))
+                self.app._execute(run)
+            self.app.dispatch("comment", {"task_id": issue_id, "message": "@reviewer Verify the results"})
+            self.app._execute(self.app.queue.claim())
+            self.create(agent="builder")
+            self.app._execute(self.app.queue.claim())
+
+        self.assertEqual([request.agent for request in requests],
+                         ["researcher", "builder", "researcher", "reviewer", "builder"])
+        for request in requests[:-1]:
+            self.assertIn(f"Your handle is @{request.agent}.", request.role)
+            self.assertIn("Squad: default\nMembers and responsibilities:", request.prompt)
+            for profile in registry["agents"][:-1]:
+                marker = " (lead)" if profile["name"] == "researcher" else ""
+                self.assertIn(f"@{profile['name']}{marker}: {profile['specialty']}", request.prompt)
+            self.assertNotIn("Outside the Squad", request.prompt)
+        self.assertNotIn("Members and responsibilities", requests[-1].prompt)
+
     def test_restart_keeps_queued_run_and_does_not_replay_unconfirmed_execution(self):
         first = self.create(agent="builder")
         second = self.create(agent="reviewer")

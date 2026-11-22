@@ -73,8 +73,10 @@ class ClaudeProtocolTests(HarnessFixture):
         self.assertEqual([item.path for item in result.artifacts], ["hello-world.md"])
         self.assertEqual(self.fs.read_file("hello-world.md"), "# Hello World\n")
         calls = [event.payload for event in self.adapter.events(handle) if event.kind == "native_tool"]
-        self.assertEqual(calls, [{"name": name, "status": status} for name in ("Bash", "Write", "Read")
-                                 for status in ("started", "completed")])
+        self.assertEqual([(call["name"], call["status"]) for call in calls],
+                         [(name, status) for name in ("Bash", "Write", "Read") for status in ("started", "completed")])
+        self.assertTrue(all(call["output"] == "fixture result" and not call["output_truncated"]
+                            for call in calls if call["status"] == "completed"))
         command = self.transport.command
         self.assertEqual(command[command.index("--tools") + 1], "Bash,Read,Write")
         self.assertEqual(command[command.index("--allowedTools") + 1], "Bash,Read,Write,mcp__evo__post_issue_comment")
@@ -89,6 +91,43 @@ class ClaudeProtocolTests(HarnessFixture):
         self.assertEqual(result.artifacts, ())
         self.assertFalse((self.fs.workspace.parent / "outside.md").exists())
 
+    def test_native_issue_tool_failures_do_not_cut_off_the_final_reply(self):
+        self.adapter.config = replace(self.config, native_issue_tools=True)
+        handle, result = self.complete(replace(self.request, prompt="native_issue_many_tools"))
+        self.assertEqual(result.status, "success")
+        events = self.adapter.events(handle)
+        tool_statuses = [event.payload["status"] for event in events if event.kind == "native_tool"]
+        self.assertEqual(tool_statuses.count("started"), 24)
+        self.assertEqual(tool_statuses.count("failed"), 1)
+        final, = [event.payload["text"] for event in events if event.kind == "terminal_output"]
+        self.assertEqual(final, "x" * 10000 + "\nThe first tool failed. The remaining steps finished.")
+
+    def test_native_issue_preserves_cli_errors_without_leaking_credentials(self):
+        self.adapter.config = replace(self.config, native_issue_tools=True)
+        for mode, expected in (
+            ("native_issue_api_error", "API Error: 401 [REDACTED] authentication rejected"),
+            ("native_issue_result_errors", "Connection closed by the model API\n\nRequest ID: fixture"),
+            ("native_issue_stderr", "Unable to connect with [REDACTED]"),
+        ):
+            with self.subTest(mode=mode):
+                handle, result = self.complete(replace(self.request, prompt=mode))
+                self.assertEqual((result.status, result.error, result.exit_code), ("failed", "cli_failed", 1))
+                final, = [event.payload["text"] for event in self.adapter.events(handle)
+                          if event.kind == "terminal_output"]
+                self.assertTrue(final.endswith(expected))
+                self.assertNotIn("fixture-credential", final)
+                self.assertEqual(result.artifacts, ())
+                if mode == "native_issue_stderr":
+                    self.assertTrue(final.startswith("[Earlier stderr truncated]"))
+
+    def test_native_issue_keeps_api_retry_error_if_runtime_times_out(self):
+        self.adapter.config = replace(self.config, native_issue_tools=True, timeout=1)
+        self.adapter.transport = FakeCLITransport(self.adapter.config)
+        handle, result = self.complete(replace(self.request, prompt="native_issue_api_timeout"))
+        self.assertEqual((result.status, result.error), ("timed_out", "timeout"))
+        self.assertEqual(result.text, "Claude Code API retry: connection_error")
+        self.assertIn("api_retry", [event.kind for event in self.adapter.events(handle)])
+
     def test_protocol_exit_and_native_tool_failures(self):
         for mode in ("invalid", "missing", "nonzero", "wrong_session", "error_result", "blocked_native", "failed_mcp"):
             with self.subTest(mode=mode):
@@ -96,13 +135,49 @@ class ClaudeProtocolTests(HarnessFixture):
                 self.assertEqual(result.status, "failed")
                 self.assertNotIn("sensitive diagnostic", result.text)
 
-    def test_timeout_and_stderr_flood_are_bounded(self):
-        self.adapter.config = replace(self.config, timeout=0.2, max_output_bytes=1024)
+    def test_timeout_and_single_event_limits_are_independent(self):
+        self.adapter.config = replace(self.config, timeout=0.5, max_event_bytes=1024)
         self.adapter.transport = FakeCLITransport(self.adapter.config)
-        for mode, status, error in (("hang", "timed_out", "timeout"), ("flood", "failed", "output_limit")):
+        for mode, status, error in (("hang", "timed_out", "timeout"), ("flood", "timed_out", "timeout"),
+                                    ("oversized_event", "failed", "event_size_limit")):
             with self.subTest(mode=mode):
                 _, result = self.complete(replace(self.request, prompt=mode))
                 self.assertEqual((result.status, result.error), (status, error))
+
+    def test_long_stdout_and_stderr_streams_complete_and_keep_events(self):
+        self.adapter.config = replace(self.config, timeout=12, max_event_bytes=32 * 1024)
+        self.adapter.transport = FakeCLITransport(self.adapter.config)
+        handle = self.adapter.start(replace(self.request, prompt="large_stream"))
+        self.addCleanup(lambda: self.adapter.cancel(handle))
+        result = self.adapter.wait(handle, 15)
+        self.assertEqual(result.status, "success")
+        tail = self.adapter.events(handle, after=520)
+        self.assertEqual([(event.sequence, event.kind) for event in tail],
+                         [(521, "assistant"), (522, "assistant"), (523, "result")])
+        self.assertLess((self.adapter.root / (handle.run_id + ".json")).stat().st_size, 4096)
+
+    def test_native_tool_output_preview_is_utf8_bounded_and_redacted(self):
+        self.adapter.config = replace(self.config, native_issue_tools=True)
+        handle, result = self.complete(replace(self.request, prompt="native_issue_long_tool_output"))
+        self.assertEqual(result.status, "success")
+        preview = next(event.payload for event in self.adapter.events(handle)
+                       if event.kind == "native_tool" and event.payload["name"] == "Bash"
+                       and event.payload["status"] == "completed")
+        self.assertTrue(preview["output_truncated"])
+        self.assertTrue(preview["output"].startswith("[REDACTED] 长"))
+        self.assertLessEqual(len(preview["output"].encode()), 8192)
+        self.assertNotIn("tail", preview["output"])
+        self.assertEqual([item.path for item in result.artifacts], ["hello-world.md"])
+
+    def test_long_mcp_tool_output_reaches_claude_and_only_records_preview(self):
+        self.fs.write_file("large.md", "a" * 65536 + "end of tool result")
+        handle, result = self.complete(replace(self.request, prompt="large_mcp"))
+        self.assertEqual(result.status, "success")
+        recorded = next(event.payload["outcome"] for event in self.adapter.events(handle)
+                        if event.kind == "tool_result" and event.payload["name"] == "read_file")
+        self.assertTrue(recorded["output_truncated"])
+        self.assertLessEqual(len(recorded["result"].encode()), 8192)
+        self.assertNotIn("end of tool result", recorded["result"])
 
     def test_reading_live_events_does_not_reread_the_checkpoint(self):
         handle = self.adapter.start(replace(self.request, prompt="hang"))

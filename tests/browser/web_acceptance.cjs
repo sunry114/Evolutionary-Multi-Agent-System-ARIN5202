@@ -57,10 +57,11 @@ async function post(page, operation, payload) {
   }, {operation, payload});
 }
 
-async function createIssue(page, title, assignee) {
+async function createIssue(page, title, assignee, prompt = '核对资料并记录交付结果。') {
   await page.getByRole('button', {name: '新建工单'}).click();
   const dialog = page.getByRole('dialog', {name: '新建工单'});
-  await dialog.getByLabel('目标与要求').fill(title);
+  await dialog.getByLabel('主题').fill(title);
+  await dialog.getByLabel('目标与要求').fill(prompt);
   if (assignee) await dialog.getByLabel('指派给').selectOption(assignee);
   await dialog.getByRole('button', {name: '创建工单', exact: true}).click();
   await page.getByRole('heading', {name: title, exact: true}).waitFor();
@@ -135,7 +136,22 @@ async function run() {
 
   const titleA = 'A · 复核样本报告';
   const titleB = 'B · 慢速工单';
-  const a = await createIssue(page, titleA);
+  const promptA = '核对样本的原始记录和汇总表。\n提交证据及差异说明。';
+  const a = await createIssue(page, titleA, undefined, promptA);
+  const description = page.locator('#issue-heading p');
+  assert.equal(await description.textContent(), promptA);
+  await page.getByRole('navigation', {name: '主导航'}).getByRole('link', {name: '工单', exact: true}).click();
+  const issueTitles = page.locator('#issue-list .title-cell');
+  await issueTitles.filter({hasText: titleA}).waitFor();
+  const search = page.getByRole('searchbox', {name: '搜索工单'});
+  for (const query of ['复核样本报告', '原始记录和汇总表']) {
+    await search.fill(query);
+    assert.deepEqual(await issueTitles.allTextContents(), [titleA]);
+  }
+  await search.clear();
+  await page.locator('#issue-list').getByRole('link', {name: new RegExp(titleA)}).click();
+  await page.getByRole('heading', {name: titleA, exact: true}).waitFor();
+  checks.push('Create an issue with a separate title and full description, then find it by either field');
   const panel = page.locator('#issue-panel');
   const tabs = page.locator('#issue-tabs');
   const inspector = page.locator('#inspector');
@@ -169,7 +185,7 @@ async function run() {
   checks.push('Assign a Squad, automatically run its leader, hand off via @mention and complete through issue status');
   await page.screenshot({path: path.join(output, 'detail.png'), fullPage: true});
 
-  const b = await createIssue(page, titleB, 'agent:builder');
+  const b = await createIssue(page, titleB, 'agent:builder', '慢速工单测试。请生成并归档报告。');
   await tabs.getByRole('button', {name: '运行记录'}).click();
   await panel.getByText('builder · 运行中', {exact: true}).waitFor();
   await panel.getByText('正在处理 builder', {exact: true}).waitFor();
@@ -181,9 +197,25 @@ async function run() {
   await panel.getByRole('button', {name: '重试运行'}).click();
   await panel.getByText('builder · 已完成', {exact: true}).waitFor();
   await panel.locator('.feed-content strong').filter({hasText: /^已完成本轮执行$/}).waitFor();
+  await panel.getByText('查看工具输出预览（已截断）', {exact: true}).click();
+  const toolPreview = await panel.locator('details[open] pre').textContent();
+  assert.match(toolPreview, /^工具诊断样本/);
+  assert.equal(Buffer.byteLength(toolPreview, 'utf-8'), 8192);
   details = (await post(page, 'task', {task_id: b})).body;
   assert.deepEqual(details.executions.map(run => [run.status, run.retry_of]), [['completed', running.id], ['stopped', null]]);
   checks.push('View live progress, stop a running job, and retry as a distinct attempt');
+
+  const failedTitle = '模型连接测试';
+  const failedIssue = await createIssue(page, failedTitle, 'agent:builder', '模拟模型连接中断');
+  await page.locator('#issue-heading').getByText('已阻塞', {exact: true}).waitFor();
+  await panel.getByText('API Error: 模型连接中断', {exact: true}).waitFor();
+  await panel.getByText('Claude Code 错误末尾', {exact: true}).waitFor();
+  await tabs.getByRole('button', {name: '运行记录'}).click();
+  await panel.getByText('builder · 执行失败', {exact: true}).waitFor();
+  await panel.getByText('Execution failed: cli_failed', {exact: true}).first().waitFor();
+  await panel.getByText('Claude Code 错误末尾', {exact: true}).waitFor();
+  await panel.getByText('Claude Code API retry: connection_error', {exact: true}).waitFor();
+  checks.push('Show the full Claude Code error in discussion and execution logs while the issue remains blocked');
 
   await openIssue(page, a, titleA);
   await writeComment(panel, '@builder 请复查 @builder');
@@ -202,12 +234,15 @@ async function run() {
   await stop();
   url = await start();
   await openIssue(page, a, titleA, url);
+  assert.equal(await description.textContent(), promptA);
   assert.notEqual(await page.locator('meta[name=csrf-token]').getAttribute('content'), oldToken);
   await page.locator('#issue-heading').getByText('已完成', {exact: true}).waitFor();
   await panel.getByText('评论-A-ONLY', {exact: true}).waitFor();
   await openIssue(page, b, titleB);
   assert.doesNotMatch(await panel.innerText(), /评论-A-ONLY/);
   assert.equal((await post(page, 'task', {task_id: b})).body.executions[1].status, 'stopped');
+  await openIssue(page, failedIssue, failedTitle);
+  await panel.getByText('Claude Code 错误末尾', {exact: true}).waitFor();
   checks.push('Restart preserves issue state and run history, with comments scoped to the issue');
 
   const primary = page.getByRole('navigation', {name: '主导航'});
@@ -254,6 +289,36 @@ async function run() {
   await transcript.getByText('builder 回复 分析群历史', {exact: true}).waitFor();
   await page.screenshot({path: path.join(output, 'group-conversation.png')});
   checks.push('Create named groups with different members and reload their independent chat histories');
+
+  await primary.getByRole('link', {name: '工单', exact: true}).click();
+  await page.getByRole('button', {name: '新建工单'}).click();
+  const issueDialog = page.getByRole('dialog', {name: '新建工单'});
+  await issueDialog.getByLabel('主题').fill('从分析讨论创建工单');
+  await issueDialog.getByLabel('目标与要求').fill('汇总分析讨论群里的任务和交付要求。');
+  await issueDialog.getByLabel('关联群聊').selectOption({label: '分析讨论'});
+  await issueDialog.getByRole('button', {name: '创建工单'}).click();
+  await page.getByRole('heading', {name: '从分析讨论创建工单', exact: true}).waitFor();
+  await panel.getByText('builder 回复 分析群历史', {exact: true}).waitFor();
+  assert.doesNotMatch(await panel.innerText(), /交付群历史|工作区群聊留档/);
+  await panel.getByRole('link', {name: '分析讨论', exact: true}).click();
+  await transcript.getByText('builder 回复 分析群历史', {exact: true}).waitFor();
+  checks.push('Choose a named group during issue creation and retain a link to the original chat');
+
+  await primary.getByRole('link', {name: '工单', exact: true}).click();
+  await createIssue(page, '先建工单再关联群聊');
+  const discussionDraft = panel.getByLabel('工单讨论');
+  await discussionDraft.fill('正在编辑的评论');
+  await panel.getByRole('button', {name: '关联群聊', exact: true}).click();
+  const linkGroup = page.getByRole('dialog', {name: '关联群聊'});
+  await linkGroup.getByRole('combobox').selectOption({label: '交付复核'});
+  await linkGroup.getByRole('button', {name: '关联群聊', exact: true}).click();
+  await panel.getByText('reviewer 回复 交付群历史', {exact: true}).waitFor();
+  assert.equal(await discussionDraft.inputValue(), '正在编辑的评论');
+  await page.reload();
+  await panel.getByText('reviewer 回复 交付群历史', {exact: true}).waitFor();
+  await panel.getByRole('link', {name: '交付复核', exact: true}).click();
+  await transcript.getByText('reviewer 回复 交付群历史', {exact: true}).waitFor();
+  checks.push('Link an existing issue to a group, preserve the comment draft, and keep the association after reload');
 
   const newChat = page.getByRole('button', {name: '新建聊天', exact: true});
   const agentPicker = page.getByRole('dialog', {name: '选择聊天 Agent'});

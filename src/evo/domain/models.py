@@ -38,6 +38,7 @@ class Task:
     assignee_type: Optional[str] = None
     assignee_id: Optional[str] = None
     routing_mode: Optional[str] = None
+    title: Optional[str] = None
 
 
 @dataclass(frozen=True)

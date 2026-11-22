@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from threading import RLock
 from uuid import uuid4
 from evo.application.chat import parse_group_chat
+from evo.application.issues import parse_issue_title
 from evo.domain.routing import issue_route
 
 
@@ -26,12 +27,13 @@ class DemoApplication:
     def dispatch(self, operation, payload):
         with self.lock:
             if operation == "create":
-                if set(payload) - {"prompt", "agent", "squad", "checks", "no_memory", "from_group"}:
+                if set(payload) - {"title", "prompt", "agent", "squad", "checks", "no_memory", "from_group"}:
                     raise ValueError("Invalid issue fields")
+                title = parse_issue_title(payload)
                 prompt = payload.get("prompt", "").strip()
                 if not prompt:
                     raise ValueError("Prompt required")
-                task = {"id": uuid4().hex, "prompt": prompt, "status": "created",
+                task = {"id": uuid4().hex, "title": title, "prompt": prompt, "status": "created",
                         "assignee_type": None, "assignee_id": None, "routing_mode": None}
                 if "squad" in payload or "agent" in payload:
                     self.assign(task, payload)

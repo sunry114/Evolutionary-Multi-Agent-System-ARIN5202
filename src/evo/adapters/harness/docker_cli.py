@@ -7,6 +7,7 @@ import stat
 import subprocess
 import tempfile
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 from evo.adapters.tools.docker import DockerPythonRunner
@@ -14,7 +15,7 @@ from evo.adapters.tools.filesystem import PURPOSE_SUFFIXES
 from evo.adapters.tools.linux import DEFAULT_IMAGE
 from evo.ports.harness import HarnessCleanupError, HarnessError
 
-from .process import ProcessOutcome, capture
+from .process import capture
 
 
 class DockerCLITransport:
@@ -73,15 +74,15 @@ class DockerCLITransport:
                                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                            env=env, start_new_session=True)
                 outcome = capture(process, prompt, timeout=self.config.timeout,
-                                  limit=self.config.max_output_bytes, stop=stop, on_line=on_line,
-                                  max_line_bytes=2 * 1024 * 1024 if native else 1024 * 1024)
+                                  max_event_bytes=self.config.max_event_bytes, stop=stop, on_line=on_line,
+                                  keep_stderr=self.config.native_issue_tools)
             if outcome.reason:
                 return outcome
             state = self.helper._capture(base + ["inspect", "--format", "{{.State.Status}} {{.State.ExitCode}}", name], 10, 4096)
             match = re.fullmatch(r"exited (\d+)", state.stdout.strip())
             if state.exit_code or not match:
                 raise HarnessError("Harness container did not reach a verified exit state")
-            return ProcessOutcome(int(match.group(1)))
+            return replace(outcome, exit_code=int(match.group(1)))
         finally:
             removed = self.helper._capture(base + ["rm", "--force", name], 10, 4096)
             if removed.exit_code or removed.timed_out or removed.output_limited:

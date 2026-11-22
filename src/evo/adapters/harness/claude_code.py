@@ -16,6 +16,7 @@ from .container_client import NATIVE_EXPORT_FILE_BYTES, NATIVE_EXPORT_FILES, NAT
 from .docker_cli import DockerCLITransport
 from .mcp_bridge import MCPBridge
 from .model_proxy import ModelProxy
+from .output import output_preview
 from .runtime import ManagedHarness
 
 
@@ -25,6 +26,19 @@ OUTPUT_PURPOSES = {suffix: purpose for purpose, suffixes in PURPOSE_SUFFIXES.ite
 
 class _ProtocolError(HarnessError):
     pass
+
+
+def _tool_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(block["text"] for block in content if isinstance(block, dict)
+                         and block.get("type") == "text" and isinstance(block.get("text"), str))
+    return ""
+
+
+def _terminal_text(*parts):
+    return "\n\n".join(dict.fromkeys(part for part in parts if isinstance(part, str) and part.strip()))
 
 
 class ClaudeCodeAdapter(ManagedHarness):
@@ -93,12 +107,22 @@ class ClaudeCodeAdapter(ManagedHarness):
         exported = {}
         native_calls = {}
         final = None
+        last_assistant = ""
+        api_error = ""
+        plain_output = ""
         initialized = False
 
         def on_line(line):
-            nonlocal final, initialized
+            nonlocal final, last_assistant, api_error, plain_output, initialized
             try:
-                message = json.loads(line)
+                try:
+                    message = json.loads(line)
+                except (json.JSONDecodeError, UnicodeError):
+                    if native:
+                        plain_output, truncated = output_preview(self._clean(line.decode("utf-8", errors="replace")))
+                        if truncated:
+                            plain_output += "\n[Remaining stdout truncated]"
+                    raise
                 if not isinstance(message, dict) or not isinstance(message.get("type"), str):
                     raise ValueError()
                 if native and message["type"] == "evo_artifact":
@@ -134,30 +158,34 @@ class ClaudeCodeAdapter(ManagedHarness):
                                 payload["tools"] = [name for name in builtins if name in tools]
                             self._event(control, "started", payload)
                             initialized = True
+                    elif native and message.get("subtype") == "api_retry" and isinstance(message.get("error"), str):
+                        api_error = "Claude Code API retry: " + self._clean(message["error"])[:512]
+                        self._event(control, "api_retry", {"text": api_error})
                 elif kind == "assistant":
                     content = message.get("message", {}).get("content", [])
                     text = "".join(x.get("text", "") for x in content if x.get("type") == "text")
                     if text:
-                        self._event(control, "assistant", {"text": text[:8192]})
+                        self._event(control, "assistant", {"text": self._clean(text)[:8192]})
+                        if native:
+                            last_assistant = text
                     if native:
                         for item in content:
                             if item.get("type") != "tool_use" or item.get("name") not in builtins:
                                 continue
-                            with control.lock:
-                                control.record["tool_calls"] += 1
-                                if control.record["tool_calls"] > self.config.max_tool_calls:
-                                    control.failure = "tool_limit"
-                                    control.stop.set()
-                                    return
-                                native_calls[item["id"]] = item["name"]
-                                self._event(control, "native_tool", {"name": item["name"], "status": "started"})
+                            native_calls[item["id"]] = item["name"]
+                            self._event(control, "native_tool", {"name": item["name"], "status": "started"})
                 elif kind == "user" and native:
                     for item in message.get("message", {}).get("content", []):
                         if item.get("type") == "tool_result":
                             name = native_calls.pop(item.get("tool_use_id"), None)
                             if name:
                                 status = "failed" if item.get("is_error") else "completed"
-                                self._event(control, "native_tool", {"name": name, "status": status})
+                                payload = {"name": name, "status": status}
+                                text = _tool_text(item.get("content"))
+                                if text:
+                                    preview, truncated = output_preview(self._clean(text))
+                                    payload.update(output=preview, output_truncated=truncated)
+                                self._event(control, "native_tool", payload)
                 elif kind == "result":
                     if type(message.get("is_error")) is not bool or not isinstance(message.get("result", ""), str):
                         raise ValueError()
@@ -177,8 +205,9 @@ class ClaudeCodeAdapter(ManagedHarness):
         mcp_config = {"mcpServers": {"evo": {"command": "python", "args": ["/opt/container_client.py", "mcp"]}}}
         lifecycle = ("Use Claude Code's Bash, Read and Write inside /workspace. "
                      "Each run has its own local files. Put final deliverables under /workspace/output; "
-                     "Evo archives supported UTF-8 files there after success. Use the tools to check your output "
-                     "and report your result. Use the Evo MCP tools for issue comments and issue status. "
+                     "Evo archives supported UTF-8 files there after success. Use the tools to check your output. "
+                     "End with a reply explaining what you completed and what remains, including any blockers. "
+                     "Use the Evo MCP tools for issue comments and issue status. "
                      "Report the current issue_status returned by set_issue_status. For deferred review, say review "
                      "was requested and takes effect after successful completion and artifact archiving. "
                      if native else
@@ -211,6 +240,9 @@ class ClaudeCodeAdapter(ManagedHarness):
         prompt = {"goal": request.prompt, "authorized_memory": request.memory,
                   "completed_platform_calls": control.record["context"],
                   "recovery": "Continue from recorded outcomes; reuse completed delegations and never repeat completed critical actions."}
+        outcome = None
+        terminal = ""
+        protocol_failed = False
         try:
             with tempfile.TemporaryDirectory(prefix="evo-h-") as directory:
                 if native:
@@ -224,15 +256,33 @@ class ClaudeCodeAdapter(ManagedHarness):
                     outcome = self.transport.run(args, json.dumps(prompt, ensure_ascii=False), directory,
                                                  stop=stop, on_line=on_line)
         except _ProtocolError:
-            return "failed", "", "protocol_error", None
+            protocol_failed = True
+        finally:
+            if native:
+                result = final or {}
+                errors = result.get("errors")
+                terminal = _terminal_text(result.get("result"), *(errors if isinstance(errors, list) else ()))
+                failed = outcome is None or outcome.reason or outcome.exit_code != 0 or not final or final["is_error"]
+                if failed:
+                    diagnostic = outcome.stderr.strip() if outcome is not None else ""
+                    terminal = _terminal_text(terminal or _terminal_text(last_assistant, api_error), plain_output,
+                                              diagnostic if diagnostic not in terminal else "")
+                elif not terminal:
+                    terminal = last_assistant
+                if terminal:
+                    self._event(control, "terminal_output", {"text": terminal})
+        # Keep the checkpoint bounded. The full CLI output is in the event stream.
+        preview = self._clean(terminal)[:8192]
+        if protocol_failed:
+            return "failed", preview, "protocol_error", None
         if outcome.reason:
             status = {"timeout": "timed_out", "waiting_human": "waiting_human",
                       "waiting_dependency": "waiting_dependency", "cancelled": "cancelled"}.get(outcome.reason, "failed")
-            return status, "", outcome.reason, outcome.exit_code
+            return status, preview, outcome.reason, outcome.exit_code
         if outcome.exit_code != 0 or final is None or final["is_error"] or not initialized:
             error = {78: "cli_version_mismatch", 79: "artifact_export_failed"}.get(
                 outcome.exit_code, "cli_failed" if outcome.exit_code else "protocol_error")
-            return "failed", "", error, outcome.exit_code
+            return "failed", preview, error, outcome.exit_code
         if native:
             try:
                 artifacts = []
@@ -241,5 +291,5 @@ class ClaudeCodeAdapter(ManagedHarness):
                     artifacts.append(asdict(ArtifactRef(path, purpose, hashlib.sha256(data).hexdigest())))
                 control.record["artifacts"] = artifacts
             except (OSError, ValueError):
-                return "failed", "", "artifact_export_failed", outcome.exit_code
-        return "success", final.get("result", "")[:8192], "", outcome.exit_code
+                return "failed", preview, "artifact_export_failed", outcome.exit_code
+        return "success", preview if native else self._clean(final.get("result", ""))[:8192], "", outcome.exit_code

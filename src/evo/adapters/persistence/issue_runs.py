@@ -220,27 +220,33 @@ class IssueRunStore:
             "SELECT 1 FROM issue_runs WHERE parent_run_id=? AND status IN ('queued','running','stopping') LIMIT 1",
             (run_id,)).fetchone() is not None
 
-    def finish(self, run, status, result, *, assignee=None):
+    def finish(self, run, status, result, *, reply=None, assignee=None):
         with self.store._transaction() as connection:
             current = self._run(connection, run["issue_id"], run["id"])
             if current["status"] not in ("running", "stopping"):
                 return
             if current["status"] == "stopping" and status != "interrupted":
                 status, result = "stopped", "Stopped by user"
+            if reply is None:
+                reply = result if status == "completed" else ""
+            if status != "completed" and reply:
+                result += "\n\n" + reply
             issue = self._issue(connection, run["issue_id"])
             self._finish(connection, current, status, result)
-            if status == "completed" and result.strip():
-                reply = Message(uuid4().hex, "agent", run["agent"], result[:8000], task_id=issue["id"])
-                self.store._insert_message(connection, reply)
+            if reply.strip():
+                kind = "agent" if status == "completed" else "run_error"
+                message = Message(uuid4().hex, kind, run["agent"], reply, task_id=issue["id"])
+                self.store._insert_message(connection, message)
+            if status == "completed" and run["kind"] == "mention" and reply.strip():
                 parent = connection.execute("SELECT agent,kind FROM issue_runs WHERE id=?",
                                             (run["parent_run_id"],)).fetchone()
-                if (run["kind"] == "mention" and parent and issue["assignee_type"] == "squad" and assignee
+                if (parent and issue["assignee_type"] == "squad" and assignee
                         and parent["agent"] == assignee.name and parent["kind"] in ("assignment", "handoff")
                         and assignee.name != run["agent"]):
                     pending = connection.execute("""SELECT 1 FROM issue_runs WHERE parent_run_id=? AND kind='mention'
                         AND status IN ('queued','running','stopping') LIMIT 1""", (run["parent_run_id"],)).fetchone()
                     if not pending and issue_status(dict(issue)) in ("todo", "in_progress"):
-                        self._enqueue(connection, issue, assignee, "handoff", comment_id=reply.id,
+                        self._enqueue(connection, issue, assignee, "handoff", comment_id=message.id,
                                       parent_run_id=run["parent_run_id"])
             if not assignee or assignee.name != run["agent"] or run["kind"] == "mention":
                 return

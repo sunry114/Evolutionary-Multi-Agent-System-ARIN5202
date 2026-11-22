@@ -19,6 +19,7 @@ from pathlib import Path
 NATIVE_EXPORT_FILE_BYTES = 1024 * 1024
 NATIVE_EXPORT_TOTAL_BYTES = 2 * 1024 * 1024
 NATIVE_EXPORT_FILES = 32
+MCP_RESPONSE_BYTES = 8 * 1024 * 1024
 
 
 def export_artifacts(root, suffixes):
@@ -80,8 +81,8 @@ def main():
                     channel.sendall(line)
                     # Notifications have no response.
                     if "id" in json.loads(line):
-                        response = reader.readline(2 * 1024 * 1024 + 1)
-                        if not response or len(response) > 2 * 1024 * 1024:
+                        response = reader.readline(MCP_RESPONSE_BYTES + 1)
+                        if not response or len(response) > MCP_RESPONSE_BYTES:
                             return 1
                         sys.stdout.buffer.write(response)
                         sys.stdout.buffer.flush()
