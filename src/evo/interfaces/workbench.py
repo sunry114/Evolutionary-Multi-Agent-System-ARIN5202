@@ -78,11 +78,20 @@ class Workbench:
             assigned_to_squad = issue["assignee_type"] == "squad"
             coordinating = assigned_to_squad and agent == squad.lead and run["kind"] != "mention"
             targets = {name: agents[name] for name in squad.members} if coordinating else agents
+            if assigned_to_squad and run["kind"] == "mention":
+                # Reporting back to the lead is handled by the queue barrier,
+                # not a second concurrent mention run without status controls.
+                targets = {name: member for name, member in targets.items() if name != squad.lead}
 
             def comment(content):
                 if not content.strip() or len(content) > 8000:
                     raise ToolInputError("Provide a comment of 1–8000 characters")
-                return self.queue.comment(issue_id, content, targets, sender=agent, parent_run_id=run_id)
+                result = self.queue.comment(issue_id, content, targets, sender=agent, parent_run_id=run_id)
+                if assigned_to_squad and run["kind"] == "mention" and not result["run_ids"]:
+                    result.update(finish_current_run=True,
+                                  instruction="Report saved. Finish successfully now; the platform returns "
+                                              "member reports to the lead after all delegated work ends.")
+                return result
 
             def change_status(status):
                 current = self._assignee(self._issue(issue_id))
@@ -108,7 +117,14 @@ class Workbench:
                                    for name in squad.members)
                 prompt += f"\n\nSquad: {squad.name}\nMembers and responsibilities:\n{roster}"
                 role += (f" Your handle is @{agent}. Use the Squad roster and responsibilities to decide how to collaborate. "
-                         "Use post_issue_comment with an @mention to hand off work or ask a teammate for input.")
+                         "Use post_issue_comment with an @mention to hand off work or ask a teammate for input. "
+                         "After a comment queues teammates, finish this run successfully immediately. "
+                         "Do not wait, sleep or poll for their replies: this worker runs members sequentially. "
+                         "Successful completion archives your output files before any member starts; "
+                         "the lead receives a separate handoff run after all members finish. "
+                         "Report completion in your final reply without @mentioning anyone. "
+                         "Only @mention a member when requesting NEW work, never when listing participants "
+                         "or reporting completed checks. The lead should not reassign checks already completed.")
             prompt += "\n\nRecent comments:\n"
             history_limit = min(5000, MAX_RUN_PROMPT_BYTES - len(prompt.encode()))
             comments = "\n".join(f"{m['sender']}: {m['content'][:1500]}" for m in detail["messages"][-8:]).encode()
@@ -118,7 +134,8 @@ class Workbench:
             lessons = tuple(item.lesson for item in memory.recall(issue_text)) if memory else ()
             request = RunRequest(run_id, agent, issue_id, workspace.workspace, prompt, role=role, memory=lessons)
             if self.queue.stopping(run_id) or self.shutdown.is_set():
-                self.queue.finish(run, "stopped", "Stopped before execution", assignee=assignee)
+                self.queue.finish(run, "stopped", "Stopped before execution",
+                                  assignee=self._assignee(self._issue(issue_id)))
                 return
             handle = harness.start(request)
             stage = "reading runtime progress"

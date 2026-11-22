@@ -75,6 +75,22 @@ python -m evo --state .evo/local-workbench issue-status ISSUE_ID done
 
 工单的 Claude Code 运行使用独立的 Docker 沙箱，在 `/workspace` 中可以调用原生 Bash、Read 和 Write。本工单已归档的文本产物可以作为只读输入。运行成功后，Evo 会归档 `/workspace/output` 中支持的 UTF‑8 文件，包括 Markdown、纯文本、HTML、Python、JSON、YAML 和 CSV。归档上限为每个文件 1 MiB、每轮合计 2 MiB、最多 32 个文件。
 
+## 成员交接与产物保存
+
+成员间通过工单评论交接时，生产者应先将交付文件放入 `/workspace/output`，再通过
+`post_issue_comment` 提及接收成员。当返回 `finish_current_run=true` 时，应立即给出
+简短最终回复，正常结束本轮；不要等待或轮询成员回复。平台会先归档并校验产物，
+然后才让依赖成员进入独立沙箱。接收成员从提示中的 `archived_inputs` 读取只读快照，
+需要修改时先复制到自己的工作目录。支持的受限文本代码文件还包括 `.js` 和 `.css`。
+
+有待执行成员时，请求 `in_review` 会返回成功的延后请求，工单仍为 `in_progress`，
+不再要求队长在同一轮等待。所有成员（包括嵌套委派）结束后，队列才重新唤醒队长
+汇总；成员结果自动带回，普通完成报告无需再 `@队长`。只有请求新工作时才使用提及。
+
+生产者失败、停止、归档出错或进程中断时，依赖任务会停止并记录原因，避免成员对空
+目录进行验证。成员验证失败也会回到队长处理，不会自动视为验收通过。超时前写在
+临时沙箱但未成功归档的文件仍不能算交付；这项修复不把失败运行改成成功。
+
 Claude Code 的 JSON 输出按单条事件检查，默认上限为 32 MiB。工单「运行记录」中的工具结果预览最多保留 8 KiB，超长时会标记已截断。运行日志与恢复检查点分别保存。
 
 课程评测单独从工作区的 JSONL 评测或 `eval` 启动。[课程评测指南](MID_TEST_RUNBOOK.md)

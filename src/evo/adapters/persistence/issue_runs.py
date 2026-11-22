@@ -126,7 +126,12 @@ class IssueRunStore:
             runs = [self._enqueue(connection, issue, agents[target], "mention", comment_id=message.id,
                                   parent_run_id=parent_run_id)
                     for target in targets if target in agents and target != sender]
-        return {"issue_id": message.task_id, "message_id": message.id, "run_ids": runs}
+        result = {"issue_id": message.task_id, "message_id": message.id, "run_ids": runs}
+        if parent_run_id and runs:
+            result.update(handoff_queued=True, finish_current_run=True,
+                          instruction="Finish this run successfully now so its outputs can be archived. "
+                                      "Delegated runs start after archiving; do not wait or poll for them.")
+        return result
 
     def _run(self, connection, issue_id, run_id):
         run = connection.execute("SELECT * FROM issue_runs WHERE issue_id=? AND id=?", (issue_id, run_id)).fetchone()
@@ -145,7 +150,20 @@ class IssueRunStore:
 
     def claim(self):
         with self.store._transaction() as connection:
-            run = connection.execute("SELECT * FROM issue_runs WHERE status='queued' ORDER BY rowid LIMIT 1").fetchone()
+            # A queued mention is not runnable until its producer has archived
+            # its outputs and committed completed. Also reconcile legacy queues.
+            orphaned = connection.execute("""SELECT child.* FROM issue_runs child
+                JOIN issue_runs parent ON parent.id=child.parent_run_id
+                WHERE child.status='queued' AND parent.status IN ('failed','stopped','interrupted')""").fetchall()
+            for child in orphaned:
+                self._finish(connection, child, "stopped", "Producer failed before artifact handoff")
+            candidates = connection.execute("""SELECT child.* FROM issue_runs child
+                LEFT JOIN issue_runs parent ON parent.id=child.parent_run_id
+                WHERE child.status='queued' AND
+                (child.parent_run_id IS NULL OR parent.status='completed')
+                ORDER BY child.rowid""").fetchall()
+            run = next((item for item in candidates if item["kind"] != "handoff" or not
+                        self._pending_descendants(connection, item["parent_run_id"], item["id"])), None)
             if run is None:
                 return None
             issue = self._issue(connection, run["issue_id"])
@@ -207,12 +225,23 @@ class IssueRunStore:
             if status == "in_review" and lane != status:
                 if lane != "in_progress":
                     raise ConflictError("Move the issue to in_progress before requesting review")
-                if self._pending_children(connection, run["id"]):
-                    raise ConflictError("Wait for the delegated runs before requesting review")
                 self._event(connection, issue["id"], "issue_review_requested", run["agent"], {"run_id": run["id"]})
-                return {"issue_status": lane, "requested_status": status, "deferred": True}
+                result = {"issue_status": lane, "requested_status": status, "deferred": True}
+                if self._pending_children(connection, run["id"]):
+                    result.update(waiting_for_members=True, finish_current_run=True,
+                                  instruction="Review is deferred. Finish this run successfully now to archive outputs "
+                                              "and let members execute. Do not wait for them in this run.")
+                return result
             self._status(connection, issue, status, run["agent"])
             return {"issue_status": status, "deferred": False}
+
+    @staticmethod
+    def _pending_descendants(connection, parent_id, exclude_id):
+        return connection.execute("""WITH RECURSIVE descendants(id,status) AS (
+            SELECT id,status FROM issue_runs WHERE parent_run_id=?
+            UNION ALL SELECT r.id,r.status FROM issue_runs r JOIN descendants d ON r.parent_run_id=d.id
+        ) SELECT 1 FROM descendants WHERE id!=? AND status IN ('queued','running','stopping') LIMIT 1""",
+                                  (parent_id, exclude_id)).fetchone() is not None
 
     @staticmethod
     def _pending_children(connection, run_id):
@@ -233,14 +262,14 @@ class IssueRunStore:
                 result += "\n\n" + reply
             issue = self._issue(connection, run["issue_id"])
             self._finish(connection, current, status, result)
-            if reply.strip():
+            if reply.strip() or run["kind"] == "mention":
                 kind = "agent" if status == "completed" else "run_error"
-                message = Message(uuid4().hex, kind, run["agent"], reply, task_id=issue["id"])
+                message = Message(uuid4().hex, kind, run["agent"], reply or result[:4000], task_id=issue["id"])
                 self.store._insert_message(connection, message)
-            if status == "completed" and run["kind"] == "mention" and reply.strip():
-                parent = connection.execute("SELECT agent,kind FROM issue_runs WHERE id=?",
+            if run["kind"] == "mention":
+                parent = connection.execute("SELECT agent,kind,status FROM issue_runs WHERE id=?",
                                             (run["parent_run_id"],)).fetchone()
-                if (parent and issue["assignee_type"] == "squad" and assignee
+                if (parent and parent["status"] == "completed" and issue["assignee_type"] == "squad" and assignee
                         and parent["agent"] == assignee.name and parent["kind"] in ("assignment", "handoff")
                         and assignee.name != run["agent"]):
                     pending = connection.execute("""SELECT 1 FROM issue_runs WHERE parent_run_id=? AND kind='mention'
@@ -266,3 +295,8 @@ class IssueRunStore:
                            (task_status, result[:4000], now, run["id"]))
         self._event(connection, run["issue_id"], "issue_run_finished", run["agent"],
                     {"run_id": run["id"], "status": status, "result": result[:500]})
+        if status != "completed":
+            children = connection.execute("SELECT * FROM issue_runs WHERE parent_run_id=? AND status='queued'",
+                                          (run["id"],)).fetchall()
+            for child in children:
+                self._finish(connection, child, "stopped", "Producer failed before artifact handoff")
