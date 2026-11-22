@@ -208,6 +208,9 @@ class ClaudeCodeAdapter(ManagedHarness):
                      "Evo archives supported UTF-8 files there after success. Use the tools to check your output. "
                      "End with a reply explaining what you completed and what remains, including any blockers. "
                      "Use the Evo MCP tools for issue comments and issue status. "
+                     "If post_issue_comment returns finish_current_run, end with a short final reply immediately. "
+                     "The platform must archive your files before starting the queued members. "
+                     "A deferred review is not an error: finish now rather than waiting for queued members. "
                      "Report the current issue_status returned by set_issue_status. For deferred review, say review "
                      "was requested and takes effect after successful completion and artifact archiving. "
                      if native else
