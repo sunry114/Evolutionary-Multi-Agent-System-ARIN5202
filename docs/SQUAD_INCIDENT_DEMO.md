@@ -44,7 +44,7 @@ DeepSeek 首次尝试中，Claude Code 的非初始化系统消息反复占用�
 
 固定响应用例使用 `.venv/bin/python -m unittest tests.e2e.test_squad_incident_demo -v`，会检查同一工单的协商职责、委派来源、产物与审查状态。
 
-真实模型复跑使用 DeepSeek 的 `deepseek-flash`、已配置的 `DEEPSEEK_API_KEY`、Docker 和原生 Claude Code CLI。在仓库根目录激活虚拟环境后运行以下命令。`prepare_issue` 使用相同场景文件，通过工单接口建单，并为两个成员分别放入输入日志。
+真实模型复跑使用 DeepSeek 的 `deepseek-flash`、已配置的 `DEEPSEEK_API_KEY` 和宿主机 Claude Code CLI。在仓库根目录激活虚拟环境后运行以下命令。`prepare_issue` 使用相同场景文件，通过评测接口建单，并为两个成员分别放入输入日志。
 
 ```bash
 mkdir -p .evo

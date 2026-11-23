@@ -9,6 +9,9 @@ description = "Linux multi-agent collaboration platform: member D interfaces"
 requires-python = ">=3.9"
 classifiers = ["Operating System :: POSIX :: Linux"]
 
+[project.optional-dependencies]
+midtest = ["esprima", "numpy", "textstat"]
+
 [project.scripts]
 evo-v3 = "evo.interfaces.cli:main"
 

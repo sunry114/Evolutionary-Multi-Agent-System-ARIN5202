@@ -3,7 +3,7 @@
 set -eu
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$project_dir"
-export PATH="$HOME/.local/bin:$PATH"
+export PATH="$project_dir/.venv/bin:$HOME/.local/bin:$PATH"
 if [ "$(uname -s)" != Linux ] || [ "$(id -u)" = 0 ]; then
   echo "Start this workbench as a non-root Linux user." >&2
   exit 1
