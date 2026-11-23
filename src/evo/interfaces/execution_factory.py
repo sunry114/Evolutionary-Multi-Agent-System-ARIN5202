@@ -25,7 +25,7 @@ from evo.ports.harness import ToolInputError
 
 
 def create_issue_harness(state, store, run, *, project_dir, output_dir, comment, change_status,
-                         issue_artifacts=()):
+                         assign_work=None, issue_artifacts=(), resume_session=None):
     provider = ProviderConfig.from_environment()
     adapter = os.environ.get("EVO_HARNESS_ADAPTER", "claude_code")
     timeout = os.environ.get("EVO_CLAUDE_TIMEOUT", "none" if adapter == "claude_code" else "180")
@@ -40,12 +40,13 @@ def create_issue_harness(state, store, run, *, project_dir, output_dir, comment,
     executor = ActionExecutor(store, ApprovalService(store), agent=run["agent"], workspace=workspace,
                               python=HostPythonRunner(workspace), git=HostGitTools(workspace))
     broker = PlatformToolBroker(executor, web=WebTools(run["id"]), artifacts=ArtifactExchange(workspace),
-                                issue_comment=comment, issue_status=change_status,
+                                issue_comment=comment, issue_assign_work=assign_work, issue_status=change_status,
                                 allow_approval_tools=False,
                                 issue_controls_only=config.native_issue_tools)
     return workspace, create_harness(config, state, broker, model=model,
                                      credential_loader=lambda: load_key(provider.provider),
-                                     issue_artifacts=issue_artifacts, project_dir=project_dir)
+                                     issue_artifacts=issue_artifacts, project_dir=project_dir,
+                                     resume_session=resume_session)
 
 
 def create_orchestrator(state, *, agents, squad=None, direct_assignee=None, store=None, provider=None,

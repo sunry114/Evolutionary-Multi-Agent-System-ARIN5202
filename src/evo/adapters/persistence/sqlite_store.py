@@ -30,7 +30,7 @@ class ConflictError(StorageError, ValueError):
 
 MIGRATIONS = ("0001_initial", "0002_issues", "0003_routing", "0004_delegations", "0005_workbench",
               "0006_squad_routing", "0007_issue_runs", "0008_chat_threads", "0009_group_chats", "0010_harness_events",
-              "0011_issue_titles")
+              "0011_issue_titles", "0012_issue_run_triggers")
 
 ANCESTORS = """
     WITH RECURSIVE chain AS (

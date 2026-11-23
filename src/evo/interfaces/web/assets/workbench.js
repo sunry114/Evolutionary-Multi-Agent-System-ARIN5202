@@ -19,7 +19,7 @@ const tabNames = {discussion: "讨论", logs: "运行记录", artifacts: "产物
 const eventNames = {
   issue_run_queued: "运行入队", issue_run_started: "运行开始", issue_run_stop_requested: "请求停止",
   issue_run_finished: "运行结束", issue_run_output: "Agent 进度", issue_run_tool: "Claude Code 原生工具",
-  issue_run_platform_tool: "平台工具", issue_run_api_retry: "Claude Code API 重试",
+  issue_run_platform_tool: "平台工具", issue_run_api_retry: "Claude Code API 重试", issue_run_native_session: "Claude Code 会话",
   issue_status_changed: "工单状态变更", issue_review_requested: "请求转待审查",
   issue_assigned: "更新负责人", issue_group_linked: "关联群聊", plan_created: "生成执行计划",
   task_created: "创建任务", task_transition: "更新状态",
@@ -395,7 +395,7 @@ function discussion(panel, detail) {
   const feed = node("div", "", panel, "feed");
   if (!detail.messages.length) empty(feed, "还没有讨论");
   for (const item of detail.messages) {
-    const title = {group: "群聊", comment: "评论", agent: "委派消息", run_error: "运行未完成"}[item.kind];
+    const title = {group: "群聊", comment: "评论", agent: "Agent 消息", run_error: "运行未完成"}[item.kind];
     const card = feedItem(feed, item.sender === "human" ? "你" : item.sender,
       [title, when(item.created_at)].filter(Boolean).join(" · "));
     markdownMessage(card, item.content, "feed-content");
@@ -404,8 +404,9 @@ function discussion(panel, detail) {
   const message = field(form, "工单讨论", "textarea", "message");
   message.required = true;
   message.maxLength = 8000;
-  message.placeholder = "留言，或用 @Agent 名称请成员执行";
-  if (state.workspace.capabilities?.issue_runs) {
+  const issueRuns = state.workspace.capabilities?.issue_runs;
+  message.placeholder = issueRuns ? "留言。用 @Agent 并选择「评论并唤醒」可启动运行。" : "留言";
+  if (issueRuns) {
     const mentions = node("div", "", form, "form-actions");
     for (const agent of state.workspace.agents) button(mentions, "@" + agent, () => {
       const prefix = message.value && !/\s$/.test(message.value) ? " " : "";
@@ -415,12 +416,16 @@ function discussion(panel, detail) {
   }
   const actions = node("div", "", form, "form-actions");
   const post = formButton(actions, "发表评论", "comment", "primary");
+  if (issueRuns) formButton(actions, "评论并唤醒", "notify");
   formButton(actions, "发送工单群聊", "group");
   form.onsubmit = event => {
     event.preventDefault();
     const submitter = event.submitter || post;
-    void mutate(submitter, submitter.value, {task_id: detail.issue.id, message: message.value},
-      submitter.value === "comment" ? "评论已保存" : "群聊已保存", "discussion");
+    const group = submitter.value === "group";
+    const payload = {task_id: detail.issue.id, message: message.value};
+    if (issueRuns && !group) payload.notify = submitter.value === "notify";
+    void mutate(submitter, group ? "group" : "comment", payload,
+      group ? "群聊已保存" : "评论已保存", "discussion");
   };
 }
 

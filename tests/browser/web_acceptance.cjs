@@ -70,9 +70,9 @@ async function createIssue(page, title, assignee, prompt = '核对资料并记�
   return decodeURIComponent(new URL(page.url()).hash.split('/')[1]);
 }
 
-async function writeComment(panel, content) {
+async function writeComment(panel, content, notify = false) {
   await panel.getByLabel('工单讨论').fill(content);
-  await panel.getByRole('button', {name: '发表评论'}).click();
+  await panel.getByRole('button', {name: notify ? '评论并唤醒' : '发表评论'}).click();
   await panel.getByText(content, {exact: true}).waitFor();
 }
 
@@ -230,7 +230,7 @@ async function run() {
   checks.push('Show the full Claude Code error in discussion and execution logs while the issue remains blocked');
 
   await openIssue(page, a, titleA);
-  await writeComment(panel, '@builder 请复查 @builder');
+  await writeComment(panel, '@builder 请复查 @builder', true);
   await panel.getByText('已完成本轮执行', {exact: true}).last().waitFor();
   await tabs.getByRole('button', {name: '运行记录'}).click();
   await panel.getByText('builder · 已完成', {exact: true}).waitFor();

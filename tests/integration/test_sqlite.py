@@ -74,7 +74,7 @@ class SQLiteMigrationTests(unittest.TestCase):
                 connection.commit()
 
             store = SQLiteStore(database)
-            self.assertEqual(store.schema_version(), 11)
+            self.assertEqual(store.schema_version(), len(MIGRATIONS))
             revision = store.get_task("revision")
             self.assertIsNone(revision["parent_id"])
             self.assertEqual((revision["assignee_id"], revision["routing_mode"]), ("builder", "direct"))
@@ -129,11 +129,11 @@ class SQLiteMigrationTests(unittest.TestCase):
             first = SQLiteStore(database)
 
             self.assertTrue(database.is_file())
-            self.assertEqual(first.schema_version(), 11)
+            self.assertEqual(first.schema_version(), len(MIGRATIONS))
 
             second = SQLiteStore(database)
 
-            self.assertEqual(second.schema_version(), 11)
+            self.assertEqual(second.schema_version(), len(MIGRATIONS))
 
             with closing(sqlite3.connect(database)) as connection:
                  rows = connection.execute(
@@ -160,7 +160,7 @@ class SQLiteMigrationTests(unittest.TestCase):
 
             self.assertEqual(settings["foreign_keys"], 1)
             self.assertEqual(settings["busy_timeout"], 4321)
-            self.assertEqual(settings["user_version"], 11)
+            self.assertEqual(settings["user_version"], len(MIGRATIONS))
 
     def test_connection_is_released_and_directory_can_be_removed(self):
         temp = tempfile.mkdtemp()

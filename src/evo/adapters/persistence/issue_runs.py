@@ -49,8 +49,38 @@ class IssueRunStore:
             INSERT INTO issue_runs (id,issue_id,agent,agent_role,kind,status,comment_id,parent_run_id,retry_of,created_at)
             VALUES (?,?,?,?,?,'queued',?,?,?,?)
         """, (run_id, issue["id"], agent.name, agent.specialty, kind, comment_id, parent_run_id, retry_of, _utc_now()))
+        if comment_id:
+            connection.execute("INSERT INTO issue_run_triggers VALUES (?,?,?)", (run_id, comment_id, parent_run_id))
         self._event(connection, issue["id"], "issue_run_queued", agent.name, {"run_id": run_id, "kind": kind})
         return run_id
+
+    def _route_comment(self, connection, issue, agent, kind, message, parent_run_id):
+        existing = connection.execute("""
+            SELECT r.id, r.status FROM issue_runs r
+            WHERE r.issue_id=? AND r.agent=? AND (
+                r.status='queued' OR (r.status='running' AND EXISTS (
+                    SELECT 1 FROM issue_run_triggers t JOIN messages m ON m.id=t.comment_id
+                    WHERE t.run_id=r.id AND m.sender=? AND m.content=?
+                      AND (t.parent_run_id IS NULL)=(? IS NULL)
+                ))
+            )
+            ORDER BY r.status='running' DESC, r.rowid LIMIT 1
+        """, (issue["id"], agent.name, message.sender, message.content, parent_run_id)).fetchone()
+        if not existing:
+            return self._enqueue(connection, issue, agent, kind, comment_id=message.id, parent_run_id=parent_run_id)
+        connection.execute("INSERT INTO issue_run_triggers VALUES (?,?,?)",
+                           (existing["id"], message.id, parent_run_id))
+        self._event(connection, issue["id"], "issue_run_trigger_merged", agent.name,
+                    {"run_id": existing["id"], "comment_id": message.id, "status": existing["status"]})
+        return existing["id"]
+
+    def triggers(self, run_id):
+        with self.store._connect() as connection:
+            return [dict(row) for row in connection.execute("""
+                SELECT m.id, m.sender, m.content, t.parent_run_id
+                FROM issue_run_triggers t JOIN messages m ON m.id=t.comment_id
+                WHERE t.run_id=? ORDER BY t.rowid
+            """, (run_id,))]
 
     def create(self, connection, issue_id, agents, squad):
         issue = self._issue(connection, issue_id)
@@ -106,26 +136,29 @@ class IssueRunStore:
                 AND status IN ('queued','running','stopping') ORDER BY rowid DESC LIMIT 1""", (issue["id"],)).fetchone()
             return active["id"] if active else self._enqueue(connection, issue, agent, "assignment")
 
-    def comment(self, issue_id, content, agents, *, sender="human", parent_run_id=None):
-        targets = tuple(dict.fromkeys(MENTION.findall(content)))
+    def comment(self, issue_id, content, agents, *, sender="human", parent_run_id=None, targets=None, assignee=None):
+        if targets is None:
+            targets = MENTION.findall(content) if sender == "human" else ()
+        targets = tuple(target for target in dict.fromkeys(targets) if target in agents and target != sender)
         with self.store._transaction() as connection:
             issue = self._issue(connection, issue_id)
-            if parent_run_id:
+            if parent_run_id is not None:
                 run = self._run(connection, issue["id"], parent_run_id)
                 if run["agent"] != sender or run["status"] != "running":
                     raise ConflictError("Only the active run may post comments")
-                depth = connection.execute("""WITH RECURSIVE parents(id,parent_run_id) AS (
-                    SELECT id,parent_run_id FROM issue_runs WHERE id=? UNION ALL
-                    SELECT r.id,r.parent_run_id FROM issue_runs r JOIN parents p ON p.parent_run_id=r.id
-                ) SELECT count(*) FROM parents""", (parent_run_id,)).fetchone()[0]
-                if depth >= 8:
-                    targets = ()
+                if targets and issue_status(dict(issue)) not in ("todo", "in_progress"):
+                    raise ConflictError("The issue is no longer open for delegation")
             message = Message(uuid4().hex, "comment" if sender == "human" else "agent", sender,
                               content, task_id=issue["id"])
             self.store._insert_message(connection, message)
-            runs = [self._enqueue(connection, issue, agents[target], "mention", comment_id=message.id,
-                                  parent_run_id=parent_run_id)
-                    for target in targets if target in agents and target != sender]
+            lane = issue_status(dict(issue))
+            if sender == "human" and assignee in targets and lane in ("in_review", "blocked"):
+                self._status(connection, issue, "in_progress", sender)
+                if lane == "in_review":
+                    self._event(connection, issue["id"], "issue_follow_up_requested", sender,
+                                {"comment_id": message.id})
+            runs = [self._route_comment(connection, issue, agents[target], "mention", message, parent_run_id)
+                    for target in targets]
         return {"issue_id": message.task_id, "message_id": message.id, "run_ids": runs}
 
     def _run(self, connection, issue_id, run_id):
@@ -192,11 +225,14 @@ class IssueRunStore:
             issue = self._issue(connection, issue_id)
             if run["kind"] == "assignment" and issue_status(dict(issue)) == "blocked":
                 self._status(connection, issue, "todo", "human")
-            return self._enqueue(connection, issue, Agent(run["agent"], run["agent_role"]), run["kind"],
-                                 comment_id=run["comment_id"], parent_run_id=run["parent_run_id"], retry_of=run_id)
+            retry_id = self._enqueue(connection, issue, Agent(run["agent"], run["agent_role"]), run["kind"],
+                                     comment_id=run["comment_id"], parent_run_id=run["parent_run_id"], retry_of=run_id)
+            connection.execute("""INSERT OR IGNORE INTO issue_run_triggers
+                SELECT ?,comment_id,parent_run_id FROM issue_run_triggers WHERE run_id=?""", (retry_id, run_id))
+            return retry_id
 
     def set_run_status(self, run, status):
-        if status not in ("in_progress", "in_review", "blocked") or run["kind"] == "mention":
+        if status not in ("in_progress", "in_review", "blocked"):
             raise ValueError("The run cannot set that issue status")
         with self.store._transaction() as connection:
             current = self._run(connection, run["issue_id"], run["id"])
@@ -208,8 +244,9 @@ class IssueRunStore:
                 if lane != "in_progress":
                     raise ConflictError("Move the issue to in_progress before requesting review")
                 if self._pending_children(connection, run["id"]):
-                    raise ConflictError("Wait for the delegated runs before requesting review")
-                self._event(connection, issue["id"], "issue_review_requested", run["agent"], {"run_id": run["id"]})
+                    raise ConflictError("Finish this run so queued teammate runs can start. "
+                                        "Request review on the follow-up after checking their work.")
+                self._event(connection, run["id"], "issue_review_requested", run["agent"], {"run_id": run["id"]})
                 return {"issue_status": lane, "requested_status": status, "deferred": True}
             self._status(connection, issue, status, run["agent"])
             return {"issue_status": status, "deferred": False}
@@ -217,7 +254,8 @@ class IssueRunStore:
     @staticmethod
     def _pending_children(connection, run_id):
         return connection.execute(
-            "SELECT 1 FROM issue_runs WHERE parent_run_id=? AND status IN ('queued','running','stopping') LIMIT 1",
+            """SELECT 1 FROM issue_run_triggers t JOIN issue_runs r ON r.id=t.run_id
+               WHERE t.parent_run_id=? AND r.status IN ('queued','running','stopping') LIMIT 1""",
             (run_id,)).fetchone() is not None
 
     def finish(self, run, status, result, *, reply=None, assignee=None):
@@ -233,29 +271,48 @@ class IssueRunStore:
                 result += "\n\n" + reply
             issue = self._issue(connection, run["issue_id"])
             self._finish(connection, current, status, result)
+            message = None
             if reply.strip():
                 kind = "agent" if status == "completed" else "run_error"
                 message = Message(uuid4().hex, kind, run["agent"], reply, task_id=issue["id"])
                 self.store._insert_message(connection, message)
-            if status == "completed" and run["kind"] == "mention" and reply.strip():
-                parent = connection.execute("SELECT agent,kind FROM issue_runs WHERE id=?",
-                                            (run["parent_run_id"],)).fetchone()
-                if (parent and issue["assignee_type"] == "squad" and assignee
-                        and parent["agent"] == assignee.name and parent["kind"] in ("assignment", "handoff")
-                        and assignee.name != run["agent"]):
-                    pending = connection.execute("""SELECT 1 FROM issue_runs WHERE parent_run_id=? AND kind='mention'
-                        AND status IN ('queued','running','stopping') LIMIT 1""", (run["parent_run_id"],)).fetchone()
-                    if not pending and issue_status(dict(issue)) in ("todo", "in_progress"):
-                        self._enqueue(connection, issue, assignee, "handoff", comment_id=message.id,
-                                      parent_run_id=run["parent_run_id"])
-            if not assignee or assignee.name != run["agent"] or run["kind"] == "mention":
+            if not assignee or issue_status(dict(issue)) != "in_progress":
                 return
-            if issue_status(dict(issue)) != "in_progress":
+            if assignee.name != run["agent"]:
+                if issue["assignee_type"] == "squad" and status in ("completed", "failed", "interrupted"):
+                    self._return_to_lead(connection, issue, current, assignee, message, result)
                 return
-            if status == "completed" and not self._pending_children(connection, run["id"]):
-                self._status(connection, issue, "in_review", run["agent"])
-            elif status in ("failed", "stopped", "interrupted"):
+            requested = connection.execute("""SELECT 1 FROM events WHERE task_id=?
+                AND event_type='issue_review_requested' LIMIT 1""", (run["id"],)).fetchone()
+            direct_delivery = issue["assignee_type"] != "squad" and run["kind"] == "assignment"
+            if status == "completed" and (requested or direct_delivery) and not self._pending_children(connection, run["id"]):
+                self._finish_review(connection, issue, run["agent"])
+            elif status in ("failed", "stopped", "interrupted") and (run["kind"] != "mention" or requested):
                 self._status(connection, issue, "blocked", run["agent"])
+
+    def _return_to_lead(self, connection, issue, run, assignee, message, result):
+        delegated = connection.execute("""SELECT 1 FROM issue_run_triggers t JOIN issue_runs p ON p.id=t.parent_run_id
+            WHERE t.run_id=? AND p.agent=? LIMIT 1""", (run["id"], assignee.name)).fetchone()
+        if not delegated or (message is None and result == "NO_ACTION"):
+            return
+        if message is None:
+            message = Message(uuid4().hex, "run_error", run["agent"], result, task_id=issue["id"])
+            self.store._insert_message(connection, message)
+        self._route_comment(connection, issue, assignee, "handoff", message, run["id"])
+
+    def _finish_review(self, connection, issue, agent):
+        queued = connection.execute("""
+            SELECT r.*, EXISTS (
+                SELECT 1 FROM issue_run_triggers t JOIN messages m ON m.id=t.comment_id
+                WHERE t.run_id=r.id AND t.parent_run_id IS NULL AND m.sender='human'
+            ) AS human_requested
+            FROM issue_runs r WHERE r.issue_id=? AND r.status='queued' AND r.kind IN ('mention','handoff')
+        """, (issue["id"],)).fetchall()
+        for run in queued:
+            if not run["human_requested"] and run["retry_of"] is None:
+                self._finish(connection, run, "stopped", "Superseded by issue sign-off")
+        if not any(run["human_requested"] and run["agent"] == agent for run in queued):
+            self._status(connection, issue, "in_review", agent)
 
     def _finish(self, connection, run, status, result):
         now = _utc_now()

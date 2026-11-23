@@ -81,15 +81,32 @@ class Workbench:
             self.application._refresh_registry()
             registry = self.application.registry
             agents = {member.name: member for member in registry.agents}
+            assignee = self._assignee(issue, agents)
             squad = registry.squad
             assigned_to_squad = issue["assignee_type"] == "squad"
-            coordinating = assigned_to_squad and agent == squad.lead and run["kind"] != "mention"
-            targets = {name: agents[name] for name in squad.members} if coordinating else agents
+            owns_status = assignee is not None and agent == assignee.name
+            coordinating = assigned_to_squad and owns_status
+            targets = {name: agents[name] for name in squad.members} if coordinating else {}
 
             def comment(content):
                 if not content.strip() or len(content) > 8000:
                     raise ToolInputError("Provide a comment of 1–8000 characters")
-                return self.queue.comment(issue_id, content, targets, sender=agent, parent_run_id=run_id)
+                return self.queue.comment(issue_id, content, {}, sender=agent, parent_run_id=run_id)
+
+            def assign_work(agent, content):
+                if agent not in targets or agent == squad.lead:
+                    raise ToolInputError("Choose a teammate other than the squad lead")
+                if not content.strip() or len(content) > 8000:
+                    raise ToolInputError("Provide a subtask of 1–8000 characters")
+                current_issue = self._issue(issue_id)
+                current = self._assignee(current_issue)
+                if current_issue["assignee_type"] != "squad" or current is None or current.name != squad.lead:
+                    raise ToolInputError("Only the current squad lead may assign work")
+                try:
+                    return self.queue.comment(issue_id, f"Assigned to @{agent}: {content}", targets,
+                                              sender=squad.lead, parent_run_id=run_id, targets=(agent,))
+                except ConflictError as error:
+                    raise ToolInputError(str(error)) from None
 
             def change_status(status):
                 current = self._assignee(self._issue(issue_id))
@@ -101,22 +118,48 @@ class Workbench:
                     raise ToolInputError(str(error)) from None
 
             detail = self.application.issues.detail(issue_id)
+            completed = {row["id"] for row in self.queue.list(issue_id)
+                         if row["agent"] == agent and row["status"] == "completed"}
+            resume_session = next((event["payload"]["session_id"] for event in reversed(detail["logs"])
+                                   if event["event_type"] == "issue_run_native_session"
+                                   and event["task_id"] in completed), None) if not run["retry_of"] else None
             workspace, harness = create_issue_harness(
                 self.application.state, self.store, run, project_dir=self.directory,
-                output_dir=self._outputs(issue_id, run_id), comment=comment,
-                change_status=change_status if run["kind"] != "mention" else None,
+                output_dir=self._outputs(issue_id, run_id), resume_session=resume_session, comment=comment,
+                change_status=change_status if owns_status else None,
+                assign_work=assign_work if coordinating else None,
                 issue_artifacts=detail["artifacts"])
-            trigger = next((row["content"] for row in detail["messages"] if row["id"] == run["comment_id"]), "")
-            issue_text = issue["description"].encode()[:5000].decode(errors="ignore")
-            trigger = trigger.encode()[:14000].decode(errors="ignore")
-            prompt = f"Issue:\n{issue_text}\n\nTriggering comment:\n{trigger}"
-            role = run["agent_role"] + " Follow the triggering comment when present. Report results on this issue."
+            triggers = list(dict.fromkeys(f"{row['sender']}: {row['content']}" for row in self.queue.triggers(run_id)))
+            trigger = "\n\n".join(triggers).encode()[-14000:].decode(errors="ignore")
+            follow_up = self.store.latest_event_payload(issue_id, "issue_follow_up_requested") or {}
+            scope = next((row["content"] for row in detail["messages"] if row["id"] == follow_up.get("comment_id")),
+                         issue["description"])
+            issue_text = scope.encode()[:5000].decode(errors="ignore")
+            mode = "Assignment" if run["kind"] == "assignment" else "Reply"
+            prompt = (f"Turn mode: {mode}\nIssue status: {issue_status(issue)}\n"
+                      f"\nCurrent requester scope:\n{issue_text}\n\nTriggering comments:\n{trigger}")
+            role = (run["agent_role"] + " Work within the current requester scope. "
+                    "Use the triggering comments to identify the concrete work for this turn. "
+                    "Add formats, features, or extra rounds only when needed to satisfy the current request. "
+                    "Reuse existing work. If a reply only acknowledges, thanks, or signs off and needs no action, "
+                    "return only NO_ACTION and do not post a comment.")
             if assigned_to_squad:
                 roster = "\n".join(f"@{name}{' (lead)' if name == squad.lead else ''}: {agents[name].specialty}"
                                    for name in squad.members)
                 prompt += f"\n\nSquad: {squad.name}\nMembers and responsibilities:\n{roster}"
-                role += (f" Your handle is @{agent}. Use the Squad roster and responsibilities to decide how to collaborate. "
-                         "Use post_issue_comment with an @mention to hand off work or ask a teammate for input.")
+                role += (f" Your handle is @{agent}. An ordinary comment never dispatches another agent. "
+                         "Queued teammate runs start after your current run ends.")
+                if coordinating:
+                    role += (" As squad lead, own scoping, decisions, delegation, and sign-off. "
+                             "Use assign_issue_work to give each necessary subtask to a suitable teammate. "
+                             "Keep delegation bounded to the requested deliverable and let teammates do the work. "
+                             "After dispatching, end this turn. Teammate results will wake you. "
+                             "On a reply, assess new results or requester input and delegate only uncovered work. "
+                             "When the requested deliverables are ready, call set_issue_status with in_review "
+                             "and finish with a concise sign-off. Reuse the files already delivered by teammates.")
+                else:
+                    role += (" Complete only the assigned subtask or requested clarification. "
+                             "Summarize the result in your final response so the squad lead can follow up.")
             prompt += "\n\nRecent comments:\n"
             history_limit = min(5000, MAX_RUN_PROMPT_BYTES - len(prompt.encode()))
             comments = "\n".join(f"{m['sender']}: {m['content'][:1500]}" for m in detail["messages"][-8:]).encode()
@@ -138,6 +181,9 @@ class Workbench:
                     cursor = event.sequence
                     if event.kind == "terminal_output":
                         reply = event.payload["text"]
+                    elif event.kind == "started" and event.payload.get("native_session_id"):
+                        self.store.append_event(task_id=run_id, event_type="issue_run_native_session", actor=agent,
+                                                payload={"session_id": event.payload["native_session_id"]})
                     elif event.kind in ("assistant", "api_retry") and event.payload.get("text"):
                         event_type = "issue_run_api_retry" if event.kind == "api_retry" else "issue_run_output"
                         self.store.append_event(task_id=run_id, event_type=event_type, actor=agent,
@@ -183,7 +229,8 @@ class Workbench:
                             status, result = "interrupted", "Runtime cleanup could not be confirmed"
                     except Exception:
                         status, result = "interrupted", "Runtime cleanup could not be confirmed"
-        self.queue.finish(run, status, result, reply=reply, assignee=self._assignee(self._issue(issue_id)))
+        self.queue.finish(run, status, result, reply="" if reply.strip() == "NO_ACTION" else reply,
+                          assignee=self._assignee(self._issue(issue_id)))
 
     def _list(self, rows):
         return [{**row, "lane": issue_status(row), "project_id": self.project["id"]} for row in rows]
@@ -241,9 +288,11 @@ class Workbench:
             result = {"run_id": self.queue.assign(issue_id, assignee_type, assignee_id, mode, target)}
         elif operation == "comment":
             content = required_text(payload, "message")
-            if set(payload) != {"task_id", "message"} or len(content) > 8000:
+            notify = payload.get("notify", True)
+            if set(payload) - {"task_id", "message", "notify"} or len(content) > 8000 or type(notify) is not bool:
                 raise ValueError("Invalid comment")
-            result = self.queue.comment(issue_id, content, agents)
+            result = self.queue.comment(issue_id, content, agents, targets=None if notify else (),
+                                        assignee=agent.name if agent else None)
         elif operation == "issue-status":
             if set(payload) != {"task_id", "status"}:
                 raise ValueError("Invalid status change")

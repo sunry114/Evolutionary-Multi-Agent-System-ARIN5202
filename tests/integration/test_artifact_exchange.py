@@ -204,7 +204,7 @@ class ArtifactExchangeTests(unittest.TestCase):
     def test_storage_is_separate_from_existing_sqlite_databases(self):
         store = SQLiteStore(self.root / "events.sqlite3")
         memory = SQLiteMemoryStore(self.root, "alice")
-        self.assertEqual(store.schema_version(), 11)
+        self.assertEqual(store.schema_version(), 12)
         self.assertEqual(memory.schema_version(), 2)
         self.assertEqual(self.alice.list_files(), ())
         for path in ["../memory.sqlite3", "../../../events.sqlite3", "../../../artifacts/a.md"]:
@@ -213,4 +213,4 @@ class ArtifactExchangeTests(unittest.TestCase):
         self.alice.write_file("ok.md", "ok")
         self.publisher.publish("ok.md", ["bob"])
         self.assertEqual(memory.schema_version(), 2)
-        self.assertEqual(store.schema_version(), 11)
+        self.assertEqual(store.schema_version(), 12)

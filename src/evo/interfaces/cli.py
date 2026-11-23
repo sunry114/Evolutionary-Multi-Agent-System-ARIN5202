@@ -65,6 +65,8 @@ def parser(*, assessment=False):
     command = commands.add_parser("comment")
     command.add_argument("task_id")
     command.add_argument("message")
+    command.add_argument("--no-notify", dest="notify", action="store_false", default=None,
+                         help="Save the comment without starting runs for @mentions")
     command = commands.add_parser("artifact")
     command.add_argument("task_id")
     command.add_argument("event_id", type=int)

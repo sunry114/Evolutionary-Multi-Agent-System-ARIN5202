@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 
 from evo.interfaces.sqlite_application import SQLiteApplication
 from evo.interfaces.workbench import Workbench
-from evo.ports.harness import HarnessError, RunResult
+from evo.ports.harness import HarnessError, RunResult, ToolInputError
 
 
 class IssueRunsTests(unittest.TestCase):
@@ -53,6 +53,7 @@ class IssueRunsTests(unittest.TestCase):
         self.assertEqual(run["id"], created["run_id"])
         assignee = app._assignee(app.store.get_task(issue_id))
         self.assertEqual(assignee.name, "researcher")
+        app.queue.set_run_status(run, "in_review")
         app.queue.finish(run, "completed", "Done", assignee=assignee)
         self.assertEqual(app.dispatch("task", payload)["lane"], "in_review")
         new_issue = app.dispatch("create", {"prompt": "New issue", "squad": "小队1"})
@@ -69,7 +70,7 @@ class IssueRunsTests(unittest.TestCase):
         self.app.dispatch("assign", {"task_id": issue_id, "squad": "default"})
         requests = []
 
-        def create_harness(_state, _store, run, *, comment, **_kwargs):
+        def create_harness(_state, _store, run, *, comment, assign_work, change_status, **_kwargs):
             harness = Mock()
             harness.events.return_value = ()
             harness.wait.return_value = RunResult("success", "Work complete")
@@ -77,7 +78,12 @@ class IssueRunsTests(unittest.TestCase):
             def start(request):
                 requests.append(request)
                 if run["issue_id"] == issue_id and run["kind"] == "assignment":
-                    comment("@builder Prepare the deliverable")
+                    self.assertEqual(comment("@builder Thanks")["run_ids"], [])
+                    assign_work("builder", "Prepare the deliverable")
+                    with self.assertRaisesRegex(ToolInputError, "Finish this run so queued teammate runs can start"):
+                        change_status("in_review")
+                elif run["kind"] == "handoff":
+                    change_status("in_review")
 
             harness.start.side_effect = start
             return Mock(workspace=Path(self.state)), harness
@@ -96,11 +102,12 @@ class IssueRunsTests(unittest.TestCase):
                          ["researcher", "builder", "researcher", "reviewer", "builder"])
         for request in requests[:-1]:
             self.assertIn(f"Your handle is @{request.agent}.", request.role)
+            self.assertIn("Queued teammate runs start after your current run ends", request.role)
             self.assertIn("Squad: default\nMembers and responsibilities:", request.prompt)
             for profile in registry["agents"][:-1]:
                 marker = " (lead)" if profile["name"] == "researcher" else ""
                 self.assertIn(f"@{profile['name']}{marker}: {profile['specialty']}", request.prompt)
-            self.assertNotIn("Outside the Squad", request.prompt)
+            self.assertNotIn("@external", request.prompt)
         self.assertNotIn("Members and responsibilities", requests[-1].prompt)
 
     def test_restart_keeps_queued_run_and_does_not_replay_unconfirmed_execution(self):
@@ -134,6 +141,57 @@ class IssueRunsTests(unittest.TestCase):
         self.assertEqual(self.app.queue.set_run_status(retry, "in_review"), expected)
         self.app.queue.finish(retry, "completed", "Artifact archived", assignee=assignee)
         self.assertEqual(self.app.dispatch("task", payload)["lane"], "in_review")
+
+    def test_mentioned_lead_can_sign_off_and_stop_older_internal_work(self):
+        issue_id = self.create(squad="default")["task"]["id"]
+        payload = {"task_id": issue_id}
+        agents = self.app._agents()
+        lead = agents["researcher"]
+        initial = self.app.queue.claim()
+        mention = self.app.dispatch("comment", {**payload, "message": "@researcher Sign off on the result"})
+        ordinary = self.app.dispatch("comment", {**payload, "message": "Thanks @researcher", "notify": False})
+        self.assertEqual(ordinary["run_ids"], [])
+        stale = self.app.queue.comment(issue_id, "Check the older draft", agents, sender=lead.name,
+                                       parent_run_id=initial["id"], targets=("builder",))["run_ids"][0]
+        self.app.queue.finish(initial, "completed", "Initial work complete", assignee=lead)
+        self.assertEqual(self.app.dispatch("task", payload)["lane"], "in_progress")
+        signoff = self.app.queue.claim()
+        self.assertEqual(signoff["id"], mention["run_ids"][0])
+
+        def review_harness(_state, _store, _run, *, change_status, **_kwargs):
+            harness = Mock()
+            harness.events.return_value = ()
+            harness.wait.return_value = RunResult("success", "Signed off")
+
+            def start(_request):
+                self.assertTrue(change_status("in_review")["deferred"])
+
+            harness.start.side_effect = start
+            return Mock(workspace=Path(self.state)), harness
+
+        with patch("evo.interfaces.execution_factory.create_issue_harness", side_effect=review_harness):
+            self.app._execute(signoff)
+        detail = self.app.dispatch("task", payload)
+        self.assertEqual(detail["lane"], "in_review")
+        stopped = next(run for run in detail["executions"] if run["id"] == stale)
+        self.assertEqual((stopped["status"], stopped["started_at"]), ("stopped", None))
+        self.assertIsNone(self.app.queue.claim())
+        follow_up = self.app.dispatch("comment", {**payload, "message": "@researcher New scope"})
+        self.assertEqual(self.app.dispatch("task", payload)["lane"], "in_progress")
+        self.assertEqual(self.app.queue.claim()["id"], follow_up["run_ids"][0])
+
+    def test_comment_triggers_merge_in_queue_and_repeat_during_running(self):
+        issue_id = self.create()["task"]["id"]
+        first = self.app.dispatch("comment", {"task_id": issue_id, "message": "@builder First request"})
+        second = self.app.dispatch("comment", {"task_id": issue_id, "message": "@builder Additional detail"})
+        self.assertEqual(second["run_ids"], first["run_ids"])
+        run = self.app.queue.claim()
+        duplicate = self.app.dispatch("comment", {"task_id": issue_id, "message": "@builder First request"})
+        self.assertEqual(duplicate["run_ids"], first["run_ids"])
+        self.assertEqual([trigger["id"] for trigger in self.app.queue.triggers(run["id"])],
+                         [first["message_id"], second["message_id"], duplicate["message_id"]])
+        follow_up = self.app.dispatch("comment", {"task_id": issue_id, "message": "@builder Change the scope"})
+        self.assertNotEqual(follow_up["run_ids"], first["run_ids"])
 
     def test_progress_monitor_error_cancels_harness_before_blocking_issue(self):
         created = self.create(agent="builder")

@@ -37,6 +37,7 @@ SCHEMAS = {
     "delegate": schema({"agent": S, "description": S, "path": S, "contains": S},
                        ("agent", "description", "path", "contains")),
     "post_issue_comment": schema({"content": S}, ("content",)),
+    "assign_issue_work": schema({"agent": S, "content": S}, ("agent", "content")),
     "set_issue_status": schema({"status": {"type": "string", "enum": ["in_progress", "in_review", "blocked"]}},
                                ("status",)),
 }
@@ -55,7 +56,8 @@ class PlatformToolBroker:
     """Constructed by trusted application code, bound to exactly one agent."""
 
     def __init__(self, executor, *, web=None, artifacts=None, delegation=None,
-                 issue_comment=None, issue_status=None, allow_approval_tools=True, issue_controls_only=False):
+                 issue_comment=None, issue_assign_work=None, issue_status=None, allow_approval_tools=True,
+                 issue_controls_only=False):
         self.executor = executor
         self.workspace = executor.workspace
         self.repository = executor.repository
@@ -63,6 +65,7 @@ class PlatformToolBroker:
         self.artifacts = artifacts
         self.delegation = delegation
         self.issue_comment = issue_comment
+        self.issue_assign_work = issue_assign_work
         self.issue_status = issue_status
         self.allow_approval_tools = allow_approval_tools
         self.issue_controls_only = issue_controls_only
@@ -75,7 +78,7 @@ class PlatformToolBroker:
             raise HarnessError("Harness request does not match the bound task/workspace")
 
     def tools(self):
-        names = {"post_issue_comment", "set_issue_status"} if self.issue_controls_only else set(SCHEMAS)
+        names = {"post_issue_comment", "assign_issue_work", "set_issue_status"} if self.issue_controls_only else set(SCHEMAS)
         if self.web is None:
             names -= {"search", "fetch_url"}
         if self.artifacts is None:
@@ -84,13 +87,16 @@ class PlatformToolBroker:
             names -= {"delegate"}
         if self.issue_comment is None:
             names.discard("post_issue_comment")
+        if self.issue_assign_work is None:
+            names.discard("assign_issue_work")
         if self.issue_status is None:
             names.discard("set_issue_status")
         if not self.allow_approval_tools:
             from evo.domain.policies import CRITICAL_TOOLS
             names -= CRITICAL_TOOLS
         descriptions = {"git_status": "Inspect an initialized Git repository. Use list_files for ordinary workspace files.",
-                        "post_issue_comment": "Post on this issue. Use @agent to request a separate run.",
+                        "post_issue_comment": "Post an informational comment or a question for the requester. This never dispatches agents.",
+                        "assign_issue_work": "Give one squad teammate a concrete subtask on this issue. Identify the teammate by handle without @. Use only to request new work.",
                         "set_issue_status": "Set the assigned issue's status. Review requests apply after successful execution and archiving. Read issue_status for the current status."}
         return [{"name": name, "description": descriptions.get(name, "Platform " + name),
                  "inputSchema": SCHEMAS[name]} for name in sorted(names)]
@@ -125,6 +131,8 @@ class PlatformToolBroker:
             raise HarnessError("Task is not ready for platform tools")
         if name == "post_issue_comment":
             return {"status": "success", "result": self.issue_comment(**arguments)}
+        if name == "assign_issue_work":
+            return {"status": "success", "result": self.issue_assign_work(**arguments)}
         if name == "set_issue_status":
             return {"status": "success", "result": self.issue_status(**arguments)}
         # Content is private workspace data, not durable audit metadata.

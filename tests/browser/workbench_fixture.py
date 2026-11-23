@@ -49,12 +49,14 @@ class FixtureHarness(BaselineHarnessAdapter):
                 preview, truncated = output_preview("工具诊断样本\n" + "x" * 9000)
                 self._event(control, "native_tool", {"name": "Bash", "status": "completed",
                                                        "output": preview, "output_truncated": truncated})
-            if request.agent == "researcher" and run["kind"] == "assignment":
-                self._call(control, request, "post_issue_comment", {"content": "@reviewer 独立核对证据"})
+            if self.broker.issue_assign_work and run["kind"] == "assignment":
+                self._call(control, request, "assign_issue_work", {"agent": "reviewer", "content": "独立核对证据"})
                 return "success", "已发给复核员", "", 0
             if request.agent == "reviewer" and run["kind"] == "mention":
                 return "success", "已独立核对证据", "", 0
             self._call(control, request, "write_file", {"path": "report.md", "content": "verified local report"})
+            if self.broker.issue_status:
+                self._call(control, request, "set_issue_status", {"status": "in_review"})
             return "success", "**已完成本轮执行**", "", 0
         revised = "Review feedback:" in request.prompt
         prepare = []
