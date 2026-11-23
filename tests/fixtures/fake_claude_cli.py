@@ -1,6 +1,5 @@
 """Executable protocol fixture, never a production harness transport."""
 
-import base64
 import json
 import os
 import subprocess
@@ -102,8 +101,12 @@ def delegation_scenario(prompt):
 
 def main():
     args = sys.argv[1:]
-    session = args[args.index("--session-id") + 1]
+    session_flag = "--resume" if "--resume" in args else "--session-id"
+    session = args[args.index(session_flag) + 1]
     prompt = json.load(sys.stdin)
+    if "--input-format" in args:
+        assert prompt["type"] == "user" and prompt["message"]["role"] == "user"
+        prompt = json.loads(prompt["message"]["content"])
     mode = prompt["goal"]
     if mode == "hang":
         time.sleep(60)
@@ -169,12 +172,13 @@ def main():
             for _ in range(520):
                 print(status)
         if builtins:
-            for item in prompt.get("archived_inputs", []):
-                fixture = Path(os.environ["FAKE_MCP_SOCKET"]).parent / item["path"].removeprefix("/broker/")
-                assert fixture.read_text() == "Previous output"
+            for item in prompt.get("previous_deliverables", []):
+                assert Path(item["path"]).read_text() == "Previous output"
             tools = ("Bash", "Write", "Read")
             if mode == "native_issue_many_tools":
                 tools *= 8
+            elif mode == "native_issue_webfetch_http_error":
+                tools = ("WebFetch",)
             for index, name in enumerate(tools):
                 tool_id = "test_" + str(index)
                 print(json.dumps({"type": "assistant", "session_id": session, "message": {"content": [
@@ -182,9 +186,27 @@ def main():
                 output = "fixture result"
                 if mode == "native_issue_long_tool_output" and name == "Bash":
                     output = [{"type": "text", "text": "fixture-credential " + "长" * 5000 + "tail"}]
+                elif mode == "native_issue_webfetch_http_error":
+                    output = "The server returned HTTP 403 Forbidden."
                 print(json.dumps({"type": "user", "session_id": session, "message": {"content": [
                     {"type": "tool_result", "tool_use_id": tool_id, "content": output,
                      "is_error": mode == "native_issue_many_tools" and index == 0}]}}), flush=True)
+        if mode == "native_issue_tool_limit":
+            with socket.socket(socket.AF_UNIX) as channel:
+                channel.connect(os.environ["FAKE_MCP_SOCKET"])
+                with channel.makefile("rb") as reader:
+                    for index, (name, arguments) in enumerate((
+                        ("search", {"query": "fixture"}),
+                        ("fetch_url", {"url": "https://example.com/page"}),
+                        ("fetch_url", {"url": "https://example.com/page"}),
+                    )):
+                        call = {"jsonrpc": "2.0", "id": index, "method": "tools/call",
+                                "params": {"name": name, "arguments": arguments}}
+                        channel.sendall(json.dumps(call).encode() + b"\n")
+                        result = json.loads(reader.readline())["result"]
+                        assert result["isError"] == (index > 0)
+                        if index > 0:
+                            assert json.loads(result["content"][0]["text"])["error"] == "tool_limit"
         if mode.startswith("fixture-delegation-") or mode.partition("\n")[0] in (INCIDENT_REPORT, INCIDENT_REVIEW):
             delegation_scenario(prompt)
         if mode in ("mcp", "missing_git_repository", "large_mcp"):
@@ -220,9 +242,13 @@ def main():
         print(json.dumps({"type": "result", "session_id": session, "is_error": mode == "error_result",
                           "result": result}), flush=True)
         if builtins:
-            path = "../outside.md" if mode == "native_issue_bad_export" else "hello-world.md"
-            print(json.dumps({"type": "evo_artifact", "path": path,
-                              "content": base64.b64encode(b"# Hello World\n").decode("ascii")}), flush=True)
+            outputs = Path(prompt["deliverables_directory"])
+            if mode == "native_issue_output_symlink":
+                (outputs / "linked.md").symlink_to(outputs.parent / "outside.md")
+            else:
+                (outputs / "hello-world.md").write_text("# Hello World\n")
+        if mode == "native_issue_failed_with_output":
+            return 7
     return 0
 
 

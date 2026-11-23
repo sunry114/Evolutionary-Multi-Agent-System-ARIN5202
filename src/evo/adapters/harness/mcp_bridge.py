@@ -10,7 +10,7 @@ from dataclasses import asdict, is_dataclass
 
 from evo.ports.harness import HarnessError, ToolInputError
 
-from .container_client import MCP_RESPONSE_BYTES
+from .mcp_client import MCP_RESPONSE_BYTES
 
 
 def schema(properties, required=()):
@@ -171,7 +171,6 @@ class MCPBridge:
 
         class Handler(socketserver.StreamRequestHandler):
             def handle(self):
-                self.connection.settimeout(610)
                 while True:
                     try:
                         line = self.rfile.readline(2 * 1024 * 1024 + 1)
@@ -192,8 +191,12 @@ class MCPBridge:
                                 "jsonrpc": "2.0", "id": response["id"],
                                 "error": {"code": -32000, "message": "MCP response exceeds its message limit"},
                             }).encode() + b"\n"
-                        self.wfile.write(encoded)
-                        self.wfile.flush()
+                        self.connection.settimeout(10)
+                        try:
+                            self.wfile.write(encoded)
+                            self.wfile.flush()
+                        finally:
+                            self.connection.settimeout(None)
 
         self.server = _Server(str(path), Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)

@@ -216,11 +216,15 @@ class ManagedHarness:
                 raise HarnessError("Harness is paused or stopping")
             with control.lock:
                 if request_id is None:
-                    control.record["tool_calls"] += 1
-                    if control.record["tool_calls"] > self.config.max_tool_calls:
+                    if control.record["tool_calls"] >= self.config.max_tool_calls:
+                        if self.config.native_issue_tools:
+                            return {"status": "failed", "error": "tool_limit",
+                                    "message": "Platform tool budget exhausted. Finish with existing evidence "
+                                               "and native tools, and report any remaining gaps."}
                         control.failure = "tool_limit"
                         control.stop.set()
                         raise HarnessError("Harness tool limit exceeded")
+                    control.record["tool_calls"] += 1
                 if len(json.dumps(arguments).encode()) > 65536:
                     raise HarnessError("Platform tool arguments exceed harness limits")
                 if len(json.dumps(control.record).encode()) > 1024 * 1024:

@@ -2,6 +2,7 @@
 
 import http.client
 import json
+import secrets
 import socketserver
 import ssl
 import threading
@@ -10,10 +11,12 @@ from urllib.parse import urlsplit
 
 
 class ModelProxy:
-    def __init__(self, path, model, credential, *, timeout=30, max_bytes=8 * 1024 * 1024):
+    def __init__(self, path, model, credential, *, timeout=30, max_bytes=8 * 1024 * 1024, client_token=None):
         proxy = self
+        tcp = path is None
+        if tcp and not client_token:
+            raise ValueError("Loopback model bridge requires a client token")
         self.endpoint = urlsplit(model.endpoint)
-        self.requests = 0
         self.lock = threading.Lock()
         self.connections = set()
 
@@ -28,6 +31,10 @@ class ModelProxy:
                 response_started = False
                 try:
                     self.connection.settimeout(timeout)
+                    if client_token and not secrets.compare_digest(
+                            self.headers.get("Authorization", "").encode(), ("Bearer " + client_token).encode()):
+                        self.send_error(403, "Model bridge authorization required")
+                        return
                     incoming = urlsplit(self.path)
                     if (incoming.path not in ("/v1/messages", "/v1/messages/count_tokens")
                             or incoming.query not in ("", "beta=true") or incoming.scheme or incoming.netloc):
@@ -51,10 +58,6 @@ class ModelProxy:
                         body = json.dumps(to_chat(payload, model.model)).encode()
                     else:
                         body = json.dumps(payload).encode()
-                    with proxy.lock:
-                        proxy.requests += 1
-                        if proxy.requests > 64:
-                            raise ValueError()
                     endpoint = proxy.endpoint
                     if endpoint.scheme == "https":
                         connection = http.client.HTTPSConnection(endpoint.hostname, endpoint.port or 443,
@@ -142,7 +145,7 @@ class ModelProxy:
                 self.end_headers()
                 self.wfile.write(data)
 
-        class Server(socketserver.ThreadingUnixStreamServer):
+        class Server(socketserver.ThreadingTCPServer if tcp else socketserver.ThreadingUnixStreamServer):
             daemon_threads = True
             block_on_close = False
             slots = threading.BoundedSemaphore(4)
@@ -166,7 +169,8 @@ class ModelProxy:
             def handle_error(self, request, client_address):
                 pass
 
-        self.server = Server(str(path), Handler)
+        self.server = Server(("127.0.0.1", 0) if tcp else str(path), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}" if tcp else None
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
 
     def __enter__(self):

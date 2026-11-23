@@ -3,11 +3,10 @@
 import time
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from evo.adapters.harness.claude_code import ClaudeCodeAdapter
-from evo.adapters.tools.artifacts import ArtifactExchange
-from evo.adapters.tools.git import DockerGitTools
+from evo.adapters.tools.git import HostGitTools
 from evo.config import HarnessConfig, HarnessModelConfig
 from evo.ports.harness import HarnessCleanupError, HarnessError
 from tests.fixtures.harness import FakeCLITransport, HarnessFixture
@@ -47,7 +46,7 @@ class ClaudeProtocolTests(HarnessFixture):
         self.assertEqual(result.artifacts[0].path, "fake.md")
 
     def test_missing_git_repository_is_audited_and_file_execution_continues(self):
-        self.executor.git = DockerGitTools(self.fs)
+        self.executor.git = HostGitTools(self.fs)
         handle, result = self.complete(replace(self.request, prompt="missing_git_repository"))
         self.assertEqual(result.status, "success")
         self.assertEqual(self.fs.read_file("fake.md"), "from MCP")
@@ -59,15 +58,17 @@ class ClaudeProtocolTests(HarnessFixture):
         self.assertEqual(action["result"]["error"], "git_repository_missing")
         self.assertEqual(self.store.get_task(self.request.task_id)["status"], "running")
 
-    def test_native_issue_tools_report_progress_and_export_a_file(self):
+    def test_native_issue_tools_run_in_project_and_index_real_files(self):
         self.adapter.config = replace(self.config, native_issue_tools=True)
         self.broker.issue_controls_only = True
         self.broker.issue_comment = lambda content: {}
-        self.fs.write_file("before.md", "Previous output")
-        prior = ArtifactExchange(self.fs).publish("before.md", ["alice"])
-        self.adapter.issue_artifacts = ({"event_id": 1, "owner": "alice", "path": "before.md",
-                                         "purpose": "document", "archive": {"id": prior.id, "size": prior.size,
-                                                                              "sha256": prior.sha256}},)
+        project = self.state / "project"
+        project.mkdir()
+        self.adapter.project_dir = project
+        previous = self.fs.workspace.parent / "prior"
+        previous.mkdir()
+        (previous / "before.md").write_text("Previous output")
+        self.adapter.issue_artifacts = ({"task_id": "prior", "owner": "alice", "path": "before.md", "archive": {}},)
         handle, result = self.complete(replace(self.request, prompt="native_issue"))
         self.assertEqual(result.status, "success")
         self.assertEqual([item.path for item in result.artifacts], ["hello-world.md"])
@@ -78,18 +79,40 @@ class ClaudeProtocolTests(HarnessFixture):
         self.assertTrue(all(call["output"] == "fixture result" and not call["output_truncated"]
                             for call in calls if call["status"] == "completed"))
         command = self.transport.command
-        self.assertEqual(command[command.index("--tools") + 1], "Bash,Read,Write")
-        self.assertEqual(command[command.index("--allowedTools") + 1], "Bash,Read,Write,mcp__evo__post_issue_comment")
-        self.assertIn("--restricted", command)
-        self.assertIn("/broker/inputs", command)
-        self.assertNotIn("--bare", command)
+        self.assertEqual(command[command.index("--input-format") + 1], "stream-json")
+        self.assertEqual(command[command.index("--permission-mode") + 1], "bypassPermissions")
+        self.assertEqual(self.transport.cwd, project)
 
-    def test_native_issue_rejects_artifact_outside_work_directory(self):
+    def test_native_issue_does_not_index_symlinks_outside_the_deliverables_directory(self):
         self.adapter.config = replace(self.config, native_issue_tools=True)
-        _, result = self.complete(replace(self.request, prompt="native_issue_bad_export"))
-        self.assertEqual((result.status, result.error), ("failed", "protocol_error"))
+        (self.fs.workspace.parent / "outside.md").write_text("External file")
+        _, result = self.complete(replace(self.request, prompt="native_issue_output_symlink"))
+        self.assertEqual(result.status, "success")
         self.assertEqual(result.artifacts, ())
-        self.assertFalse((self.fs.workspace.parent / "outside.md").exists())
+
+    def test_native_webfetch_http_status_is_recorded_as_a_failed_tool_result(self):
+        self.adapter.config = replace(self.config, native_issue_tools=True)
+        handle, result = self.complete(replace(self.request, prompt="native_issue_webfetch_http_error"))
+        self.assertEqual(result.status, "success")
+        _, outcome = [event.payload for event in self.adapter.events(handle) if event.kind == "native_tool"]
+        self.assertEqual((outcome["name"], outcome["status"], outcome["http_status"]), ("WebFetch", "failed", 403))
+
+    def test_failed_native_run_leaves_its_work_on_disk(self):
+        self.adapter.config = replace(self.config, native_issue_tools=True)
+        _, result = self.complete(replace(self.request, prompt="native_issue_failed_with_output"))
+        self.assertEqual((result.status, result.error), ("failed", "cli_failed"))
+        self.assertEqual(result.artifacts, ())
+        self.assertEqual(self.fs.read_file("hello-world.md"), "# Hello World\n")
+
+    def test_native_issue_can_archive_after_platform_tool_budget_runs_out(self):
+        self.adapter.config = replace(self.config, native_issue_tools=True, max_tool_calls=1)
+        self.broker.web = Mock()
+        self.broker.web.search.return_value = []
+        _, result = self.complete(replace(self.request, prompt="native_issue_tool_limit"))
+        self.assertEqual(result.status, "success")
+        self.assertEqual([item.path for item in result.artifacts], ["hello-world.md"])
+        self.broker.web.search.assert_called_once_with(query="fixture")
+        self.broker.web.fetch_url.assert_not_called()
 
     def test_native_issue_tool_failures_do_not_cut_off_the_final_reply(self):
         self.adapter.config = replace(self.config, native_issue_tools=True)

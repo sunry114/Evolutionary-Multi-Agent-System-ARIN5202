@@ -139,12 +139,11 @@ def _write_at(directory: int, name: str, data: bytes, *, overwrite: bool,
 class WorkspaceFilesystem:
     """One agent's UTF-8 files. Only trusted application code constructs this.
 
-    Mount only ``workspace`` into agent containers, never ``state_root`` or
-    ``agents/<agent>``. No method accepts a second agent or a host path.
+    Operations are rooted at the directory selected by the application.
     """
 
     def __init__(self, state_root: Path | str, agent: str, *,
-                 max_file_bytes: int = MAX_FILE_BYTES, run_id: str | None = None):
+                 max_file_bytes: int = MAX_FILE_BYTES, workspace_dir: Path | None = None):
         if sys.platform != "linux":
             raise RuntimeError("Workspace tools require Linux")
         if type(max_file_bytes) is not int or not 0 < max_file_bytes <= MAX_FILE_BYTES:
@@ -152,8 +151,8 @@ class WorkspaceFilesystem:
         self.agent = validate_agent(agent)
         self.max_file_bytes = max_file_bytes
         self._state_root = Path(os.path.abspath(state_root))
-        self.workspace = (self._state_root / "issue-workspaces" / validate_agent(run_id)
-                          if run_id is not None else self._state_root / "agents" / self.agent / "workspace")
+        self.workspace = (Path(workspace_dir).absolute() if workspace_dir is not None
+                          else self._state_root / "agents" / self.agent / "workspace")
         with _directory(self.workspace, create=True):
             pass
 

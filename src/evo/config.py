@@ -3,6 +3,7 @@ import math
 import os
 import re
 from dataclasses import dataclass
+from typing import Optional
 from urllib.parse import urlsplit
 
 ENDPOINTS = {
@@ -60,7 +61,7 @@ class HarnessConfig:
     adapter: str = "baseline"
     cli_path: str = "claude"
     cli_version: str = "2.1.311"
-    timeout: float = 180
+    timeout: Optional[float] = 180
     max_event_bytes: int = 32 * 1024 * 1024
     max_tool_calls: int = 20
     native_issue_tools: bool = False
@@ -70,8 +71,9 @@ class HarnessConfig:
             raise ValueError("Unknown harness adapter")
         if (not isinstance(self.cli_path, str) or not self.cli_path
                 or not re.fullmatch(r"2\.\d+\.\d+", self.cli_version)
-                or type(self.timeout) not in (int, float) or not math.isfinite(self.timeout)
-                or not 0 < self.timeout <= 600
+                or (self.timeout is None and self.native_issue_tools is not True)
+                or (self.timeout is not None and (type(self.timeout) not in (int, float)
+                    or not math.isfinite(self.timeout) or not 0 < self.timeout <= 600))
                 or type(self.max_event_bytes) is not int or not 1024 <= self.max_event_bytes <= 32 * 1024 * 1024
                 or type(self.max_tool_calls) is not int or not 1 <= self.max_tool_calls <= 20
                 or type(self.native_issue_tools) is not bool

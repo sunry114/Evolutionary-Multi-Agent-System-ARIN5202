@@ -12,9 +12,9 @@ from evo.adapters.harness.backend import local_claude_backend
 from evo.adapters.llm.credentials import load_key
 from evo.adapters.harness.mcp_bridge import PlatformToolBroker
 from evo.adapters.persistence.sqlite_store import SQLiteStore
-from evo.adapters.tools.docker import DockerPythonRunner
+from evo.adapters.tools.host import HostPythonRunner
 from evo.adapters.tools.filesystem import WorkspaceFilesystem
-from evo.adapters.tools.git import DockerGitTools
+from evo.adapters.tools.git import HostGitTools
 from evo.application.approvals import ApprovalService
 from evo.application.executor import ActionExecutor
 from evo.config import HarnessConfig, HarnessModelConfig, ProviderConfig
@@ -55,7 +55,7 @@ def main():
     store.save_task(Task(task_id, "C10a explicit live smoke", owner=task_id, status=TaskStatus.RUNNING))
     approval = ApprovalService(store)
     executor = ActionExecutor(store, approval, agent=task_id, workspace=workspace,
-                              python=DockerPythonRunner(workspace), git=DockerGitTools(workspace))
+                              python=HostPythonRunner(workspace), git=HostGitTools(workspace))
     broker = PlatformToolBroker(executor)
     adapter = create_harness(HarnessConfig(adapter="claude_code", cli_path=args.cli), state, broker,
                              model=model, credential_loader=credential_loader)

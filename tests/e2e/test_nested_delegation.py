@@ -48,7 +48,7 @@ class NestedDelegationTests(unittest.TestCase):
         harness = patch("evo.interfaces.execution_factory.create_harness", side_effect=self.harness)
         harness.start()
         self.addCleanup(harness.stop)
-        python = patch("evo.adapters.tools.docker.DockerPythonRunner.run_python",
+        python = patch("evo.adapters.tools.host.HostPythonRunner.run_python",
                        return_value=ExecutionResult(0, "checked", ""))
         self.python = python.start()
         self.addCleanup(python.stop)

@@ -17,13 +17,32 @@ class ProcessOutcome:
     stderr: str = ""
 
 
+def terminate_group(process):
+    """Signal the process group we started and give reaping a bounded wait."""
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        if process.poll() is None:
+            try:
+                process.kill()
+            except (ProcessLookupError, PermissionError):
+                pass
+    try:
+        return process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        return None
+
+
 def capture(process, prompt, *, timeout, max_event_bytes, stop, on_line, keep_stderr=False):
-    deadline = time.monotonic() + timeout
+    deadline = None if timeout is None else time.monotonic() + timeout
     incoming = bytearray()
     stderr = bytearray()
     stderr_truncated = False
     written = 0
     reason = ""
+    drain_deadline = None
     data = prompt.encode("utf-8")
     try:
         with selectors.DefaultSelector() as selector:
@@ -32,13 +51,18 @@ def capture(process, prompt, *, timeout, max_event_bytes, stop, on_line, keep_st
                                         (process.stderr, "stderr", selectors.EVENT_READ)):
                 os.set_blocking(stream.fileno(), False)
                 selector.register(stream, mode, name)
-            while selector.get_map():
+            while selector.get_map() or process.poll() is None:
                 reason = stop()
                 if reason:
                     break
-                if time.monotonic() >= deadline:
+                if deadline is not None and time.monotonic() >= deadline:
                     reason = "timeout"
                     break
+                if process.poll() is not None:
+                    if drain_deadline is None:
+                        drain_deadline = time.monotonic() + 2
+                    elif time.monotonic() >= drain_deadline:
+                        break
                 for key, _ in selector.select(0.05):
                     stream, name = key.fileobj, key.data
                     if name == "stdin":
@@ -77,22 +101,14 @@ def capture(process, prompt, *, timeout, max_event_bytes, stop, on_line, keep_st
                         break
                 if reason:
                     break
-            if not reason:
-                try:
-                    process.wait(timeout=max(0.001, deadline - time.monotonic()))
-                except subprocess.TimeoutExpired:
-                    reason = "timeout"
     finally:
-        # Also terminate descendants that inherited pipes or outlived their parent.
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait()
+        exit_code = terminate_group(process)
         for stream in (process.stdin, process.stdout, process.stderr):
             if not stream.closed:
                 stream.close()
     diagnostic = stderr.decode("utf-8", errors="replace")
     if stderr_truncated:
         diagnostic = "[Earlier stderr truncated]\n" + diagnostic
-    return ProcessOutcome(process.returncode, reason, diagnostic)
+    if exit_code is None:
+        return ProcessOutcome(-signal.SIGKILL, reason or "process_cleanup_failed", diagnostic)
+    return ProcessOutcome(exit_code, reason, diagnostic)

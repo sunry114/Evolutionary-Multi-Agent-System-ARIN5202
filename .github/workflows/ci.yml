@@ -29,8 +29,8 @@ jobs:
           python -m pip install --target /tmp/evo-installed /tmp/evo-wheels/*.whl
           cd /tmp
           PYTHONPATH=/tmp/evo-installed python -c "from importlib.resources import files; assert '协作工作台' in files('evo.interfaces.web').joinpath('assets/index.html').read_text(encoding='utf-8')"
-          PYTHONPATH=/tmp/evo-installed python -c "import tempfile; from evo.interfaces.sqlite_application import SQLiteApplication; directory = tempfile.TemporaryDirectory(); app = SQLiteApplication(directory.name); assert app.store.schema_version() == 9; assert app.snapshot()['tasks'] == []; directory.cleanup()"
-          PYTHONPATH=/tmp/evo-installed python -c "from importlib.resources import files; from evo.adapters.harness.claude_code import ClaudeCodeAdapter; assert files('evo.adapters.harness').joinpath('container_client.py').is_file()"
+          PYTHONPATH=/tmp/evo-installed python -c "import tempfile; from evo.interfaces.sqlite_application import SQLiteApplication; directory = tempfile.TemporaryDirectory(); app = SQLiteApplication(directory.name); assert app.store.schema_version() == 11; assert app.snapshot()['tasks'] == []; directory.cleanup()"
+          PYTHONPATH=/tmp/evo-installed python -c "from importlib.resources import files; from evo.adapters.harness.host_cli import HostCLITransport; assert files('evo.adapters.harness').joinpath('mcp_client.py').is_file()"
   browser:
     runs-on: ubuntu-22.04
     timeout-minutes: 15
@@ -57,43 +57,3 @@ jobs:
           path: .evo/browser-acceptance/
           include-hidden-files: true
           if-no-files-found: ignore
-  docker-integration:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      - run: python -m pip install -e .
-      - name: Prepare fixed Python image and record digest
-        run: |
-          image="$(python -c 'from evo.adapters.tools.linux import DEFAULT_IMAGE; print(DEFAULT_IMAGE)')"
-          docker --host unix:///var/run/docker.sock pull "$image"
-          {
-            uname -srm
-            cat /etc/os-release
-            python --version
-            git rev-parse HEAD
-            docker --host unix:///var/run/docker.sock version
-            docker --host unix:///var/run/docker.sock image inspect "$image" --format '{{.Id}} {{json .RepoDigests}}'
-          } > "$RUNNER_TEMP/c09-environment.txt"
-          cat "$RUNNER_TEMP/c09-environment.txt"
-      - name: Prepare fixed Git image and record digest
-        run: |
-          image="$(python -c 'from evo.adapters.tools.git import DEFAULT_GIT_IMAGE; print(DEFAULT_GIT_IMAGE)')"
-          docker --host unix:///var/run/docker.sock pull "$image"
-          docker --host unix:///var/run/docker.sock image inspect "$image" --format '{{.Id}} {{json .RepoDigests}}' > "$RUNNER_TEMP/c10-git-image.txt"
-          cat "$RUNNER_TEMP/c10-git-image.txt"
-      - name: Run mandatory Docker execution tests
-        env:
-          EVO_DOCKER_TESTS: '1'
-        run: python -W error::ResourceWarning -m unittest tests.unit.adapters.test_docker_command tests.unit.application.test_approval tests.security.test_git_scope tests.integration.test_docker_tools tests.integration.test_git_tools -v
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: sandbox-environment
-          path: |
-            ${{ runner.temp }}/c09-environment.txt
-            ${{ runner.temp }}/c10-git-image.txt
-          if-no-files-found: warn

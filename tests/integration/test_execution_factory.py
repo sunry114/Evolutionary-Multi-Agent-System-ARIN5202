@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from evo.application.orchestrator import ArtifactCheck
 from evo.application.approvals import ApprovalService
-from evo.adapters.tools.docker import DockerPythonRunner
+from evo.adapters.tools.host import HostPythonRunner
 from evo.config import HarnessConfig
 from evo.domain.models import Agent, Task
 from evo.interfaces.cli import main
@@ -59,7 +59,7 @@ class ExecutionFactoryTests(unittest.TestCase):
                 return create_orchestrator(
                     temp, agents=(agent,), direct_assignee="builder", provider=Provider(),
                     harness_config=HarnessConfig(adapter="baseline"))
-            with patch.object(DockerPythonRunner, "run_python",
+            with patch.object(HostPythonRunner, "run_python",
                               return_value=ExecutionResult(0, "ok", "")) as python:
                 coordinator = build()
                 coordinator.store.save_task(Task("root", "Write report.md"))

@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from evo.adapters.persistence.sqlite_memory import SQLiteMemoryStore
 from evo.adapters.persistence.sqlite_store import SQLiteStore
-from evo.adapters.tools.docker import DockerPythonRunner
+from evo.adapters.tools.host import HostPythonRunner
 from evo.application.approvals import ApprovalService
 from evo.application.orchestrator import Orchestrator
 from evo.application.planner import Planner
@@ -47,7 +47,7 @@ class EvaluationE2ETests(unittest.TestCase):
             coordinator.start = start_with_actions
             return coordinator
 
-        with tempfile.TemporaryDirectory() as temp, patch.object(DockerPythonRunner, "run_python") as execute:
+        with tempfile.TemporaryDirectory() as temp, patch.object(HostPythonRunner, "run_python") as execute:
             path = Path(temp) / "critical.jsonl"
             path.write_text('{"id":"critical","prompt":"Check the script"}\n')
             report = evaluate_jsonl(path, Path(temp) / "result.json", factory, model="scripted", compare_memory=True)

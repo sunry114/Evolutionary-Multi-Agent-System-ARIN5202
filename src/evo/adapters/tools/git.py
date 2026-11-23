@@ -1,4 +1,4 @@
-"""Container-only Git with conservative repository validation and scoped push."""
+"""Local Git with conservative repository validation and scoped push."""
 
 import base64
 import configparser
@@ -7,18 +7,10 @@ from pathlib import Path
 import re
 import shutil
 import stat
-import uuid
 
-from evo.adapters.tools.docker import DockerPythonRunner
+from evo.adapters.tools.host import HostPythonRunner
 from evo.adapters.tools.filesystem import _directory, _read_at, validate_file_path
-from evo.adapters.tools.linux import isolation_arguments
 from evo.ports.tools import ExecutionResult, GitRepositoryMissing, ToolError
-
-DEFAULT_GIT_IMAGE = (
-    "alpine/git:2.49.1@sha256:"
-    "c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26"
-)
-
 
 def validate_repository(repository):
     if not isinstance(repository, str) or not re.fullmatch(
@@ -56,18 +48,14 @@ class RepositoryToken:
         return token
 
 
-class DockerGitTools(DockerPythonRunner):
+class HostGitTools(HostPythonRunner):
     @staticmethod
     def validate_push_target(repository, branch):
         validate_repository(repository)
         validate_branch(branch)
 
-    def __init__(self, filesystem, *, token_provider=None, image=DEFAULT_GIT_IMAGE,
-                 timeout=30, max_output_bytes=65536):
+    def __init__(self, filesystem, *, token_provider=None, timeout=30, max_output_bytes=65536):
         super().__init__(filesystem, timeout=timeout, max_output_bytes=max_output_bytes)
-        if not isinstance(image, str) or not re.fullmatch(r"alpine/git:2\.\d+\.\d+(?:@sha256:[0-9a-f]{64})?", image):
-            raise ToolError("Use a fixed Alpine Git image")
-        self.image = image
         self.token_provider = token_provider
 
     def validate_local_repository(self, *, allow_missing=False):
@@ -115,56 +103,24 @@ class DockerGitTools(DockerPythonRunner):
                 "-c", "gc.auto=0", "-c", "user.name=Evo Agent",
                 "-c", "user.email=evo-agent@localhost"] + arguments
 
-    def _run(self, arguments, *, repository=None, input_data=None):
-        name = "evo-git-" + uuid.uuid4().hex
-        args = isolation_arguments(self.filesystem.workspace, name, network="bridge" if repository else "none")
-        executable = shutil.which("docker")
+    def _run(self, arguments, *, repository=None, credential=None):
+        executable = shutil.which("git")
         if executable is None:
-            raise ToolError("Docker CLI unavailable; host Git execution is disabled")
-        base = [executable, "--host", "unix:///var/run/docker.sock"]
-        inspected = self._capture(base + ["image", "inspect", "--format", "{{.Id}}", self.image], 10, 4096)
-        image_id = inspected.stdout.strip()
-        if (inspected.exit_code or inspected.timed_out or inspected.output_limited
-                or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id)):
-            raise ToolError("Docker daemon or configured Git image unavailable; pre-pull the image")
-        args += ["--env", "HOME=/tmp", "--env", "GIT_CONFIG_NOSYSTEM=1",
-                 "--env", "GIT_CONFIG_GLOBAL=/dev/null", "--env", "GIT_TERMINAL_PROMPT=0",
-                 "--env", "GIT_NO_REPLACE_OBJECTS=1", "--env", "GIT_ATTR_NOSYSTEM=1"]
-        command = self._git_arguments(arguments)
+            raise ToolError("Git executable is unavailable")
+        env = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+               "GIT_TERMINAL_PROMPT": "0", "GIT_NO_REPLACE_OBJECTS": "1", "GIT_ATTR_NOSYSTEM": "1",
+               "GIT_CEILING_DIRECTORIES": str(self.filesystem.workspace.parent)}
         if repository:
-            # Only this fixed wrapper reads the secret, after container creation.
-            # Neither Docker metadata nor the host command line contains the token.
-            wrapper = ('IFS= read -r header || exit 125; '
-                       'export GIT_CONFIG_COUNT=1; export GIT_CONFIG_KEY_0="http.$1.extraHeader"; '
-                       'export GIT_CONFIG_VALUE_0="Authorization: Basic $header"; '
-                       'unset header; shift; exec git "$@"')
-            args += ["--interactive", "--entrypoint", "/bin/sh", image_id,
-                     "-c", wrapper, "evo-push", repository] + command
-        else:
-            args += ["--entrypoint", "git", image_id] + command
-        try:
-            created = self._capture(base + args, 10, 4096)
-            if created.exit_code or created.timed_out or created.output_limited:
-                raise ToolError("Git container creation failed; required isolation unavailable")
-            start = base + ["start", "--attach"] + (["--interactive"] if repository else []) + [name]
-            if repository:
-                result = self._capture(start, self.timeout, self.max_output_bytes, input_data=input_data)
-            else:
-                result = self._capture(start, self.timeout, self.max_output_bytes)
-            if result.timed_out or result.output_limited:
-                return ExecutionResult(result.exit_code, "", "Git execution interrupted", result.timed_out, result.output_limited)
-            state = self._capture(base + ["inspect", "--format", "{{.State.Status}} {{.State.ExitCode}}", name], 10, 4096)
-            match = re.fullmatch(r"exited (\d+)", state.stdout.strip())
-            if state.exit_code or state.timed_out or state.output_limited or not match:
-                raise ToolError("Git execution failed to reach a verified exit state")
-            code = int(match.group(1))
-            if repository:
-                return ExecutionResult(code, "Push completed" if code == 0 else "", "" if code == 0 else "Git push failed")
-            return ExecutionResult(code, result.stdout, result.stderr)
-        finally:
-            removed = self._capture(base + ["rm", "--force", name], 10, 4096)
-            if removed.exit_code or removed.timed_out or removed.output_limited:
-                raise ToolError("Git cleanup failed; inspect containers named evo-git-* before retrying")
+            env.update({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http." + repository + ".extraHeader",
+                        "GIT_CONFIG_VALUE_0": "Authorization: Basic " + credential})
+        result = self._capture([executable, *self._git_arguments(arguments)], environment=env)
+        if result.timed_out or result.output_limited:
+            return ExecutionResult(result.exit_code, "", "Git execution interrupted",
+                                   result.timed_out, result.output_limited)
+        if repository:
+            return ExecutionResult(result.exit_code, "Push completed" if result.exit_code == 0 else "",
+                                   "" if result.exit_code == 0 else "Git push failed")
+        return result
 
     def init(self):
         self.validate_local_repository(allow_missing=True)
@@ -217,6 +173,6 @@ class DockerGitTools(DockerPythonRunner):
         if self.token_provider is None:
             raise ToolError("No repository-scoped token configured")
         token = self.token_provider.read(repository)
-        secret = base64.b64encode(("x-access-token:" + token).encode()) + b"\n"
+        secret = base64.b64encode(("x-access-token:" + token).encode()).decode("ascii")
         return self._run(["push", "--porcelain", "--no-verify", "--recurse-submodules=no",
-                          repository, revision + ":refs/heads/" + branch], repository=repository, input_data=secret)
+                          repository, revision + ":refs/heads/" + branch], repository=repository, credential=secret)

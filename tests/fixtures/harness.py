@@ -1,5 +1,6 @@
-"""Test-only local fake CLI transport. Production always uses Docker."""
+"""Test-only subprocess for the Claude CLI protocol."""
 
+import json
 import os
 import subprocess
 import sys
@@ -26,14 +27,18 @@ class FakeCLITransport:
         self.config = config
         self.child_pid = child_pid
         self.command = None
+        self.cwd = None
 
-    def run(self, args, prompt, directory, *, stop, on_line):
-        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "FAKE_MCP_SOCKET": str(Path(directory) / "mcp.sock")}
+    def run(self, args, prompt, cwd, *, settings, endpoint, credential, stop, on_line):
+        mcp = json.loads(args[args.index("--mcp-config") + 1])
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+               "FAKE_MCP_SOCKET": mcp["mcpServers"]["evo"]["args"][-1]}
         if self.child_pid:
             env["FAKE_CHILD_PID"] = str(self.child_pid)
         self.command = [sys.executable, str(Path(__file__).with_name("fake_claude_cli.py"))] + args
+        self.cwd = cwd
         process = subprocess.Popen(self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, env=env, start_new_session=True)
+                                   stderr=subprocess.PIPE, cwd=cwd, env=env, start_new_session=True)
         return capture(process, prompt, timeout=self.config.timeout, max_event_bytes=self.config.max_event_bytes,
                        stop=stop, on_line=on_line, keep_stderr=True)
 

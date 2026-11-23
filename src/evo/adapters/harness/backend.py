@@ -1,4 +1,4 @@
-"""Explicit local configuration import. Secrets never enter the CLI container."""
+"""Load per-run configuration from the selected provider."""
 
 import json
 import os

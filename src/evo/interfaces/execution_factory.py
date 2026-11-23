@@ -12,9 +12,9 @@ from evo.adapters.llm.factory import create_provider
 from evo.adapters.persistence.sqlite_memory import SQLiteMemoryStore
 from evo.adapters.persistence.sqlite_store import SQLiteStore
 from evo.adapters.tools.artifacts import ArtifactExchange
-from evo.adapters.tools.docker import DockerPythonRunner
 from evo.adapters.tools.filesystem import WorkspaceFilesystem
-from evo.adapters.tools.git import DockerGitTools, RepositoryToken
+from evo.adapters.tools.git import HostGitTools, RepositoryToken
+from evo.adapters.tools.host import HostPythonRunner
 from evo.adapters.tools.web import WebTools
 from evo.application.approvals import ApprovalService
 from evo.application.executor import ActionExecutor
@@ -27,15 +27,19 @@ from evo.ports.harness import ToolInputError
 def create_issue_harness(state, store, run, *, comment, change_status, issue_artifacts=()):
     provider = ProviderConfig.from_environment()
     adapter = os.environ.get("EVO_HARNESS_ADAPTER", "claude_code")
+    timeout = os.environ.get("EVO_CLAUDE_TIMEOUT", "none" if adapter == "claude_code" else "180")
     config = HarnessConfig(adapter=adapter, cli_path=os.environ.get("EVO_CLAUDE_CLI", "claude"),
+                           timeout=None if timeout.lower() == "none" else float(timeout),
                            native_issue_tools=adapter == "claude_code")
     endpoint = "https://api.deepseek.com/anthropic" if provider.provider == "deepseek" else provider.base_url
     model = HarnessModelConfig(provider=provider.provider, endpoint=endpoint, model=provider.model)
-    workspace = WorkspaceFilesystem(state, run["agent"], run_id=run["id"] if config.native_issue_tools else None)
+    output_dir = Path(state) / "issue-workspaces" / run["id"] if config.native_issue_tools else None
+    workspace = WorkspaceFilesystem(state, run["agent"], workspace_dir=output_dir)
     executor = ActionExecutor(store, ApprovalService(store), agent=run["agent"], workspace=workspace,
-                              python=DockerPythonRunner(workspace), git=DockerGitTools(workspace))
+                              python=HostPythonRunner(workspace), git=HostGitTools(workspace))
     broker = PlatformToolBroker(executor, web=WebTools(run["id"]), artifacts=ArtifactExchange(workspace),
-                                issue_comment=comment, issue_status=change_status, allow_approval_tools=False,
+                                issue_comment=comment, issue_status=change_status,
+                                allow_approval_tools=False,
                                 issue_controls_only=config.native_issue_tools)
     return workspace, create_harness(config, state, broker, model=model,
                                      credential_loader=lambda: load_key(provider.provider),
@@ -86,8 +90,8 @@ def create_orchestrator(state, *, agents, squad=None, direct_assignee=None, stor
 
     def harness_factory(task_id, owner, workspace):
         executor = ActionExecutor(store, approval, agent=owner, workspace=workspace,
-                                  python=DockerPythonRunner(workspace),
-                                  git=DockerGitTools(workspace, token_provider=token_provider))
+                                  python=HostPythonRunner(workspace),
+                                  git=HostGitTools(workspace, token_provider=token_provider))
         def delegate(parent_id, sender, agent, description, path, contains, *, request_id=None):
             try:
                 return coordinator.request_delegation(parent_id, sender, agent, description,

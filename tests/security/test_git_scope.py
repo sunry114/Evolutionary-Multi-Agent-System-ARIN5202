@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from evo.adapters.tools.filesystem import WorkspaceFilesystem
-from evo.adapters.tools.git import DockerGitTools, RepositoryToken, validate_repository, validate_branch
+from evo.adapters.tools.git import HostGitTools, RepositoryToken, validate_repository, validate_branch
 from evo.ports.tools import ExecutionResult, ToolError
 
 
@@ -20,7 +20,7 @@ class GitScopeTests(unittest.TestCase):
         self.config = self.root / "config"
         self.config.write_text("[core]\nrepositoryformatversion = 0\nfilemode = true\nbare = false\nlogallrefupdates = true\n")
         self.repo = "https://github.com/example/project.git"
-        self.git = DockerGitTools(self.fs)
+        self.git = HostGitTools(self.fs)
 
     def test_repository_requires_exact_canonical_github_https(self):
         self.assertEqual(validate_repository(self.repo), self.repo)
@@ -41,7 +41,7 @@ class GitScopeTests(unittest.TestCase):
             with self.subTest(branch=branch), self.assertRaises(ValueError):
                 validate_branch(branch)
 
-    def test_executable_and_network_git_configuration_is_rejected_before_docker(self):
+    def test_executable_and_network_git_configuration_is_rejected_before_execution(self):
         original = self.config.read_text()
         for config in ('[url "https://evil/"]\ninsteadOf=https://github.com/\n',
                        '[url "https://evil/"]\npushInsteadOf=https://github.com/\n',
@@ -124,54 +124,45 @@ class GitScopeTests(unittest.TestCase):
                 self.git.push(self.repo, "main", "a" * 40, approved=True)
         provider.read.assert_not_called()
 
-    def test_local_command_disables_network_and_only_mounts_bound_workspace(self):
+    def test_local_command_disables_hooks_credentials_and_repository_discovery(self):
         ok = ExecutionResult(0, "", "")
-        with patch("shutil.which", return_value="/usr/bin/docker"), patch.object(self.git, "_capture", side_effect=[
-            ExecutionResult(0, "sha256:" + "a" * 64, ""), ok, ok,
-            ExecutionResult(0, "exited 0", ""), ok]) as capture:
+        with patch("shutil.which", return_value="/usr/bin/git"), patch.object(self.git, "_capture", return_value=ok) as capture:
             self.git.status()
-        commands = [call.args[0] for call in capture.call_args_list]
-        created = next(command for command in commands if "create" in command)
-        self.assertEqual(created[created.index("--network") + 1], "none")
-        self.assertEqual(created.count("--mount"), 1)
-        self.assertEqual(created[created.index("--mount") + 1], f"type=bind,src={self.fs.workspace},dst=/workspace")
+        command = capture.call_args.args[0]
+        self.assertEqual(command[0], "/usr/bin/git")
+        self.assertEqual(capture.call_args.kwargs["environment"]["GIT_CEILING_DIRECTORIES"], str(self.fs.workspace.parent))
         for setting in ("core.hooksPath=/dev/null", "core.fsmonitor=false", "credential.helper=",
                         "protocol.allow=never", "http.followRedirects=false", "http.sslVerify=true"):
-            self.assertIn(setting, created)
+            self.assertIn(setting, command)
 
-    def test_push_token_only_travels_over_stdin_and_output_is_sanitized(self):
+    def test_push_token_is_scoped_to_git_environment_and_output_is_sanitized(self):
         token = "fixture_token"
-        encoded = base64.b64encode(("x-access-token:" + token).encode())
+        encoded = base64.b64encode(("x-access-token:" + token).encode()).decode("ascii")
         self.git.token_provider = RepositoryToken(self.repo, lambda: token)
-        ok = ExecutionResult(0, "", "")
-        with patch.object(self.git, "head", return_value="a" * 40), patch("shutil.which", return_value="/usr/bin/docker"), patch.object(
-            self.git, "_capture", side_effect=[ExecutionResult(0, "sha256:" + "b" * 64, ""), ok,
-                ExecutionResult(0, token + encoded.decode(), token), ExecutionResult(0, "exited 0", ""), ok]) as capture:
+        with patch.object(self.git, "head", return_value="a" * 40), patch("shutil.which", return_value="/usr/bin/git"), patch.object(
+            self.git, "_capture", return_value=ExecutionResult(0, token + encoded, token)) as capture:
             result = self.git.push(self.repo, "codex/test", "a" * 40, approved=True)
-        commands = [call.args[0] for call in capture.call_args_list]
-        self.assertNotIn(token, str(commands))
-        self.assertNotIn(encoded.decode(), str(commands))
+        command = capture.call_args.args[0]
+        env = capture.call_args.kwargs["environment"]
+        self.assertNotIn(token, str(command))
+        self.assertNotIn(encoded, str(command))
         self.assertNotIn(token, str(result))
-        self.assertNotIn(encoded.decode(), str(result))
-        created = next(command for command in commands if "create" in command)
-        self.assertEqual(created[created.index("--network") + 1], "bridge")
-        self.assertIn("a" * 40 + ":refs/heads/codex/test", created)
-        self.assertEqual(next(call.kwargs["input_data"] for call in capture.call_args_list if call.kwargs), encoded + b"\n")
+        self.assertNotIn(encoded, str(result))
+        self.assertIn("a" * 40 + ":refs/heads/codex/test", command)
+        self.assertEqual(env["GIT_CONFIG_KEY_0"], "http." + self.repo + ".extraHeader")
+        self.assertEqual(env["GIT_CONFIG_VALUE_0"], "Authorization: Basic " + encoded)
 
-    def test_missing_docker_never_falls_back_to_host_git(self):
+    def test_missing_git_reports_an_unavailable_executable(self):
         with patch("shutil.which", return_value=None), patch.object(self.git, "_capture") as capture:
-            with self.assertRaisesRegex(ToolError, "host Git execution is disabled"):
+            with self.assertRaisesRegex(ToolError, "Git executable is unavailable"):
                 self.git.status()
             capture.assert_not_called()
 
-    def test_timeout_and_start_error_force_cleanup(self):
-        image = ExecutionResult(0, "sha256:" + "a" * 64, "")
-        ok = ExecutionResult(0, "", "")
+    def test_timeout_and_start_error_are_reported(self):
         for outcome in (ExecutionResult(-9, "", "", timed_out=True), ToolError("start failed")):
-            with patch("shutil.which", return_value="/usr/bin/docker"), patch.object(self.git, "_capture", side_effect=[image, ok, outcome, ok]) as capture:
+            with patch("shutil.which", return_value="/usr/bin/git"), patch.object(self.git, "_capture", side_effect=[outcome]):
                 if isinstance(outcome, Exception):
                     with self.assertRaises(ToolError):
                         self.git.status()
                 else:
                     self.assertTrue(self.git.status().timed_out)
-                self.assertIn("--force", capture.call_args.args[0])

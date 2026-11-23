@@ -92,10 +92,11 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(self.request("/v1/messages/count_tokens")[0], 200)
         self.assertEqual(self.received[0]["path"], "/anthropic/v1/messages/count_tokens")
 
-    def test_request_budget_prevents_an_unbounded_cli_loop(self):
-        self.proxy.requests = 64
-        self.assertEqual(self.request()[0], 502)
-        self.assertEqual(self.received, [])
+    def test_proxy_forwards_requests_beyond_the_old_limit(self):
+        for request_number in range(1, 67):
+            with self.subTest(request_number=request_number):
+                self.assertEqual(self.request()[0], 200)
+        self.assertEqual(len(self.received), 66)
 
     def test_later_stream_is_complete_after_crossing_eight_mib_across_requests(self):
         self.upstream.content_type = "text/event-stream"
@@ -126,9 +127,9 @@ class HKGAIProxyTests(unittest.TestCase):
         ProxyTests.setUp(self)
         self.proxy.__exit__(None, None, None)
         self.path.unlink()
-        model = SimpleNamespace(provider="hkgai", model="permitted",
-                                endpoint=f"http://127.0.0.1:{self.upstream.server_port}/v1")
-        self.proxy = ModelProxy(self.path, model, "fixture-credential", timeout=1)
+        self.proxy_model = SimpleNamespace(provider="hkgai", model="permitted",
+                                          endpoint=f"http://127.0.0.1:{self.upstream.server_port}/v1")
+        self.proxy = ModelProxy(self.path, self.proxy_model, "fixture-credential", timeout=1)
         self.proxy.__enter__()
         self.addCleanup(self.proxy.__exit__, None, None, None)
         self.upstream.reply = {"id": "fixture", "choices": [{"finish_reason": "stop",
@@ -146,6 +147,20 @@ class HKGAIProxyTests(unittest.TestCase):
         self.assertNotIn("x-api-key", sent["headers"])
         self.assertEqual(headers["Content-Type"], "text/event-stream")
         self.assertIn(b"event: message_stop", body)
+
+    def test_host_bridge_rejects_other_loopback_clients(self):
+        with ModelProxy(None, self.proxy_model, "fixture-credential", client_token="test-session") as proxy:
+            for authorization, status in (("Bearer other-session", 403), ("Bearer test-session", 200)):
+                connection = http.client.HTTPConnection(*proxy.server.server_address, timeout=2)
+                try:
+                    connection.request("POST", "/v1/messages", '{"messages":[]}', {"Authorization": authorization})
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, status)
+                    response.read()
+                finally:
+                    connection.close()
+        self.assertEqual(len(self.received), 1)
+        self.assertEqual(self.received[0]["headers"]["Authorization"], "Bearer fixture-credential")
 
     def test_json_result_and_unsupported_counting(self):
         status, _, body = self.request()
