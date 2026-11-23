@@ -16,6 +16,7 @@ from evo.domain.models import Message, Task
 from evo.domain.statuses import TaskStatus
 from evo.interfaces.cli import main
 from evo.interfaces.gateway import ApplicationFailure, ApplicationUnavailable
+from evo.interfaces.projects import Projects
 from evo.interfaces.sqlite_application import SQLiteApplication
 from evo.interfaces.web.app import make_server
 
@@ -36,13 +37,17 @@ class C14GatewayTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.state = Path(self.temp.name)
+        directory = Path(self.temp.name)
+        self.catalog = SQLiteApplication(directory / "state")
+        project = Projects(self.catalog).create({"name": "Chat", "directory": str(directory)})["project"]
+        self.project_path = "/p/" + project["id"]
+        self.state = self.catalog.state / "projects" / project["id"]
         self.provider = ScriptedProvider()
         self.app = SQLiteApplication(self.state, provider=self.provider)
 
     @contextmanager
     def http_service(self):
-        server = make_server(self.app, 0)
+        server = make_server(self.catalog, 0, application_factory=lambda state: self.app)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         def request(path, payload=None, csrf=None):
@@ -50,7 +55,7 @@ class C14GatewayTests(unittest.TestCase):
             try:
                 headers = {"Origin": "http://" + server.authority, "Content-Type": "application/json",
                            "X-CSRF-Token": csrf or ""}
-                conn.request("POST" if payload is not None else "GET", path,
+                conn.request("POST" if payload is not None else "GET", self.project_path + path,
                              json.dumps(payload) if payload is not None else None, headers)
                 result = conn.getresponse()
                 return result.status, result.read().decode("utf-8")

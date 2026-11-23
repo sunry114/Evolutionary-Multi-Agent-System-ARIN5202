@@ -11,6 +11,8 @@ const {chromium} = require(process.env.EVO_PLAYWRIGHT_MODULE || 'playwright');
 const root = path.resolve(__dirname, '../..');
 const output = path.resolve(process.env.EVO_BROWSER_OUTPUT || path.join(root, '.evo/browser-acceptance'));
 const state = fs.mkdtempSync(path.join(os.tmpdir(), 'evo-browser-'));
+const projectDirectory = fs.mkdirSync(path.join(state, 'reports'), {recursive: true});
+const secondDirectory = fs.mkdirSync(path.join(state, 'isolated'), {recursive: true});
 const python = process.env.EVO_TEST_PYTHON || 'python';
 const env = {
   ...process.env, PYTHONIOENCODING: 'utf-8', EVO_HARNESS_ADAPTER: 'baseline',
@@ -107,7 +109,17 @@ async function run() {
   const checks = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.goto(url);
+  await page.getByRole('heading', {name: '项目', exact: true}).waitFor();
+  assert.equal(await page.getByRole('button', {name: '新建工单'}).isVisible(), false);
+  await page.getByRole('button', {name: '新建项目', exact: true}).click();
+  const setup = page.getByRole('dialog', {name: '新建项目'});
+  await setup.getByLabel('项目名称').fill('报告项目');
+  await setup.getByLabel('本机目录').fill(projectDirectory);
+  await setup.getByRole('button', {name: '创建项目'}).click();
+  await page.locator('#workspace-name').getByText('报告项目', {exact: true}).waitFor();
+  const projectPath = new URL(page.url()).pathname;
   await page.locator('#notice').filter({hasText: 'SQLite'}).waitFor();
+  checks.push('Create a project from the overview and bind its existing local directory');
 
   const preview = await browser.newPage();
   try {
@@ -233,7 +245,7 @@ async function run() {
   const oldToken = await page.locator('meta[name=csrf-token]').getAttribute('content');
   await stop();
   url = await start();
-  await openIssue(page, a, titleA, url);
+  await openIssue(page, a, titleA, url + projectPath);
   assert.equal(await description.textContent(), promptA);
   assert.notEqual(await page.locator('meta[name=csrf-token]').getAttribute('content'), oldToken);
   await page.locator('#issue-heading').getByText('已完成', {exact: true}).waitFor();
@@ -353,8 +365,8 @@ async function run() {
   assert.doesNotMatch(await transcript.innerText(), /工作区私聊|另一个私聊/);
   checks.push('Choose an agent from the chat submenu, create independent sessions, switch and reload');
 
-  await primary.getByRole('link', {name: '工作区', exact: true}).click();
-  await page.getByRole('heading', {name: '工作区', exact: true}).waitFor();
+  await primary.getByRole('link', {name: '项目设置', exact: true}).click();
+  await page.getByRole('heading', {name: '项目设置', exact: true}).waitFor();
   const settings = page.getByRole('region', {name: '小队配置'});
   const configInput = settings.getByLabel('小队名称');
   const lead = settings.getByLabel('队长', {exact: true});
@@ -382,7 +394,7 @@ async function run() {
   await editDialog.getByRole('button', {name: '保存专长'}).click();
   await profiles.getByRole('status').filter({hasText: 'builder 的专长已保存'}).waitFor();
   await profiles.getByText(specialty, {exact: true}).waitFor();
-  assert.deepEqual(await page.evaluate(() => fetch('/api/state').then(response => response.json()).then(state => state.squad)),
+  assert.deepEqual(await page.evaluate(() => fetch(location.pathname + 'api/state').then(response => response.json()).then(state => state.squad)),
     {name: 'default', lead: 'researcher', members: ['researcher', 'builder', 'reviewer']});
   assert.equal(await configInput.inputValue(), '小队1');
   assert.equal(await lead.inputValue(), 'reviewer');
@@ -407,10 +419,10 @@ async function run() {
   await page.getByRole('link', {name: new RegExp(titleA)}).waitFor();
   checks.push('Save a Chinese squad name, preserve existing issues and redirect the old squad bookmark');
 
-  await primary.getByRole('link', {name: '工作区', exact: true}).click();
-  await page.getByRole('heading', {name: '工作区', exact: true}).waitFor();
+  await primary.getByRole('link', {name: '项目设置', exact: true}).click();
+  await page.getByRole('heading', {name: '项目设置', exact: true}).waitFor();
   const dataset = path.join(state, 'memory-case.jsonl');
-  const comparison = path.join(state, 'reports', 'memory-comparison.json');
+  const comparison = path.join(state, 'projects', projectPath.split('/')[2], 'reports', 'memory-comparison.json');
   fs.writeFileSync(dataset, JSON.stringify({id: 'test', prompt: 'Write the report',
     subtask_checks: {s1: {path: 'report.md', contains: 'review deliverable'}}}) + '\n');
   const evaluation = page.locator('details').filter({hasText: 'JSONL 评测'});
@@ -434,7 +446,7 @@ async function run() {
   checks.push('Workspace private messages remain outside issue discussion');
 
   const workspaceMenu = primary.locator('#workspace-switch');
-  const workspaces = page.getByRole('navigation', {name: '工作区列表'});
+  const workspaces = page.getByRole('navigation', {name: '项目列表'});
   const selectedWorkspace = page.locator('#workspace-name');
   async function switchWorkspace(name) {
     await workspaceMenu.click();
@@ -446,20 +458,22 @@ async function run() {
   const existingGroupId = existingGroup.hash.split('/').at(-1);
   await workspaceMenu.click();
   await page.screenshot({path: path.join(output, 'workspace-switcher.png')});
-  await page.getByRole('button', {name: '新建工作区', exact: true}).click();
-  const workspaceModal = page.getByRole('dialog', {name: '新建工作区'});
-  await workspaceModal.getByLabel('工作区名称').fill('默认工作区');
-  await workspaceModal.getByRole('button', {name: '创建工作区'}).click();
-  await workspaceModal.getByRole('alert').getByText('该工作区名称已存在。').waitFor();
-  await workspaceModal.getByLabel('工作区名称').fill('验收工作区');
-  await workspaceModal.getByRole('button', {name: '创建工作区'}).click();
+  await page.getByRole('button', {name: '新建项目', exact: true}).click();
+  const workspaceModal = page.getByRole('dialog', {name: '新建项目'});
+  await workspaceModal.getByLabel('项目名称').fill('报告项目');
+  await workspaceModal.getByLabel('本机目录').fill(secondDirectory);
+  await workspaceModal.getByRole('button', {name: '创建项目'}).click();
+  await workspaceModal.getByRole('alert').getByText('该项目名称或目录已绑定。').waitFor();
+  await workspaceModal.getByLabel('项目名称').fill('验收工作区');
+  await workspaceModal.getByRole('button', {name: '创建项目'}).click();
   await selectedWorkspace.getByText('验收工作区', {exact: true}).waitFor();
   const privatePath = new URL(page.url()).pathname;
-  assert.match(privatePath, /^\/w\/[0-9a-f]{32}\/$/);
+  assert.match(privatePath, /^\/p\/[0-9a-f]{32}\/$/);
   assert.equal((await post(page, 'task', {task_id: a})).status, 409);
   assert.equal((await post(page, 'messages', {group_id: existingGroupId})).status, 409);
-  assert.equal((await page.request.get(url + '/w/' + '0'.repeat(32) + '/api/state')).status(), 404);
+  assert.equal((await page.request.get(new URL('/p/' + '0'.repeat(32) + '/api/state', url).href)).status(), 404);
 
+  await primary.getByRole('link', {name: '项目设置', exact: true}).click();
   await profiles.getByRole('button', {name: '管理 Agent'}).click();
   const roster = page.getByRole('dialog', {name: '管理 Agent'});
   await roster.getByRole('button', {name: '移除', exact: true}).first().click();
@@ -487,7 +501,7 @@ async function run() {
   await primary.getByRole('link', {name: '工单', exact: true}).click();
   const isolatedTitle = '仅验收区工单';
   const isolatedIssue = await createIssue(page, isolatedTitle, 'agent:private-agent');
-  await switchWorkspace('默认工作区');
+  await switchWorkspace('报告项目');
   assert.equal((await post(page, 'task', {task_id: isolatedIssue})).status, 409);
   await openIssue(page, b, titleB);
   await switchWorkspace('验收工作区');
@@ -495,10 +509,10 @@ async function run() {
   await panel.getByText('已完成本轮执行', {exact: true}).waitFor();
   await stop();
   url = await start();
-  await page.goto(url + privatePath + newGroupHash);
+  await page.goto(new URL(privatePath + newGroupHash, url).href);
   await selectedWorkspace.getByText('验收工作区', {exact: true}).waitFor();
   await transcript.getByText('private-agent 回复 仅限验收工作区', {exact: true}).waitFor();
-  await switchWorkspace('默认工作区');
+  await switchWorkspace('报告项目');
   await groups.getByRole('link', {name: '分析讨论', exact: true}).click();
   await transcript.getByText('builder 回复 分析群历史', {exact: true}).waitFor();
   await openIssue(page, b, titleB);
@@ -507,7 +521,7 @@ async function run() {
   await page.setViewportSize({width: 390, height: 844});
   await page.screenshot({path: path.join(output, 'mobile.png'), fullPage: true});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-  await primary.getByRole('link', {name: '工作区', exact: true}).click();
+  await primary.getByRole('link', {name: '项目设置', exact: true}).click();
   await profiles.getByText(specialty, {exact: true}).waitFor();
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   const nameBox = await configInput.boundingBox();

@@ -13,7 +13,8 @@ class IssueRunsTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.state = directory.name
-        self.app = Workbench(SQLiteApplication(self.state))
+        self.project = {"id": "fixture", "name": "Fixture", "directory": self.state}
+        self.app = Workbench(SQLiteApplication(self.state), project=self.project)
 
     def create(self, **fields):
         return self.app.dispatch("create", {"prompt": "Check the log", **fields})
@@ -39,7 +40,7 @@ class IssueRunsTests(unittest.TestCase):
         registry["squad"]["name"] = "小队1"
         self.app.dispatch("configure", registry)
 
-        app = Workbench(SQLiteApplication(self.state))
+        app = Workbench(SQLiteApplication(self.state), project=self.project)
         detail = app.dispatch("task", {"task_id": issue_id})
         self.assertEqual(detail["current"]["assignee_id"], "小队1")
         self.assertEqual(app.snapshot()["tasks"][0]["assignee_id"], "小队1")
@@ -106,7 +107,7 @@ class IssueRunsTests(unittest.TestCase):
         first = self.create(agent="builder")
         second = self.create(agent="reviewer")
         self.assertEqual(self.app.queue.claim()["id"], first["run_id"])
-        reopened = Workbench(SQLiteApplication(self.state))
+        reopened = Workbench(SQLiteApplication(self.state), project=self.project)
         reopened.queue.recover_interrupted()
         interrupted, = reopened.queue.list(first["task"]["id"])
         queued, = reopened.queue.list(second["task"]["id"])

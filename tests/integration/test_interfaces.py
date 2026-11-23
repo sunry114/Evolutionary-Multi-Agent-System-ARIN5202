@@ -29,19 +29,24 @@ class CliTests(unittest.TestCase):
                 patch.dict(os.environ, {"EVO_APPLICATION_FACTORY": ""}), \
                 patch("evo.interfaces.execution_factory.load_key", side_effect=ValueError("missing credential")):
             with contextlib.redirect_stdout(io.StringIO()) as output:
-                self.assertEqual(main(["--state", state, "create", "Write the report\nInclude a summary",
+                self.assertEqual(main(["--state", state, "create-project", "Reports", state]), 0)
+            project = json.loads(output.getvalue())["project"]
+            command = ["--state", state, "--project", "Reports"]
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(main(command + ["create", "Write the report\nInclude a summary",
                                        "--title", "Build report", "--agent", "builder"]), 0)
             issue = json.loads(output.getvalue())
             issue_id = issue["task"]["id"]
             with contextlib.redirect_stdout(io.StringIO()) as output:
-                self.assertEqual(main(["--state", state, "start", issue_id]), 0)
+                self.assertEqual(main(command + ["start", issue_id]), 0)
             self.assertEqual(json.loads(output.getvalue())["run_id"], issue["run_id"])
             with contextlib.redirect_stdout(io.StringIO()) as output:
-                self.assertEqual(main(["--state", state, "task", issue_id]), 0)
+                self.assertEqual(main(command + ["task", issue_id]), 0)
             detail = json.loads(output.getvalue())
             self.assertEqual(detail["task"]["status"], "created")
             self.assertEqual(detail["issue"]["title"], "Build report")
             self.assertEqual(detail["issue"]["prompt"], "Write the report\nInclude a summary")
+            self.assertEqual(detail["issue"]["project_id"], project["id"])
             self.assertEqual(detail["executions"][0]["status"], "queued")
 
     def test_commands_map_to_backend(self):

@@ -36,19 +36,20 @@
       <a class="brand" href="#issues" aria-label="Evo 工作台"><span class="brand-mark" aria-hidden="true">E</span></a>
       <nav aria-label="主导航" class="nav">
         <details class="workspace-menu" id="workspace-menu" hidden>
-          <summary id="workspace-switch" aria-label="切换工作区" aria-describedby="workspace-name">
+          <summary id="workspace-switch" aria-label="切换项目" aria-describedby="workspace-name">
             <span id="workspace-mark" class="workspace-mark" aria-hidden="true"></span>
             <strong id="workspace-name"></strong>
             <span class="workspace-chevron" aria-hidden="true"></span>
           </summary>
           <div class="workspace-menu-panel">
-            <nav id="workspace-list" aria-label="工作区列表"></nav>
-            <button class="button quiet" id="new-workspace" type="button"><span aria-hidden="true">＋</span> 新建工作区</button>
+            <nav id="workspace-list" aria-label="项目列表"></nav>
+            <button class="button quiet" id="new-workspace" type="button"><span aria-hidden="true">＋</span> 新建项目</button>
           </div>
         </details>
+        <a href="/" id="project-home-link" hidden><span class="rail-icon issues-icon" aria-hidden="true"></span>项目</a>
         <a href="#chat" data-route="chat"><span class="rail-icon chat-icon" aria-hidden="true"></span>聊天</a>
         <a href="#issues" data-route="issues"><span class="rail-icon issues-icon" aria-hidden="true"></span>工单</a>
-        <a href="#workspace" data-route="workspace"><span class="rail-icon workspace-icon" aria-hidden="true">⚙</span>工作区</a>
+        <a href="#workspace" data-route="workspace"><span class="rail-icon workspace-icon" aria-hidden="true">⚙</span>项目设置</a>
       </nav>
     </aside>
 
@@ -84,9 +85,14 @@
         <div class="top-actions">
           <button class="button quiet" id="refresh" type="button">刷新</button>
           <button class="button primary" id="new-issue" type="button"><span aria-hidden="true">＋</span> 新建工单</button>
+          <button class="button primary" id="new-project-home" type="button" hidden><span aria-hidden="true">＋</span> 新建项目</button>
         </div>
       </header>
       <p id="status" class="notice" role="status" aria-live="polite" hidden></p>
+      <section id="projects-view" class="view" hidden aria-labelledby="projects-title">
+        <div class="page-heading"><h1 id="projects-title">项目</h1></div>
+        <div class="project-list" id="project-cards" aria-live="polite"></div>
+      </section>
       <section id="list-view" class="view" aria-labelledby="list-title">
         <div class="page-heading">
           <h1 id="list-title">工单</h1>
@@ -132,7 +138,7 @@
       </section>
 
       <section id="workspace-view" class="view" hidden aria-labelledby="workspace-title">
-        <div class="page-heading"><h1 id="workspace-title">工作区</h1></div>
+        <div class="page-heading"><h1 id="workspace-title">项目设置</h1></div>
         <div class="settings-grid">
           <section class="card setting workspace-setting" aria-labelledby="squad-settings-title">
             <h2 id="squad-settings-title">小队配置</h2>
@@ -189,12 +195,14 @@
   <dialog id="workspace-dialog" aria-labelledby="new-workspace-title">
     <form id="workspace-form" class="stack">
       <div class="dialog-header">
-        <h2 id="new-workspace-title">新建工作区</h2>
-        <button class="button quiet" id="close-workspace" type="button" aria-label="关闭新建工作区">×</button>
+        <h2 id="new-workspace-title">新建项目</h2>
+        <button class="button quiet" id="close-workspace" type="button" aria-label="关闭新建项目">×</button>
       </div>
-      <label>工作区名称<input name="name" type="text" maxlength="64" required autofocus></label>
+      <label>项目名称<input name="name" type="text" maxlength="64" required autofocus></label>
+      <label>本机目录<input name="directory" type="text" required placeholder="/home/user/projects/example" aria-describedby="project-directory-hint"></label>
+      <p id="project-directory-hint" class="muted">选择已有目录。工单会在该目录中执行并保存产物。</p>
       <p id="workspace-create-error" class="form-error" role="alert" hidden></p>
-      <div class="form-actions"><button class="button primary" type="submit">创建工作区</button></div>
+      <div class="form-actions"><button class="button primary" type="submit">创建项目</button></div>
     </form>
   </dialog>
 
@@ -216,6 +224,7 @@
   <dialog id="create-dialog" aria-labelledby="create-title">
     <form id="create-form" class="stack">
       <div class="dialog-header"><h2 id="create-title">新建工单</h2><button id="close-create" class="button quiet" type="button" aria-label="关闭新建窗口">×</button></div>
+      <p id="issue-project" class="muted" hidden></p>
       <label>主题<input name="title" type="text" required autofocus placeholder="简要概括工单"></label>
       <label>目标与要求<textarea name="prompt" required rows="4" placeholder="描述要完成的工作和交付要求"></textarea></label>
       <label>指派给<select name="assignee"></select></label>

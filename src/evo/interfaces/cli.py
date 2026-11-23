@@ -22,8 +22,13 @@ def parser(*, assessment=False):
     root = argparse.ArgumentParser(description="Evolutionary multi-agent platform")
     root.add_argument("--version", action="version", version=__version__)
     root.add_argument("--state", default=".evo")
+    root.add_argument("--project", help="Local project name or ID")
     root.add_argument("--demo", action="store_true", help="Volatile UI preview; no agents execute")
     commands = root.add_subparsers(dest="command")
+    commands.add_parser("projects", help="List local projects")
+    command = commands.add_parser("create-project", help="Bind a project to a local directory")
+    command.add_argument("name")
+    command.add_argument("directory")
     commands.add_parser("task").add_argument("task_id")
     command = commands.add_parser("tasks")
     command.add_argument("--limit", type=int, default=100)
@@ -101,8 +106,6 @@ def parser(*, assessment=False):
         choice.add_argument("--text")
     command = commands.add_parser("web")
     command.add_argument("--port", type=int, default=8768)
-    command.add_argument("--attach-workspace", nargs=2, action="append", default=[], metavar=("NAME", "STATE"),
-                         help="Register an existing workspace directory by name")
     command = commands.add_parser("setup-key", aliases=["setup-hkgai-key"])
     command.add_argument("--provider", choices=("hkgai", "deepseek"), default="hkgai")
     commands.add_parser("provider-info", help="Validate and display non-secret provider settings (offline)")
@@ -149,15 +152,21 @@ def main(argv=None, application=None):
             from evo.interfaces.web.app import serve
             if not 0 <= args.port <= 65535:
                 raise ValueError("Invalid port")
-            serve(app, args.port, application_factory=None if application is not None else load_application,
-                  attached_workspaces=args.attach_workspace)
+            serve(app, args.port, application_factory=None if application is not None else load_application)
             return 0
         if application is None and not args.demo:
             from evo.interfaces.sqlite_application import SQLiteApplication
-            from evo.interfaces.workbench import Workbench
+            from evo.interfaces.projects import Projects
             if isinstance(app, SQLiteApplication):
-                app = Workbench(app)
-        payload = {k: v for k, v in vars(args).items() if k not in ("command", "demo", "state") and v is not None}
+                projects = Projects(app, load_application)
+                if args.command in ("projects", "create-project"):
+                    result = (projects.snapshot() if args.command == "projects"
+                              else projects.create({"name": args.name, "directory": args.directory}))
+                    print(json.dumps(result, ensure_ascii=False, indent=2))
+                    return 0
+                app = projects.select(args.project)
+        payload = {k: v for k, v in vars(args).items()
+                   if k not in ("command", "demo", "state", "project") and v is not None}
         if args.command == "configure":
             payload = json.loads(Path(args.file).read_text(encoding="utf-8"))
         if args.command == "create":

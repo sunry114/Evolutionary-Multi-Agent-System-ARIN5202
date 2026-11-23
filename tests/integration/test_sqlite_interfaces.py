@@ -17,6 +17,7 @@ from evo.domain.models import Task
 from evo.domain.statuses import TaskStatus
 from evo.interfaces.cli import main
 from evo.interfaces.gateway import ApplicationUnavailable, load_application
+from evo.interfaces.projects import Projects
 from evo.interfaces.sqlite_application import SQLiteApplication
 
 
@@ -24,7 +25,15 @@ class SQLiteInterfaceTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.state = Path(self.temp.name)
+        root = Path(self.temp.name)
+        self.catalog = root / "state"
+        self.legacy = SQLiteApplication(self.catalog)
+        self.legacy.store.save_task(Task("legacy", "Old unbound issue", status=TaskStatus.CREATED))
+        directory = root / "files"
+        directory.mkdir()
+        self.project = Projects(self.legacy).create({"name": "Reports", "directory": str(directory)})["project"]
+        self.project_url = "/p/" + self.project["id"]
+        self.state = self.catalog / "projects" / self.project["id"]
         self.app = SQLiteApplication(self.state)
         for name in ("t1", "t2"):
             self.app.store.save_task(Task(name, "Stored result", owner="builder",
@@ -170,13 +179,13 @@ class SQLiteInterfaceTests(unittest.TestCase):
         limited = self.app.dispatch("tasks", {"limit": 1})["tasks"]
         self.assertEqual(len(limited), 1)
         with patch.dict(os.environ, {"EVO_APPLICATION_FACTORY": ""}), contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(main(["--state", str(self.state), "task", "failed"]), 0)
+            self.assertEqual(main(["--state", str(self.catalog), "--project", "Reports", "task", "failed"]), 0)
         self.assertEqual(len(self.app.store.list_tasks()), 3)
 
     def start_web(self):
         env = dict(os.environ, EVO_APPLICATION_FACTORY="", PYTHONIOENCODING="utf-8")
         child = subprocess.Popen(
-            [sys.executable, "-m", "evo", "--state", str(self.state), "web", "--port", "0"],
+            [sys.executable, "-m", "evo", "--state", str(self.catalog), "web", "--port", "0"],
             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
         self.addCleanup(self.stop_web, child)
         line = child.stdout.readline().strip()
@@ -213,6 +222,17 @@ class SQLiteInterfaceTests(unittest.TestCase):
         self.assertEqual(status, 200)
         return re.search(r'name="csrf-token" content="([^"]+)"', html).group(1)
 
+    def test_http_and_cli_scope_issues_to_bound_projects(self):
+        _, address = self.start_web()
+        token = self.token(address)
+        status, catalog = self.http(address, "/api/projects")
+        self.assertEqual((status, json.loads(catalog)), (200, {"projects": [self.project]}))
+        self.assertEqual(self.http(address, "/api/task", {"task_id": "legacy"}, token)[0], 404)
+        self.assertEqual(self.http(address, self.project_url + "/api/task", {"task_id": "legacy"}, token)[0], 409)
+        self.assertTrue(self.legacy.store.get_task("legacy"))
+        with patch.dict(os.environ, {"EVO_APPLICATION_FACTORY": ""}), contextlib.redirect_stderr(io.StringIO()):
+            self.assertNotEqual(main(["--state", str(self.catalog), "task", "legacy"]), 0)
+
     def test_http_historical_revisions_survive_server_restart(self):
         self.app.dispatch("review", {"task_id": "t1", "decision": "changes_requested", "feedback": "fix"})
         revision = self.app.dispatch("revision", {"task_id": "t1", "prompt": "fix"})
@@ -222,14 +242,14 @@ class SQLiteInterfaceTests(unittest.TestCase):
         _, address = self.start_web()
         new_token = self.token(address)
         self.assertNotEqual(token, new_token)
-        status, state = self.http(address, "/api/state")
+        status, state = self.http(address, self.project_url + "/api/state")
         self.assertEqual(status, 200)
         parent = next(t for t in json.loads(state)["tasks"] if t["id"] == "t1")
         self.assertEqual(parent["current_task_id"], revision["id"])
-        status, trace = self.http(address, "/api/trace", {"task_id": "t1"}, new_token)
+        status, trace = self.http(address, self.project_url + "/api/trace", {"task_id": "t1"}, new_token)
         self.assertEqual(status, 200)
         self.assertIn("revision_linked", trace)
-        self.assertEqual(self.http(address, "/api/issue-status",
+        self.assertEqual(self.http(address, self.project_url + "/api/issue-status",
                                    {"task_id": "t2", "status": "done"}, token)[0], 403)
 
     def test_http_validation_and_unavailable_operations(self):
@@ -246,7 +266,7 @@ class SQLiteInterfaceTests(unittest.TestCase):
             ("revision", {"task_id": "t1", "prompt": "fix"}, 404),
         ):
             with self.subTest(op=op):
-                self.assertEqual(self.http(address, "/api/" + op, payload, token)[0], expected)
+                self.assertEqual(self.http(address, self.project_url + "/api/" + op, payload, token)[0], expected)
         self.assertEqual(self.app.store.get_task("t1")["review_status"], "pending")
         self.assertEqual(len(self.app.store.list_tasks()), 2)
 
@@ -268,7 +288,7 @@ class SQLiteInterfaceTests(unittest.TestCase):
         child, address = self.start_web()
         token = self.token(address)
         payload = {"task_id": "t1", "status": "done"}
-        self.assertEqual(self.http(address, "/api/issue-status", payload)[0], 403)
-        self.assertEqual(self.http(address, "/api/issue-status", payload, token)[0], 200)
+        self.assertEqual(self.http(address, self.project_url + "/api/issue-status", payload)[0], 403)
+        self.assertEqual(self.http(address, self.project_url + "/api/issue-status", payload, token)[0], 200)
         self.stop_web(child)
         self.assertEqual(SQLiteApplication(self.state).store.get_task("t1")["issue_status"], "done")

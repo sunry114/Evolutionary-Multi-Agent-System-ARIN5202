@@ -3,6 +3,7 @@
 import fcntl
 from contextlib import contextmanager
 from dataclasses import asdict
+from pathlib import Path
 from threading import Event, Thread
 from uuid import uuid4
 
@@ -17,8 +18,10 @@ from evo.ports.harness import MAX_RUN_PROMPT_BYTES, HarnessCleanupError, Harness
 
 
 class Workbench:
-    def __init__(self, application):
+    def __init__(self, application, *, project):
         self.application = application
+        self.project = dict(project)
+        self.directory = Path(self.project["directory"])
         self.store = application.store
         self.queue = IssueRunStore(self.store)
         self.shutdown = Event()
@@ -29,6 +32,7 @@ class Workbench:
         with (self.application.state / ".issue-worker.lock").open("a") as lease:
             fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.queue.recover_interrupted()
+            self.shutdown.clear()
             thread = Thread(target=self._work, name="evo-issue-worker", daemon=True)
             thread.start()
             try:
@@ -50,6 +54,9 @@ class Workbench:
 
     def _issue(self, task_id):
         return self.store.get_task(self.store.issue_id(task_id))
+
+    def _outputs(self, issue_id, run_id):
+        return self.directory / ".evo" / "artifacts" / issue_id / run_id
 
     def _work(self):
         while not self.shutdown.is_set():
@@ -95,7 +102,8 @@ class Workbench:
 
             detail = self.application.issues.detail(issue_id)
             workspace, harness = create_issue_harness(
-                self.application.state, self.store, run, comment=comment,
+                self.application.state, self.store, run, project_dir=self.directory,
+                output_dir=self._outputs(issue_id, run_id), comment=comment,
                 change_status=change_status if run["kind"] != "mention" else None,
                 issue_artifacts=detail["artifacts"])
             trigger = next((row["content"] for row in detail["messages"] if row["id"] == run["comment_id"]), "")
@@ -178,10 +186,12 @@ class Workbench:
         self.queue.finish(run, status, result, reply=reply, assignee=self._assignee(self._issue(issue_id)))
 
     def _list(self, rows):
-        return [{**row, "lane": issue_status(row)} for row in rows]
+        return [{**row, "lane": issue_status(row), "project_id": self.project["id"]} for row in rows]
 
     def snapshot(self):
         result = self.application.snapshot()
+        result["project"] = self.project
+        result["mode"] = "本地项目 · SQLite"
         result["tasks"] = self._list(result["tasks"])
         result["capabilities"]["issue_runs"] = True
         return result
@@ -201,6 +211,7 @@ class Workbench:
                 run_id = self.queue.create(connection, issue_id, agents, squad)
 
             draft = self.application.create_task(payload, after_insert=enqueue)
+            draft["task"]["project_id"] = self.project["id"]
             if run_id:
                 draft["run_id"] = run_id
                 self.wake.set()
@@ -210,7 +221,11 @@ class Workbench:
         if operation == "task":
             detail = self.application.dispatch(operation, payload)
             detail["lane"] = issue_status({**detail["current"], "issue_status": detail["issue"].get("issue_status")})
-            detail["executions"] = self.queue.list(detail["issue"]["id"])
+            issue_id = detail["issue"]["id"]
+            detail["project"] = self.project
+            detail["issue"]["project_id"] = self.project["id"]
+            detail["executions"] = [{**run, "output_dir": str(self._outputs(issue_id, run["id"]))}
+                                    for run in self.queue.list(issue_id)]
             return detail
         if operation not in ("assign", "start", "comment", "issue-status", "stop-run", "retry-run"):
             return self.application.dispatch(operation, payload)

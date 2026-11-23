@@ -98,6 +98,10 @@ main { min-width: 0; }
 .workspace-choice span:nth-child(2) { min-width: 0; flex: 1; overflow-wrap: anywhere; }
 .workspace-choice:hover, .workspace-choice[aria-current] { color: var(--accent); background: var(--tint); text-decoration: none; }
 .workspace-menu-panel > .button { width: 100%; text-align: left; margin-top: 4px; }
+.project-list { display: grid; gap: 12px; }
+.project-card { display: grid; gap: 4px; padding: 16px 20px; color: var(--ink); }
+.project-card:hover { border-color: var(--accent); text-decoration: none; }
+.project-path { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .top-actions { flex-shrink: 0; margin-inline-start: auto; }
 .button { min-height: 36px; border: 1px solid #d9d5e7; border-radius: 8px; padding: 6px 12px; font-weight: 640; background: var(--paper); color: var(--ink); }
 .button:hover:not(:disabled) { border-color: #a99bcf; background: #f6f3ff; }
@@ -333,6 +337,7 @@ dialog::backdrop { background: #19162b80; }
   .panel { padding: 12px; }
 }
 @media (max-width: 365px) {
+  .nav > a .rail-icon { display: none; }
   .workspace-menu summary .workspace-mark { display: none; }
   .squad-identity { grid-template-columns: minmax(0, 1fr); }
 }

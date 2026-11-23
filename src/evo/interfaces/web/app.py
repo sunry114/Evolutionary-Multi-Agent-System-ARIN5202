@@ -43,20 +43,17 @@ def redact(value):
     return value
 
 
-def make_server(application, port=8768, *, application_factory=None, attached_workspaces=()):
+def make_server(application, port=8768, *, application_factory=None):
     from evo.interfaces.sqlite_application import SQLiteApplication
-    from evo.interfaces.web.workspaces import Workspaces
+    from evo.interfaces.projects import Projects
 
-    workspaces = None
-    if isinstance(application, SQLiteApplication):
-        workspaces = Workspaces(application, application_factory or SQLiteApplication, attached_workspaces)
-    elif attached_workspaces:
-        raise ApplicationUnavailable("Attaching workspaces requires the local SQLite application.")
+    projects = (Projects(application, application_factory or SQLiteApplication)
+                if isinstance(application, SQLiteApplication) else None)
     token = secrets.token_urlsafe(32)
     # Load the page with the API so edits on disk take effect together at restart.
     assets = files("evo.interfaces.web").joinpath("assets")
     page = assets.joinpath("index.html").read_text(encoding="utf-8")
-    page = page.replace("<body data-local-template>", "<body>")
+    page = page.replace("<body data-local-template>", "<body data-projects>" if projects is not None else "<body>")
     page = page.replace("/* __STYLES__ */", assets.joinpath("workbench.css").read_text(encoding="utf-8"))
     page = page.replace("/* __MARKDOWN_IT__ */", assets.joinpath("markdown-it.min.js").read_text(encoding="utf-8"))
     page = page.replace("/* __SCRIPT__ */", assets.joinpath("workbench.js").read_text(encoding="utf-8"))
@@ -83,23 +80,25 @@ def make_server(application, port=8768, *, application_factory=None, attached_wo
         def valid_host(self):
             return self.headers.get_all("Host", []) == [self.server.authority]
 
-        def workspace_route(self):
-            if self.path.startswith("/w/"):
-                match = re.fullmatch(r"/w/([0-9a-f]{32})(/.*)", self.path)
-                if match and workspaces is not None:
-                    workspace_id, path = match.groups()
-                    return workspaces.get(workspace_id), path
+        def project_route(self):
+            if self.path.startswith("/p/"):
+                match = re.fullmatch(r"/p/([0-9a-f]{32})(/.*)", self.path)
+                if match and projects is not None:
+                    project_id, path = match.groups()
+                    return projects.get(project_id), path
                 return None, self.path
-            return workspaces.get("default") if workspaces is not None else application, self.path
+            return (application if projects is None else None), self.path
 
         def do_GET(self):
             if not self.valid_host():
                 return self.reply(403, {"error": "Invalid Host"})
-            if self.path == "/api/workspaces" and workspaces is not None:
-                return self.reply(200, workspaces.snapshot())
-            target, path = self.workspace_route()
+            if self.path == "/" and projects is not None:
+                return self.reply(200, page, html=True)
+            if self.path == "/api/projects" and projects is not None:
+                return self.reply(200, projects.snapshot())
+            target, path = self.project_route()
             if target is None:
-                return self.reply(404, {"error": "Workspace not found"})
+                return self.reply(404, {"error": "请选择项目或检查项目地址。"})
             if path == "/":
                 return self.reply(200, page, html=True)
             if path == "/api/state":
@@ -139,15 +138,15 @@ def make_server(application, port=8768, *, application_factory=None, attached_wo
                 return self.reply(408, {"error": "Request body read timed out"})
             except (ValueError, UnicodeError, RecursionError):
                 return self.reply(400, {"error": "JSON object required"})
-            target, path = self.workspace_route()
-            if target is None:
-                return self.reply(404, {"error": "Workspace not found"})
+            target, path = self.project_route()
+            creating_project = self.path == "/api/new-project" and projects is not None
+            if target is None and not creating_project:
+                return self.reply(404, {"error": "请选择项目或检查项目地址。"})
             operation = path.removeprefix("/api/") if path.startswith("/api/") else ""
-            creating_workspace = self.path == "/api/new-workspace" and workspaces is not None
-            if not creating_workspace and operation not in OPERATIONS:
+            if not creating_project and operation not in OPERATIONS:
                 return self.reply(404, {"error": "Unknown operation"})
             try:
-                result = workspaces.create(payload) if creating_workspace else target.dispatch(operation, payload)
+                result = projects.create(payload) if creating_project else target.dispatch(operation, payload)
                 return self.reply(200, result)
             except ApplicationUnavailable as error:
                 return self.reply(503, {"error": str(error)})
@@ -164,8 +163,8 @@ def make_server(application, port=8768, *, application_factory=None, attached_wo
         daemon_threads = True
 
         def serve_forever(self, poll_interval=0.5):
-            if workspaces is not None:
-                with workspaces.worker():
+            if projects is not None:
+                with projects.worker():
                     return super().serve_forever(poll_interval)
             return super().serve_forever(poll_interval)
 
@@ -179,9 +178,8 @@ def make_server(application, port=8768, *, application_factory=None, attached_wo
     return server
 
 
-def serve(application, port=8768, *, application_factory=None, attached_workspaces=()):
-    with make_server(application, port, application_factory=application_factory,
-                     attached_workspaces=attached_workspaces) as server:
+def serve(application, port=8768, *, application_factory=None):
+    with make_server(application, port, application_factory=application_factory) as server:
         print("Open http://" + server.authority, flush=True)
         try:
             server.serve_forever()

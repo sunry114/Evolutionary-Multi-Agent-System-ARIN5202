@@ -2,7 +2,9 @@
 
 const el = id => document.getElementById(id);
 const token = document.querySelector('meta[name="csrf-token"]').content;
-const workspaceId = location.pathname.split("/")[2] || "default";
+const projectMode = document.body.hasAttribute("data-projects");
+const projectId = location.pathname.startsWith("/p/") ? location.pathname.split("/")[2] : "";
+const projectHome = projectMode && !projectId;
 const apiBase = location.pathname + "api/";
 const laneNames = {
   backlog: "待办池", todo: "待处理", in_progress: "进行中", in_review: "待审查",
@@ -369,6 +371,7 @@ function renderInspector(detail) {
     });
   }
   property("工单 ID", detail.issue.id);
+  if (detail.project) property("项目", detail.project.name);
 }
 
 function feedItem(parent, heading, metadata, body) {
@@ -426,6 +429,7 @@ function logs(panel, detail) {
   for (const run of detail.executions || []) {
     const card = feedItem(executions, `${run.agent} · ${runNames[run.status]}`,
       [runKinds[run.kind], when(run.created_at), run.retry_of ? "重试" : ""].filter(Boolean).join(" · "));
+    if (run.output_dir && run.started_at) node("code", run.output_dir, card, "project-path");
     markdownMessage(card, run.result, "feed-content");
     const controls = node("div", "", card, "form-actions");
     const payload = {task_id: detail.issue.id, run_id: run.id};
@@ -457,10 +461,17 @@ function logs(panel, detail) {
 
 function artifacts(panel, detail) {
   const feed = node("div", "", panel, "feed");
-  if (!detail.artifacts.length) empty(feed, "暂无产物");
+  if (!detail.artifacts.length) {
+    empty(feed, "暂无可预览产物");
+    for (const run of (detail.executions || []).filter(run => run.started_at && run.output_dir)) {
+      node("code", run.output_dir, feed, "project-path");
+    }
+  }
   for (const artifact of detail.artifacts) {
     const item = feedItem(feed, artifact.path, [artifact.owner, issueKey(artifact.task_id),
       artifact.verified ? "已验证" : "已共享"].filter(Boolean).join(" · "));
+    const output = (detail.executions || []).find(run => run.id === artifact.task_id)?.output_dir;
+    if (output) node("code", output + "/" + artifact.path, item, "project-path");
     if (!artifact.archive) continue;
     const preview = node("pre", "", item, "output");
     preview.hidden = true;
@@ -530,9 +541,8 @@ function configFeedback(id, message = "", error = false) {
   feedback.hidden = !message;
 }
 
-function workspaceUrl(id, view) {
-  const base = id === "default" ? "/" : "/w/" + encodeURIComponent(id) + "/";
-  return base + "#" + view;
+function projectUrl(id, view = "issues") {
+  return "/p/" + encodeURIComponent(id) + "/#" + view;
 }
 
 const workspaceMenu = el("workspace-menu");
@@ -544,11 +554,11 @@ function renderWorkspaceChoices() {
   list.replaceChildren();
   const view = ["chat", "workspace"].includes(route().view) ? route().view : "issues";
   for (const workspace of workspaceChoices) {
-    const choice = link(list, "", workspaceUrl(workspace.id, view));
+    const choice = link(list, "", projectUrl(workspace.id, view));
     choice.className = "workspace-choice";
     node("span", Array.from(workspace.name)[0].toUpperCase(), choice, "workspace-mark").setAttribute("aria-hidden", "true");
     node("span", workspace.name, choice);
-    if (workspace.id === workspaceId) {
+    if (workspace.id === projectId) {
       choice.setAttribute("aria-current", "true");
       node("span", "✓", choice).setAttribute("aria-hidden", "true");
       choice.onclick = event => {
@@ -564,17 +574,27 @@ function renderWorkspaceChoices() {
 }
 
 async function loadWorkspaces() {
+  if (!projectMode) return;
   try {
-    const response = await fetch("/api/workspaces");
-    if (!response.ok) return;
-    const {workspaces} = await response.json();
-    if (JSON.stringify(workspaceChoices) !== JSON.stringify(workspaces)) {
-      workspaceChoices = workspaces;
+    const response = await fetch("/api/projects");
+    if (!response.ok) throw Error("无法读取项目");
+    const {projects} = await response.json();
+    workspaceChoices = projects;
+    if (projectHome) {
+      const cards = el("project-cards");
+      cards.replaceChildren();
+      if (!projects.length) empty(cards, "暂无项目。创建项目后即可提交工单。");
+      for (const project of projects) {
+        const card = link(cards, "", projectUrl(project.id), "project-card card");
+        node("strong", project.name, card);
+        node("code", project.directory, card, "project-path");
+      }
+    } else {
       renderWorkspaceChoices();
+      workspaceMenu.hidden = false;
     }
-    workspaceMenu.hidden = false;
   } catch {
-    // Workspace data routes are independent of the workspace selector.
+    if (projectHome) notice("无法读取项目", true);
   }
 }
 
@@ -598,12 +618,14 @@ workspaceMenu.onkeydown = event => {
 const workspaceDialog = el("workspace-dialog");
 const workspaceForm = el("workspace-form");
 const workspaceSubmit = workspaceForm.querySelector("button[type=submit]");
-el("new-workspace").onclick = () => {
+function openProjectDialog() {
   workspaceMenu.open = false;
   workspaceForm.reset();
   configFeedback("workspace-create-error");
   workspaceDialog.showModal();
-};
+}
+el("new-workspace").onclick = openProjectDialog;
+el("new-project-home").onclick = openProjectDialog;
 el("close-workspace").onclick = () => workspaceDialog.close();
 workspaceDialog.oncancel = event => {
   if (workspaceSubmit.disabled) event.preventDefault();
@@ -612,11 +634,12 @@ workspaceForm.onsubmit = async event => {
   event.preventDefault();
   if (workspaceSubmit.disabled) return;
   const name = workspaceForm.elements.name.value.trim();
+  const directory = workspaceForm.elements.directory.value.trim();
   workspaceSubmit.disabled = el("close-workspace").disabled = true;
   configFeedback("workspace-create-error");
   try {
-    const {workspace} = await api("new-workspace", {name}, "/api/");
-    location.assign(workspaceUrl(workspace.id, "workspace"));
+    const {project} = await api("new-project", {name, directory}, "/api/");
+    location.assign(projectUrl(project.id));
   } catch (error) {
     configFeedback("workspace-create-error", error.message, true);
     workspaceSubmit.disabled = el("close-workspace").disabled = false;
@@ -867,6 +890,18 @@ function chatMessageScope(active) {
 }
 
 async function load() {
+  if (projectHome) {
+    el("projects-view").hidden = false;
+    el("list-view").hidden = true;
+    el("section-nav").hidden = true;
+    el("new-issue").hidden = true;
+    el("new-project-home").hidden = false;
+    el("project-home-link").setAttribute("aria-current", "page");
+    for (const item of document.querySelectorAll(".nav [data-route]")) item.hidden = true;
+    el("breadcrumb").textContent = "项目";
+    document.querySelector(".shell").classList.add("without-section");
+    return;
+  }
   const active = route();
   const generation = ++state.generation;
   const detail = active.view === "issue";
@@ -894,7 +929,7 @@ async function load() {
   link(crumb, "工单", "#issues");
   if (detail || workspace) {
     node("span", "/", crumb).setAttribute("aria-hidden", "true");
-    node("strong", detail ? issueKey(active.key) : "工作区", crumb);
+    node("strong", detail ? issueKey(active.key) : "项目设置", crumb);
   }
   if (detail && state.detail?.issue.id !== active.key) {
     state.detail = null;
@@ -910,6 +945,11 @@ async function load() {
     const summary = await shell.json();
     if (generation !== state.generation) return;
     state.workspace = summary;
+    if (summary.project) {
+      const project = el("issue-project");
+      project.hidden = false;
+      project.textContent = "项目 " + summary.project.name;
+    }
     if (active.view === "owner" && active.type === "squad" && summary.squad && active.key !== summary.squad.name) {
       location.replace(ownerUrl(summary.squad.name, "squad"));
       return;
@@ -1312,4 +1352,5 @@ window.setInterval(async () => {
   } finally { polling = false; }
 }, 750);
 void load();
+el("project-home-link").hidden = !projectMode;
 void loadWorkspaces();
