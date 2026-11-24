@@ -30,7 +30,7 @@ class ConflictError(StorageError, ValueError):
 
 MIGRATIONS = ("0001_initial", "0002_issues", "0003_routing", "0004_delegations", "0005_workbench",
               "0006_squad_routing", "0007_issue_runs", "0008_chat_threads", "0009_group_chats", "0010_harness_events",
-              "0011_issue_titles", "0012_issue_run_triggers")
+              "0011_issue_titles", "0012_issue_run_triggers", "0013_shared_chats")
 
 ANCESTORS = """
     WITH RECURSIVE chain AS (
@@ -128,8 +128,10 @@ class SQLiteStore:
             connection.close()
 
     @contextmanager
-    def _transaction(self) -> Iterator[sqlite3.Connection]:
+    def _transaction(self, *, chat_store=None) -> Iterator[sqlite3.Connection]:
         with self._connect() as connection:
+            if chat_store is not None:
+                connection.execute("ATTACH DATABASE ? AS chat", (str(chat_store.path),))
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 yield connection
@@ -215,19 +217,21 @@ class SQLiteStore:
     # ------------------------------------------------------------------
 
     def save_task(self, task: Task, *, issue_config: Optional[Mapping[str, object]] = None,
-                  from_group: bool = False, group_id: Optional[str] = None, after_insert=None) -> None:
-        with self._transaction() as connection:
+                  from_group: bool = False, group_id: Optional[str] = None, after_insert=None,
+                  chat_store=None) -> None:
+        linked_store = chat_store if from_group or group_id is not None else None
+        with self._transaction(chat_store=linked_store) as connection:
             self._insert_task(connection, task)
             if issue_config is not None:
                 if from_group or group_id is not None:
-                    self._link_issue_group(connection, task.id, group_id)
+                    self._link_issue_group(connection, task.id, group_id, shared=linked_store is not None)
                 self._insert_event(connection, task_id=task.id, event_type="issue_config",
                                    actor="human", payload=issue_config)
             if after_insert:
                 after_insert(connection, task.id)
 
-    def link_issue_group(self, task_id, group_id):
-        with self._transaction() as connection:
+    def link_issue_group(self, task_id, group_id, *, chat_store=None):
+        with self._transaction(chat_store=chat_store) as connection:
             issue_id = self._issue_id(connection, task_id)
             existing = connection.execute(
                 "SELECT payload_json FROM events WHERE task_id = ? AND event_type = 'issue_group_linked' "
@@ -238,24 +242,32 @@ class SQLiteStore:
                 if source["id"] != group_id:
                     raise ConflictError("The issue already has a linked group")
                 return source
-            return self._link_issue_group(connection, issue_id, group_id)
+            return self._link_issue_group(connection, issue_id, group_id, shared=chat_store is not None)
 
-    def _link_issue_group(self, connection, issue_id, group_id):
+    def _link_issue_group(self, connection, issue_id, group_id, *, shared=False):
+        schema = "chat" if shared else "main"
         if group_id is None:
-            updated = connection.execute(
-                "UPDATE messages SET task_id = ? WHERE kind = 'group' AND task_id IS NULL AND group_id IS NULL",
-                (issue_id,))
+            pending = "kind = 'group' AND task_id IS NULL AND group_id IS NULL"
+            if shared:
+                updated = connection.execute(f"""
+                    INSERT INTO main.messages(id, kind, sender, task_id, content, created_at)
+                    SELECT lower(hex(randomblob(16))), kind, sender, ?, content, created_at
+                    FROM chat.messages WHERE {pending}
+                """, (issue_id,))
+                connection.execute(f"DELETE FROM chat.messages WHERE {pending}")
+            else:
+                updated = connection.execute(f"UPDATE main.messages SET task_id = ? WHERE {pending}", (issue_id,))
             if updated.rowcount == 0:
                 raise ValueError("No unassigned group discussion")
             source = {"id": None, "name": "工作区群聊"}
         else:
-            group = connection.execute("SELECT name FROM group_chats WHERE id = ?", (group_id,)).fetchone()
+            group = connection.execute(f"SELECT name FROM {schema}.group_chats WHERE id = ?", (group_id,)).fetchone()
             if group is None:
                 raise RecordNotFoundError("Group chat was not found")
-            connection.execute("""
-                INSERT INTO messages(id, kind, sender, task_id, content, created_at)
+            connection.execute(f"""
+                INSERT INTO main.messages(id, kind, sender, task_id, content, created_at)
                 SELECT lower(hex(randomblob(16))), kind, sender, ?, content, created_at
-                FROM messages WHERE group_id = ? AND task_id IS NULL AND kind = 'group'
+                FROM {schema}.messages WHERE group_id = ? AND task_id IS NULL AND kind = 'group'
                 ORDER BY created_at, id
             """, (issue_id, group_id))
             source = {"id": group_id, "name": group["name"]}
@@ -611,6 +623,16 @@ class SQLiteStore:
                 """, {"owner": owner, "owner_type": owner_type, "limit": limit, "squad_name": squad_name}).fetchall()
         return [dict(row) for row in rows]
 
+    def list_issue_index(self):
+        with self._connect() as connection:
+            rows = connection.execute("""
+                SELECT t.id, COALESCE(t.title, substr(t.description, 1, instr(t.description || char(10), char(10)) - 1)) AS title
+                FROM tasks t LEFT JOIN reviews r ON r.revision_task_id = t.id
+                WHERE t.parent_id IS NULL AND r.task_id IS NULL
+                ORDER BY t.created_at DESC, t.id DESC
+            """)
+            return [dict(row) for row in rows]
+
     @staticmethod
     def _issue_id(connection, task_id):
         row = connection.execute("""
@@ -683,7 +705,7 @@ class SQLiteStore:
         except sqlite3.IntegrityError as exc:
             raise ConflictError("Message could not be created") from exc
 
-    def _insert_message(self, connection, message, *, chat_id=None, group_id=None):
+    def _insert_message(self, connection, message, *, chat_id=None, group_id=None, issue_run_id=None):
         now = _utc_now()
         if chat_id is not None:
             chat = connection.execute("SELECT agent FROM chat_threads WHERE id = ?", (chat_id,)).fetchone()
@@ -705,9 +727,30 @@ class SQLiteStore:
         if group_id is not None:
             connection.execute("UPDATE group_chats SET updated_at = ? WHERE id = ?", (now, group_id))
         if message.task_id:
+            payload = {"message_id": message.id, "kind": message.kind, "recipient": message.recipient}
+            if issue_run_id is not None:
+                payload["issue_run_id"] = issue_run_id
             self._insert_event(connection, task_id=message.task_id, event_type="message_created",
-                               actor=message.sender, payload={"message_id": message.id, "kind": message.kind,
-                                                              "recipient": message.recipient})
+                               actor=message.sender, payload=payload)
+
+    def import_project_chats(self, project_id, project_store):
+        with self._transaction(chat_store=project_store) as connection:
+            imported = connection.execute("INSERT OR IGNORE INTO imported_project_chats VALUES (?)", (project_id,))
+            if not imported.rowcount:
+                return
+            connection.execute("""
+                INSERT INTO main.chat_threads
+                SELECT c.id, c.agent, c.is_default AND NOT EXISTS (
+                    SELECT 1 FROM main.chat_threads w WHERE w.agent = c.agent AND w.is_default = 1
+                ), c.created_at, c.updated_at FROM chat.chat_threads c
+            """)
+            connection.execute("INSERT INTO main.group_chats SELECT * FROM chat.group_chats")
+            connection.execute("INSERT INTO main.group_chat_members SELECT * FROM chat.group_chat_members")
+            connection.execute("""
+                INSERT INTO main.messages(id, kind, sender, recipient, task_id, content, created_at, chat_id, group_id)
+                SELECT id, kind, sender, recipient, task_id, content, created_at, chat_id, group_id
+                FROM chat.messages WHERE task_id IS NULL AND kind IN ('dm', 'group')
+            """)
 
     def create_chat(self, agent, *, default=False):
         with self._transaction() as connection:

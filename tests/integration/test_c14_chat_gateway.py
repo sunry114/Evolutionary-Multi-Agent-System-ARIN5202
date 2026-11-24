@@ -44,18 +44,21 @@ class C14GatewayTests(unittest.TestCase):
         self.state = self.catalog.state / "projects" / project["id"]
         self.provider = ScriptedProvider()
         self.app = SQLiteApplication(self.state, provider=self.provider)
+        self.workspace = SQLiteApplication(self.catalog.state / "workspaces" / "default", provider=self.provider)
 
     @contextmanager
     def http_service(self):
-        server = make_server(self.catalog, 0, application_factory=lambda state: self.app)
+        applications = {app.state: app for app in (self.app, self.workspace)}
+        server = make_server(self.catalog, 0, application_factory=lambda state: applications[state])
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
-        def request(path, payload=None, csrf=None):
+        def request(path, payload=None, csrf=None, *, workspace=False):
             conn = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
             try:
                 headers = {"Origin": "http://" + server.authority, "Content-Type": "application/json",
                            "X-CSRF-Token": csrf or ""}
-                conn.request("POST" if payload is not None else "GET", self.project_path + path,
+                base = "/w/default" if workspace else self.project_path
+                conn.request("POST" if payload is not None else "GET", base + path,
                              json.dumps(payload) if payload is not None else None, headers)
                 result = conn.getresponse()
                 return result.status, result.read().decode("utf-8")
@@ -73,10 +76,10 @@ class C14GatewayTests(unittest.TestCase):
         with self.http_service() as (request, token):
             payload = {"agent": "builder", "message": "HTTP private input"}
             self.assertEqual(request("/api/dm", payload)[0], 403)
-            self.assertEqual(self.app.messages(), [])
+            self.assertEqual(self.workspace.messages(), [])
             self.assertEqual(request("/api/dm", {**payload, "agent": "unknown"}, token)[0], 409)
             self.assertEqual(request("/api/dm", payload, token)[0], 200)
-            status, history = request("/api/messages", {"agent": "builder"}, token)
+            status, history = request("/api/messages", {"agent": "builder"}, token, workspace=True)
             self.assertEqual(status, 200)
             self.assertEqual(len(json.loads(history)["messages"]), 2)
             self.provider.fail = True
@@ -85,14 +88,14 @@ class C14GatewayTests(unittest.TestCase):
             self.assertNotIn("private-provider-secret", result)
 
     def test_http_missing_key_returns_503_without_saving_message(self):
-        self.app._provider = None
+        self.workspace._provider = None
         with self.http_service() as (request, token), patch(
                 "evo.adapters.llm.credentials.load_key", side_effect=ValueError("secret")):
             status, result = request("/api/group", {"message": "hello"}, token)
             self.assertEqual(status, 503)
             self.assertIn("setup-key", result)
             self.assertNotIn("secret", result)
-        self.assertEqual(self.app.messages(), [])
+        self.assertEqual(self.workspace.messages(), [])
 
     def test_dm_cli_and_messages_are_persisted_and_private(self):
         with contextlib.redirect_stdout(io.StringIO()) as output:
@@ -189,11 +192,11 @@ class C14GatewayTests(unittest.TestCase):
         self.assertEqual(self.app.dispatch("messages", {})["messages"], [])
 
     def test_named_group_issue_import_copies_messages_and_keeps_source_history(self):
-        group = self.app.dispatch("new-group", {"name": "RealSE", "members": ["builder"]})["group"]
+        group = self.workspace.dispatch("new-group", {"name": "RealSE", "members": ["builder"]})["group"]
         other = SQLiteApplication(self.state / "other")
         foreign = other.dispatch("new-group", {"name": "RealSE", "members": ["builder"]})["group"]
-        self.app.dispatch("group", {"group_id": group["id"], "message": "Keep the @builder exchange"})
-        original = self.app.store.list_group_messages(group_id=group["id"])
+        self.workspace.dispatch("group", {"group_id": group["id"], "message": "Keep the @builder exchange"})
+        original = self.workspace.store.list_group_messages(group_id=group["id"])
         with self.http_service() as (request, token):
             invalid = {"prompt": "Work from a group", "group_id": foreign["id"], "agent": "builder"}
             self.assertEqual(request("/api/create", invalid, token)[0], 409)
@@ -202,7 +205,7 @@ class C14GatewayTests(unittest.TestCase):
             status, draft = request("/api/create", payload, token)
             self.assertEqual(status, 200)
             issue_id = json.loads(draft)["task"]["id"]
-            self.app.dispatch("group", {"group_id": group["id"], "message": "Later discussion"})
+            self.workspace.dispatch("group", {"group_id": group["id"], "message": "Later discussion"})
             status, detail = request("/api/task", {"task_id": issue_id}, token)
             self.assertEqual(status, 200)
         detail = json.loads(detail)
@@ -211,14 +214,14 @@ class C14GatewayTests(unittest.TestCase):
         self.assertEqual([tuple(row[key] for key in keys) for row in detail["messages"]],
                          [tuple(row[key] for key in keys) for row in original])
         self.assertEqual(detail["executions"], [])
-        history = self.app.store.list_group_messages(group_id=group["id"])
+        history = self.workspace.store.list_group_messages(group_id=group["id"])
         self.assertEqual(history[:len(original)], original)
         self.assertEqual(len(history), len(original) + 2)
 
     def test_http_links_existing_issue_once_and_keeps_its_discussion(self):
-        first = self.app.dispatch("new-group", {"name": "RealSE", "members": ["builder"]})["group"]
-        second = self.app.dispatch("new-group", {"name": "Other", "members": ["builder"]})["group"]
-        self.app.dispatch("group", {"group_id": first["id"], "message": "Group requirement"})
+        first = self.workspace.dispatch("new-group", {"name": "RealSE", "members": ["builder"]})["group"]
+        second = self.workspace.dispatch("new-group", {"name": "Other", "members": ["builder"]})["group"]
+        self.workspace.dispatch("group", {"group_id": first["id"], "message": "Group requirement"})
         with self.http_service() as (request, token):
             _, created = request("/api/create", {"prompt": "Already created"}, token)
             issue_id = json.loads(created)["task"]["id"]

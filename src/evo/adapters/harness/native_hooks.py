@@ -26,11 +26,17 @@ def webfetch_status(text):
 def settings():
     hook = {"type": "command", "command": shlex.join([sys.executable, str(Path(__file__).resolve())]),
             "timeout": 11}
-    return {"env": {"ENABLE_TOOL_SEARCH": "false"}, "hooks": {
-        "PreToolUse": [{"matcher": "Bash", "hooks": [hook]}],
-        "PostToolUse": [{"matcher": "WebFetch", "hooks": [hook]}],
-        "PostToolUseFailure": [{"matcher": "WebFetch", "hooks": [hook]}],
-    }}
+    return {
+        "env": {"ENABLE_TOOL_SEARCH": "false"},
+        "pluginConfigs": {
+            "cc-plugin-agents-md@builtin": {"options": {"instructionFiles": "claude-md-and-agents-md"}},
+        },
+        "hooks": {
+            "PreToolUse": [{"matcher": "Bash", "hooks": [hook]}],
+            "PostToolUse": [{"matcher": "WebFetch", "hooks": [hook]}],
+            "PostToolUseFailure": [{"matcher": "WebFetch", "hooks": [hook]}],
+        },
+    }
 
 
 def has_project_shell_rules(path):

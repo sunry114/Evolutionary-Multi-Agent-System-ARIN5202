@@ -1,5 +1,6 @@
 """Offline CLI subprocess/protocol tests; real native CLI is separately opt-in."""
 
+import json
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -64,6 +65,7 @@ class ClaudeProtocolTests(HarnessFixture):
         self.broker.issue_comment = lambda content: {}
         project = self.state / "project"
         project.mkdir()
+        (project / "AGENT.md").write_text("Keep articles in docs/.\n", encoding="utf-8")
         self.adapter.project_dir = project
         previous = self.fs.workspace.parent / "prior"
         previous.mkdir()
@@ -71,8 +73,12 @@ class ClaudeProtocolTests(HarnessFixture):
         self.adapter.issue_artifacts = ({"task_id": "prior", "owner": "alice", "path": "before.md", "archive": {}},)
         handle, result = self.complete(replace(self.request, prompt="native_issue"))
         self.assertEqual(result.status, "success")
-        self.assertEqual([item.path for item in result.artifacts], ["hello-world.md"])
-        self.assertEqual(self.fs.read_file("hello-world.md"), "# Hello World\n")
+        self.assertEqual([item.path for item in result.artifacts], ["docs/hello-world.md"])
+        self.assertEqual((project / "docs/hello-world.md").read_text(), "# Hello World\n")
+        self.assertEqual(self.fs.read_file("docs/hello-world.md"), "# Hello World\n")
+        prompt = json.loads(self.transport.prompt["message"]["content"])
+        self.assertEqual(prompt["project_instructions"], {"AGENT.md": "Keep articles in docs/.\n"})
+        self.assertNotIn("deliverables_directory", prompt)
         calls = [event.payload for event in self.adapter.events(handle) if event.kind == "native_tool"]
         self.assertEqual([(call["name"], call["status"]) for call in calls],
                          [(name, status) for name in ("Bash", "Write", "Read") for status in ("started", "completed")])
@@ -81,6 +87,9 @@ class ClaudeProtocolTests(HarnessFixture):
         command = self.transport.command
         self.assertEqual(command[command.index("--input-format") + 1], "stream-json")
         self.assertEqual(command[command.index("--permission-mode") + 1], "bypassPermissions")
+        settings = json.loads(command[command.index("--settings") + 1])
+        self.assertEqual(settings["pluginConfigs"]["cc-plugin-agents-md@builtin"]["options"]["instructionFiles"],
+                         "claude-md-and-agents-md")
         self.assertEqual(self.transport.cwd, project)
 
     def test_native_issue_does_not_index_symlinks_outside_the_deliverables_directory(self):
@@ -99,10 +108,13 @@ class ClaudeProtocolTests(HarnessFixture):
 
     def test_failed_native_run_leaves_its_work_on_disk(self):
         self.adapter.config = replace(self.config, native_issue_tools=True)
+        project = self.state / "project"
+        project.mkdir()
+        self.adapter.project_dir = project
         _, result = self.complete(replace(self.request, prompt="native_issue_failed_with_output"))
         self.assertEqual((result.status, result.error), ("failed", "cli_failed"))
         self.assertEqual(result.artifacts, ())
-        self.assertEqual(self.fs.read_file("hello-world.md"), "# Hello World\n")
+        self.assertEqual((project / "hello-world.md").read_text(), "# Hello World\n")
 
     def test_native_issue_can_archive_after_platform_tool_budget_runs_out(self):
         self.adapter.config = replace(self.config, native_issue_tools=True, max_tool_calls=1)

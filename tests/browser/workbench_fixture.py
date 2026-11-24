@@ -3,6 +3,7 @@
 import json
 import re
 from dataclasses import replace
+from time import monotonic
 
 from evo.adapters.harness.baseline import BaselineHarnessAdapter
 from evo.adapters.harness.output import output_preview
@@ -43,8 +44,15 @@ class FixtureHarness(BaselineHarnessAdapter):
                 terminal = "API Error: 模型连接中断\n\n" + "x" * 9000 + "\n\nClaude Code 错误末尾"
                 self._event(control, "terminal_output", {"text": terminal})
                 return "failed", terminal[:8192], "cli_failed", 1
-            if "慢速工单" in request.prompt and not run["retry_of"] and control.stop.wait(12):
-                return "cancelled", "", "", None
+            if "慢速工单" in request.prompt and not run["retry_of"]:
+                progress_signal = self.root.parent / "browser-progress"
+                deadline = monotonic() + 20
+                while monotonic() < deadline and not progress_signal.is_file():
+                    if control.stop.wait(0.1):
+                        return "cancelled", "", "", None
+                self._event(control, "assistant", {"text": "正在核对交付结果"})
+                if control.stop.wait(max(0, deadline - monotonic())):
+                    return "cancelled", "", "", None
             if "慢速工单" in request.prompt and run["retry_of"]:
                 preview, truncated = output_preview("工具诊断样本\n" + "x" * 9000)
                 self._event(control, "native_tool", {"name": "Bash", "status": "completed",
@@ -57,6 +65,9 @@ class FixtureHarness(BaselineHarnessAdapter):
             self._call(control, request, "write_file", {"path": "report.md", "content": "verified local report"})
             if self.broker.issue_status:
                 self._call(control, request, "set_issue_status", {"status": "in_review"})
+            if "慢速工单" in request.prompt and run["retry_of"]:
+                return "success", ("**已完成本轮执行**\n\n" + "报告正文。\n\n" * 20 +
+                                   "[查看报告末尾](https://example.com/report)"), "", 0
             return "success", "**已完成本轮执行**", "", 0
         revised = "Review feedback:" in request.prompt
         prepare = []

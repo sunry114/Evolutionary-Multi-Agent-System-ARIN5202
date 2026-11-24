@@ -10,14 +10,17 @@ bash scripts/start_linux.sh 8769
 
 ## 创建和切换项目
 
-在首页点「新建项目」，填写项目名称及已有本机目录的绝对路径。进入项目后，可从一级导航切换项目或返回项目列表。Agent、小队、聊天、工单和运行记录按项目独立保存。通过「项目设置」的「管理 Agent」设置成员。
+首页列出工作区。「新建工作区」只填写名称。通过「团队」配置 Agent 和小队，同一工作区的所有项目都使用这份配置。
 
-CLI 使用与 Web 相同的状态目录。工单命令通过 `--project` 选择项目名称或 ID。旧版无项目工单已从工作台和工单命令中移除，原 SQLite 文件保留在原状态目录中。
+进入工作区后，点主导航的「项目」打开项目树。二级边栏标题旁的加号用于新建项目，填写项目名称和已有本机目录的绝对路径。展开项目可查看工单，项目名称旁的加号可直接为该项目新建工单。工单和运行记录按项目保存，聊天按工作区保存。
+
+CLI 使用与 Web 相同的状态目录。`--workspace` 选择工作区名称或 ID，`--project` 选择项目名称或 ID。
 
 ```bash
-.venv/bin/python -m evo --state .evo/local-workbench create-project "软件工程" /path/to/existing/project
-.venv/bin/python -m evo --state .evo/local-workbench projects
-.venv/bin/python -m evo --state .evo/local-workbench --project "软件工程" tasks
+.venv/bin/python -m evo --state .evo/local-workbench create-workspace "软件工程"
+.venv/bin/python -m evo --state .evo/local-workbench --workspace "软件工程" configure --file team.json
+.venv/bin/python -m evo --state .evo/local-workbench --workspace "软件工程" create-project "预约系统" /path/to/existing/project
+.venv/bin/python -m evo --state .evo/local-workbench --workspace "软件工程" --project "预约系统" tasks
 ```
 
 ## 模型和执行器
@@ -56,13 +59,13 @@ chmod -R go-w .venv/nltk_data/corpora/cmudict
 
 ## 工作区聊天
 
-从一级菜单进入「聊天」，可打开工作区群聊，或在二级菜单点「新建聊天」并选择 Agent。每次新建都会产生独立的私聊，切换会话或刷新浏览器后仍可继续。已有私聊会按 Agent 显示在会话列表中。
+从一级菜单进入「聊天」，可打开工作区群聊，或在二级菜单点「新建聊天」并选择 Agent。每次新建都会产生独立的私聊，切换项目、会话或刷新浏览器后仍可继续。
 
 点「新建群聊」可以填写群名并选择参与的 Agent。每个群会单独保存历史，只有群成员会收到消息并回复。新建工单时，或打开已有工单的「讨论」后，可以用「关联群聊」带入自建群当前的聊天记录。选择「工作区群聊」会把默认群的待归档消息转入工单。
 
 ## 日常工单流程
 
-在「项目设置」的「小队配置」中修改名称、选择队长和勾选成员。名称支持中文，队长会自动加入成员。改名后，已指派给该小队的工单会显示新名称。在「Agent 专长」中可以单独编辑并保存每个 Agent 的专长。
+在「团队」的「小队配置」中修改名称、选择队长和勾选成员。名称支持中文，队长会自动加入成员。改名后，已指派给该小队的工单会显示新名称。在「Agent 专长」中可以单独编辑并保存每个 Agent 的专长。
 
 指派给小队时，第一轮由队长运行。工单每轮都会带上当前范围、小队成员名单和各成员专长。队长用 `assign_issue_work` 做明确派工，成员回报会唤醒队长，同一成员的待处理触发会合并。队长在交付就绪时请求验收，成功签核后平台停止剩余的内部重复轮次。
 
@@ -73,9 +76,8 @@ chmod -R go-w .venv/nltk_data/corpora/cmudict
 CLI 和 Web 使用同一状态目录和队列。下面的 CLI 命令具体由同一状态目录下正在运行的 Web 进程领取。Web 暂未启动时，提交会保留在队列里。
 
 ```bash
-e() { python -m evo --state .evo/local-workbench --project "软件工程" "$@"; }
-e configure --file team.json
-e create 'Write the report to the output directory provided in the issue' --squad reports
+e() { python -m evo --state .evo/local-workbench --workspace "软件工程" --project "预约系统" "$@"; }
+e create 'Write the report in the project and include its relative path in your reply' --squad reports
 e comment ISSUE_ID '@reviewer Check the evidence'
 e task ISSUE_ID
 e stop-run ISSUE_ID RUN_ID
@@ -83,8 +85,10 @@ e retry-run ISSUE_ID RUN_ID
 e issue-status ISSUE_ID done
 ```
 
-Claude Code 的工作目录就是绑定的项目目录，修改项目源文件会直接落盘。每轮工单的交付目录是项目下的 `.evo/artifacts/<工单 ID>/<运行 ID>/`。「运行记录」会列出目录，后续轮次也可读取之前的产物。Evo 为交付目录里的常用 UTF‑8 文件保存网页预览，每个文件最多 1 MiB、每轮合计 2 MiB、最多 32 个文件。其他文件也会留在项目目录。
+同一项目的工单共用绑定的目录。Claude Code 根据项目现有结构和任务需求在这里读写源文件和交付物，并在回复中给出相关的项目相对路径。Claude Code 加载项目的 `CLAUDE.md` 和 `AGENTS.md`，Evo 也会把根目录中的 UTF‑8 `AGENT.md` 提供给每轮运行。
+
+Agent 可以把需要在工单页面预览的 UTF‑8 文件另存一份到 `.evo/artifacts/<工单 ID>/<运行 ID>/`。Evo 为这些副本保存网页预览，每个文件最多 1 MiB、每轮合计 2 MiB、最多 32 个文件。此前存入 `.evo/artifacts/` 的文件仍可从对应运行或工单预览中查看。
 
 Claude Code 的 JSON 输出按单条事件检查，默认上限为 32 MiB。工单「运行记录」中的工具结果预览最多保留 8 KiB，超长时会标记已截断。运行日志与恢复检查点分别保存。
 
-课程评测可从项目设置的 JSONL 评测或 `eval` 启动。[课程评测指南](MID_TEST_RUNBOOK.md)
+课程评测可从「项目工具」的 JSONL 评测或 `eval` 启动。[课程评测指南](MID_TEST_RUNBOOK.md)

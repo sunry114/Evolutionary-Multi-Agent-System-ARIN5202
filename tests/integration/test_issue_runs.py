@@ -142,6 +142,33 @@ class IssueRunsTests(unittest.TestCase):
         self.app.queue.finish(retry, "completed", "Artifact archived", assignee=assignee)
         self.assertEqual(self.app.dispatch("task", payload)["lane"], "in_review")
 
+    def test_discussion_reports_elapsed_time_for_new_and_existing_run_messages(self):
+        issue_id = self.create(agent="builder")["task"]["id"]
+        payload = {"task_id": issue_id}
+        self.app.dispatch("comment", {**payload, "message": "Human comment", "notify": False})
+        with patch("evo.adapters.persistence.issue_runs._utc_now", return_value="2026-01-01T12:00:00+00:00"):
+            run = self.app.queue.claim()
+        with patch("evo.adapters.persistence.sqlite_store._utc_now", return_value="2026-01-01T12:01:07.9+00:00"):
+            self.app.queue.comment(issue_id, "Progress update", {}, sender="builder", parent_run_id=run["id"])
+        active = self.app.dispatch("task", payload)
+        self.assertEqual({m["content"]: m.get("elapsed_seconds") for m in active["messages"]},
+                         {"Human comment": None, "Progress update": 67})
+
+        with patch("evo.adapters.persistence.issue_runs._utc_now", return_value="2026-01-01T12:02:03+00:00"), \
+             patch("evo.adapters.persistence.sqlite_store._utc_now", return_value="2026-01-01T12:02:03.001+00:00"):
+            self.app.queue.finish(run, "failed", "Execution failed", reply="Error details")
+        expected = {"Human comment": None, "Progress update": 67, "Error details": 123}
+        recorded = self.app.dispatch("task", payload)
+        self.assertEqual({m["content"]: m.get("elapsed_seconds") for m in recorded["messages"]}, expected)
+        self.assertEqual([event["payload"]["issue_run_id"] for event in recorded["logs"]
+                          if event["event_type"] == "message_created" and event["actor"] == "builder"], [run["id"]] * 2)
+
+        with self.app.store._transaction() as connection:
+            connection.execute("UPDATE events SET payload_json=json_remove(payload_json, '$.issue_run_id') "
+                               "WHERE event_type='message_created'")
+        legacy = self.app.dispatch("task", payload)
+        self.assertEqual({m["content"]: m.get("elapsed_seconds") for m in legacy["messages"]}, expected)
+
     def test_mentioned_lead_can_sign_off_and_stop_older_internal_work(self):
         issue_id = self.create(squad="default")["task"]["id"]
         payload = {"task_id": issue_id}

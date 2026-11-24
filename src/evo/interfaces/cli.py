@@ -22,9 +22,12 @@ def parser(*, assessment=False):
     root = argparse.ArgumentParser(description="Evolutionary multi-agent platform")
     root.add_argument("--version", action="version", version=__version__)
     root.add_argument("--state", default=".evo")
+    root.add_argument("--workspace", help="Workspace name or ID")
     root.add_argument("--project", help="Local project name or ID")
     root.add_argument("--demo", action="store_true", help="Volatile UI preview; no agents execute")
     commands = root.add_subparsers(dest="command")
+    commands.add_parser("workspaces", help="List workspaces")
+    commands.add_parser("create-workspace", help="Create a workspace").add_argument("name")
     commands.add_parser("projects", help="List local projects")
     command = commands.add_parser("create-project", help="Bind a project to a local directory")
     command.add_argument("name")
@@ -158,17 +161,33 @@ def main(argv=None, application=None):
             return 0
         if application is None and not args.demo:
             from evo.interfaces.sqlite_application import SQLiteApplication
-            from evo.interfaces.projects import Projects
+            from evo.interfaces.projects import DEFAULT_WORKSPACE, Projects
             if isinstance(app, SQLiteApplication):
                 projects = Projects(app, load_application)
-                if args.command in ("projects", "create-project"):
-                    result = (projects.snapshot() if args.command == "projects"
-                              else projects.create({"name": args.name, "directory": args.directory}))
+                workspace_id = None
+                if args.workspace is not None:
+                    workspace = projects.workspace(args.workspace)
+                    if workspace is None:
+                        raise ApplicationUnavailable("找不到此工作区。可运行 workspaces 查看工作区。")
+                    workspace_id = workspace["id"]
+                if args.command in ("workspaces", "create-workspace", "projects", "create-project"):
+                    if args.command == "workspaces":
+                        result = projects.workspace_snapshot()
+                    elif args.command == "create-workspace":
+                        result = projects.create_workspace({"name": args.name})
+                    elif args.command == "projects":
+                        result = projects.snapshot(workspace_id)
+                    else:
+                        result = projects.create({"name": args.name, "directory": args.directory},
+                                                 workspace_id=workspace_id or DEFAULT_WORKSPACE)
                     print(json.dumps(result, ensure_ascii=False, indent=2))
                     return 0
-                app = projects.select(args.project)
+                if args.command == "configure" and args.project is None:
+                    app = projects.workspace_application(workspace_id or DEFAULT_WORKSPACE)
+                else:
+                    app = projects.select(args.project, workspace_id=workspace_id)
         payload = {k: v for k, v in vars(args).items()
-                   if k not in ("command", "demo", "state", "project") and v is not None}
+                   if k not in ("command", "demo", "state", "workspace", "project") and v is not None}
         if args.command == "configure":
             payload = json.loads(Path(args.file).read_text(encoding="utf-8"))
         if args.command == "create":

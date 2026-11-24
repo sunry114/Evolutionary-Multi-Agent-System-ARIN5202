@@ -12,7 +12,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from evo.adapters.llm.credentials import validate_key
-from evo.adapters.tools.filesystem import PURPOSE_SUFFIXES, PathPolicyError, _directory
+from evo.adapters.tools.filesystem import MAX_FILE_BYTES, PURPOSE_SUFFIXES, PathPolicyError, _directory, _read_at
 from evo.ports.harness import ArtifactRef, HarnessError
 
 from .host_cli import HostCLITransport
@@ -206,9 +206,12 @@ class ClaudeCodeAdapter(ManagedHarness):
 
         browser_check = shlex.join([sys.executable, str(Path(__file__).with_name("browser_check.py"))])
         browser_module = playwright_module()
-        lifecycle = ("Use Claude Code's native tools in the linked project directory. "
-                     "When changing a project, edit the existing files in place. If your turn produces new files "
-                     "for delivery, place them in deliverables_directory. Reuse earlier deliverables by reference. "
+        lifecycle = ("Use Claude Code's native tools in the linked project directory, shared by all issues in this project. "
+                     "Follow the project instructions, including project_instructions when supplied. "
+                     "Read and edit existing project files in place. Write new source files and deliverables in the project "
+                     "directory, choosing paths that fit the project and request. Report the relevant project-relative paths. "
+                     "For workbench previews, you may copy selected finished text files to artifact_preview_directory, "
+                     "preserving their project-relative paths. Previous archived files are available as references. "
                      "Validate what the current request requires. End with a concise result. "
                      "Use the Evo MCP tools for issue comments and issue status. "
                      "Report the current issue_status returned by set_issue_status. For deferred review, say review "
@@ -257,7 +260,16 @@ class ClaudeCodeAdapter(ManagedHarness):
         cwd = self.project_dir or request.workspace
         if native:
             output_dir = self.broker.workspace.workspace
-            prompt["deliverables_directory"] = str(output_dir)
+            prompt["artifact_preview_directory"] = str(output_dir)
+            with _directory(cwd) as directory:
+                try:
+                    instructions = _read_at(directory, "AGENT.md", MAX_FILE_BYTES).decode("utf-8")
+                except FileNotFoundError:
+                    pass
+                except (OSError, ValueError):
+                    raise HarnessError("Could not load project AGENT.md as UTF-8 text") from None
+                else:
+                    prompt["project_instructions"] = {"AGENT.md": instructions}
             prompt["previous_deliverables"] = [
                 {"owner": item["owner"], "path": str(output_dir.parent / item["task_id"] / item["path"])}
                 for item in self.issue_artifacts[-32:] if item["archive"] is not None]

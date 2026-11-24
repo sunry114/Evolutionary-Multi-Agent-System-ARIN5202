@@ -242,11 +242,17 @@ def main():
         print(json.dumps({"type": "result", "session_id": session, "is_error": mode == "error_result",
                           "result": result}), flush=True)
         if builtins:
-            outputs = Path(prompt["deliverables_directory"])
+            previews = Path(prompt["artifact_preview_directory"])
             if mode == "native_issue_output_symlink":
-                (outputs / "linked.md").symlink_to(outputs.parent / "outside.md")
+                (previews / "linked.md").symlink_to(previews.parent / "outside.md")
             else:
-                (outputs / "hello-world.md").write_text("# Hello World\n")
+                path = Path("docs/hello-world.md" if mode == "native_issue" else "hello-world.md")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# Hello World\n")
+                if mode != "native_issue_failed_with_output":
+                    preview = previews / path
+                    preview.parent.mkdir(parents=True, exist_ok=True)
+                    preview.write_bytes(path.read_bytes())
         if mode == "native_issue_failed_with_output":
             return 7
     return 0

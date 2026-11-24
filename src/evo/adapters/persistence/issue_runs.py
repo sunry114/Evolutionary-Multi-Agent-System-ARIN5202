@@ -150,7 +150,7 @@ class IssueRunStore:
                     raise ConflictError("The issue is no longer open for delegation")
             message = Message(uuid4().hex, "comment" if sender == "human" else "agent", sender,
                               content, task_id=issue["id"])
-            self.store._insert_message(connection, message)
+            self.store._insert_message(connection, message, issue_run_id=parent_run_id)
             lane = issue_status(dict(issue))
             if sender == "human" and assignee in targets and lane in ("in_review", "blocked"):
                 self._status(connection, issue, "in_progress", sender)
@@ -275,7 +275,7 @@ class IssueRunStore:
             if reply.strip():
                 kind = "agent" if status == "completed" else "run_error"
                 message = Message(uuid4().hex, kind, run["agent"], reply, task_id=issue["id"])
-                self.store._insert_message(connection, message)
+                self.store._insert_message(connection, message, issue_run_id=run["id"])
             if not assignee or issue_status(dict(issue)) != "in_progress":
                 return
             if assignee.name != run["agent"]:
@@ -297,7 +297,7 @@ class IssueRunStore:
             return
         if message is None:
             message = Message(uuid4().hex, "run_error", run["agent"], result, task_id=issue["id"])
-            self.store._insert_message(connection, message)
+            self.store._insert_message(connection, message, issue_run_id=run["id"])
         self._route_comment(connection, issue, assignee, "handoff", message, run["id"])
 
     def _finish_review(self, connection, issue, agent):

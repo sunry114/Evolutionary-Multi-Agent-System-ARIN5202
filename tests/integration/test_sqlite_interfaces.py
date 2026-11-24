@@ -3,6 +3,7 @@ import io
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -13,7 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
-from evo.domain.models import Task
+from evo.domain.models import Message, Task
 from evo.domain.statuses import TaskStatus
 from evo.interfaces.cli import main
 from evo.interfaces.gateway import ApplicationUnavailable, load_application
@@ -53,6 +54,59 @@ class SQLiteInterfaceTests(unittest.TestCase):
             self.assertEqual(load_application(self.state, demo=True).snapshot()["tasks"], [])
         with patch.dict(os.environ, {"EVO_APPLICATION_FACTORY": "evo.interfaces.sqlite_application:create_application"}):
             self.assertEqual(len(load_application(self.state).snapshot()["tasks"]), 2)
+
+    def test_flat_projects_keep_rosters_issues_and_chats_when_migrated(self):
+        state = Path(self.temp.name) / "flat-state"
+        application = SQLiteApplication(state)
+        ids = [str(index) * 32 for index in (1, 2, 3)]
+        threads, groups = [], []
+        with contextlib.closing(sqlite3.connect(state / "projects.sqlite3")) as db, db:
+            db.execute("CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT, name_key TEXT UNIQUE, "
+                       "directory TEXT UNIQUE)")
+            for index, project_id in enumerate(ids):
+                project_app = SQLiteApplication(state / "projects" / project_id)
+                agent = "builder" if index < 2 else "editor"
+                project_app.dispatch("configure", {"agents": [
+                    {"name": agent, "specialty": "Work on the project"}]})
+                project_app.store.save_task(Task("existing", "Prior issue"))
+                store = project_app.store
+                threads.append(store.create_chat(agent, default=True)["id"])
+                groups.append(store.create_group_chat("Prior group", [agent])["id"])
+                store.save_message(Message(f"dm-{index}", "dm", "human", f"Private {index}", recipient=agent),
+                                   chat_id=threads[-1])
+                store.save_message(Message(f"group-{index}", "group", "human", f"Named {index}"), group_id=groups[-1])
+                store.save_message(Message(f"default-{index}", "group", "human", f"Pending {index}"))
+                store.save_message(Message(f"discussion-{index}", "group", "human", "Issue only", task_id="existing"))
+                name = f"Project {index}"
+                directory = Path(self.temp.name) / name
+                directory.mkdir()
+                db.execute("INSERT INTO projects VALUES (?, ?, ?, ?)",
+                           (project_id, name, name.casefold(), str(directory)))
+
+        migrated = Projects(application)
+        self.assertEqual([p["workspace_id"] for p in migrated.snapshot()["projects"]], ["default", "default", ids[2]])
+        workspace = migrated.workspace_application("default")
+        workspace.dispatch("configure", {"agents": [{"name": "reviewer", "specialty": "Review reports"}]})
+        for project_id, agent in zip(ids, ("reviewer", "reviewer", "editor")):
+            with self.subTest(project_id=project_id):
+                project = Projects(application).get(project_id)
+                self.assertEqual(project.snapshot()["agents"], [agent])
+                self.assertEqual(project.dispatch("task", {"task_id": "existing"})["issue"]["id"], "existing")
+
+        chat_index = workspace.dispatch("chat-threads", {})
+        self.assertEqual({chat["id"] for chat in chat_index["chats"]}, set(threads[:2]))
+        self.assertEqual({group["id"] for group in chat_index["groups"]}, set(groups[:2]))
+        self.assertEqual([row["content"] for row in workspace.dispatch("messages", {"chat_id": threads[1]})["messages"]],
+                         ["Private 1"])
+        project = migrated.get(ids[0])
+        linked = project.dispatch("link-group", {"task_id": "existing", "group_id": groups[1]})["source_group"]
+        self.assertEqual(linked["id"], groups[1])
+        self.assertEqual([row["content"] for row in workspace.store.list_group_messages(group_id=groups[1])], ["Named 1"])
+        draft = project.dispatch("create", {"prompt": "Archive the shared group", "from_group": True})["task"]
+        self.assertEqual([row["content"] for row in project.store.list_group_messages(task_id=draft["id"])],
+                         ["Pending 0", "Pending 1"])
+        reopened = Projects(application).get(ids[1])
+        self.assertEqual(reopened.dispatch("messages", {"scope": "group"})["messages"], [])
 
     def test_reassigning_a_draft_invalidates_a_start_with_the_old_assignment(self):
         draft = self.app.dispatch("create", {"prompt": "Draft report"})["task"]

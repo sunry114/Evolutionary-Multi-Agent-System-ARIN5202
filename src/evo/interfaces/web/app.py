@@ -44,7 +44,7 @@ def redact(value):
 
 
 def make_server(application, port=8768, *, application_factory=None):
-    from evo.interfaces.sqlite_application import SQLiteApplication
+    from evo.interfaces.sqlite_application import CHAT_OPERATIONS, SQLiteApplication
     from evo.interfaces.projects import Projects
 
     projects = (Projects(application, application_factory or SQLiteApplication)
@@ -80,30 +80,49 @@ def make_server(application, port=8768, *, application_factory=None):
         def valid_host(self):
             return self.headers.get_all("Host", []) == [self.server.authority]
 
-        def project_route(self):
-            if self.path.startswith("/p/"):
+        def workbench_route(self):
+            if projects is None:
+                return application, None, self.path
+            if self.path.startswith("/w/"):
+                match = re.fullmatch(r"/w/(default|[0-9a-f]{32})(/.*)", self.path)
+                if match:
+                    workspace_id, path = match.groups()
+                    return projects.workspace_application(workspace_id), workspace_id, path
+            elif self.path.startswith("/p/"):
                 match = re.fullmatch(r"/p/([0-9a-f]{32})(/.*)", self.path)
-                if match and projects is not None:
+                if match:
                     project_id, path = match.groups()
-                    return projects.get(project_id), path
-                return None, self.path
-            return (application if projects is None else None), self.path
+                    return projects.get(project_id), None, path
+            return None, None, self.path
 
         def do_GET(self):
             if not self.valid_host():
                 return self.reply(403, {"error": "Invalid Host"})
             if self.path == "/" and projects is not None:
                 return self.reply(200, page, html=True)
+            if self.path == "/api/workspaces" and projects is not None:
+                return self.reply(200, projects.workspace_snapshot())
             if self.path == "/api/projects" and projects is not None:
                 return self.reply(200, projects.snapshot())
-            target, path = self.project_route()
+            target, workspace_id, path = self.workbench_route()
             if target is None:
-                return self.reply(404, {"error": "请选择项目或检查项目地址。"})
+                return self.reply(404, {"error": "请检查工作区或项目地址。"})
             if path == "/":
                 return self.reply(200, page, html=True)
+            if path == "/api/projects" and workspace_id is not None:
+                return self.reply(200, projects.snapshot(workspace_id))
+            if path == "/api/issue-index" and projects is not None and workspace_id is None:
+                try:
+                    issues = target.store.list_issue_index()
+                except Exception:
+                    return self.reply(500, {"error": "无法读取工单"})
+                return self.reply(200, {"issues": issues})
             if path == "/api/state":
                 try:
-                    return self.reply(200, target.snapshot())
+                    result = target.snapshot()
+                    if workspace_id is not None:
+                        result["workspace"] = projects.workspace(workspace_id)
+                    return self.reply(200, result)
                 except Exception:
                     return self.reply(500, {"error": "Unable to read application state"})
             return self.reply(404, {"error": "Not found"})
@@ -138,15 +157,21 @@ def make_server(application, port=8768, *, application_factory=None):
                 return self.reply(408, {"error": "Request body read timed out"})
             except (ValueError, UnicodeError, RecursionError):
                 return self.reply(400, {"error": "JSON object required"})
-            target, path = self.project_route()
-            creating_project = self.path == "/api/new-project" and projects is not None
-            if target is None and not creating_project:
-                return self.reply(404, {"error": "请选择项目或检查项目地址。"})
+            target, workspace_id, path = self.workbench_route()
             operation = path.removeprefix("/api/") if path.startswith("/api/") else ""
-            if not creating_project and operation not in OPERATIONS:
-                return self.reply(404, {"error": "Unknown operation"})
             try:
-                result = projects.create(payload) if creating_project else target.dispatch(operation, payload)
+                if projects is not None and self.path == "/api/new-workspace":
+                    result = projects.create_workspace(payload)
+                elif projects is not None and self.path == "/api/new-project":
+                    result = projects.create(payload)
+                elif target is None:
+                    return self.reply(404, {"error": "请检查工作区或项目地址。"})
+                elif workspace_id is not None and operation == "new-project":
+                    result = projects.create(payload, workspace_id=workspace_id)
+                elif operation in (CHAT_OPERATIONS | {"configure"} if workspace_id is not None else OPERATIONS):
+                    result = target.dispatch(operation, payload)
+                else:
+                    return self.reply(404, {"error": "Unknown operation"})
                 return self.reply(200, result)
             except ApplicationUnavailable as error:
                 return self.reply(503, {"error": str(error)})

@@ -3,6 +3,7 @@
 import fcntl
 from contextlib import contextmanager
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 from threading import Event, Thread
 from uuid import uuid4
@@ -13,14 +14,53 @@ from evo.adapters.persistence.sqlite_store import ConflictError
 from evo.adapters.tools.artifacts import ArtifactExchange
 from evo.domain.models import Experience
 from evo.domain.statuses import TaskStatus
-from evo.interfaces.sqlite_application import required_text
+from evo.interfaces.sqlite_application import CHAT_OPERATIONS, required_text
 from evo.ports.harness import MAX_RUN_PROMPT_BYTES, HarnessCleanupError, HarnessError, RunRequest, ToolInputError
 
 
+def _add_message_durations(detail):
+    issue_id = detail["issue"]["id"]
+    messages = {message["id"]: message for message in detail["messages"]
+                if message["task_id"] == issue_id and message["kind"] in ("agent", "run_error")}
+    runs = {run["id"]: run for run in detail["executions"] if run["started_at"]}
+    if not messages or not runs:
+        return
+
+    active = {}
+    next_reply_event, finished_run = None, None
+    for event in detail["logs"]:
+        if event["task_id"] != issue_id:
+            continue
+        kind, actor, payload = event["event_type"], event["actor"], event["payload"]
+        if kind == "issue_run_started":
+            active[actor] = payload["run_id"]
+        elif kind == "issue_run_finished":
+            run_id = payload["run_id"]
+            if active.get(actor) == run_id:
+                del active[actor]
+            # Older final replies were written immediately after the finish event in the same transaction.
+            next_reply_event, finished_run = event["id"] + 1, runs.get(run_id)
+        elif kind == "message_created" and payload["message_id"] in messages:
+            message = messages[payload["message_id"]]
+            run_id = payload.get("issue_run_id") or active.get(actor)
+            run = runs.get(run_id)
+            if run_id is None and event["id"] == next_reply_event and finished_run:
+                result, content = finished_run["result"], message["content"]
+                if result == content or result.endswith("\n\n" + content):
+                    run = finished_run
+            if run and run["agent"] == message["sender"]:
+                elapsed = (datetime.fromisoformat(message["created_at"]) -
+                           datetime.fromisoformat(run["started_at"])).total_seconds()
+                if elapsed >= 0:
+                    message["elapsed_seconds"] = int(elapsed)
+
+
 class Workbench:
-    def __init__(self, application, *, project):
+    def __init__(self, application, *, project, workspace=None, chat_application=None):
         self.application = application
         self.project = dict(project)
+        self.workspace = workspace
+        self.chat_application = chat_application
         self.directory = Path(self.project["directory"])
         self.store = application.store
         self.queue = IssueRunStore(self.store)
@@ -238,6 +278,8 @@ class Workbench:
     def snapshot(self):
         result = self.application.snapshot()
         result["project"] = self.project
+        if self.workspace is not None:
+            result["workspace"] = self.workspace
         result["mode"] = "本地项目 · SQLite"
         result["tasks"] = self._list(result["tasks"])
         result["capabilities"]["issue_runs"] = True
@@ -246,6 +288,10 @@ class Workbench:
     def dispatch(self, operation, payload):
         if operation in ("answer", "resume", "review", "revision"):
             raise ValueError("Use the issue status and run controls")
+        if self.chat_application and operation in CHAT_OPERATIONS and "task_id" not in payload:
+            return self.chat_application.dispatch(operation, payload)
+        if operation == "link-group":
+            return self.application.link_issue_group(payload, chat_application=self.chat_application)
         if operation == "create":
             if set(payload) - {"title", "prompt", "agent", "squad", "from_group", "group_id", "no_memory"}:
                 raise ValueError("Invalid issue fields")
@@ -257,7 +303,7 @@ class Workbench:
                 nonlocal run_id
                 run_id = self.queue.create(connection, issue_id, agents, squad)
 
-            draft = self.application.create_task(payload, after_insert=enqueue)
+            draft = self.application.create_task(payload, after_insert=enqueue, chat_application=self.chat_application)
             draft["task"]["project_id"] = self.project["id"]
             if run_id:
                 draft["run_id"] = run_id
@@ -273,6 +319,7 @@ class Workbench:
             detail["issue"]["project_id"] = self.project["id"]
             detail["executions"] = [{**run, "output_dir": str(self._outputs(issue_id, run["id"]))}
                                     for run in self.queue.list(issue_id)]
+            _add_message_durations(detail)
             return detail
         if operation not in ("assign", "start", "comment", "issue-status", "stop-run", "retry-run"):
             return self.application.dispatch(operation, payload)

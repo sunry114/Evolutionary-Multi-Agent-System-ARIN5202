@@ -28,6 +28,7 @@ class FakeCLITransport:
         self.child_pid = child_pid
         self.command = None
         self.cwd = None
+        self.prompt = None
 
     def run(self, args, prompt, cwd, *, settings, endpoint, credential, stop, on_line):
         mcp = json.loads(args[args.index("--mcp-config") + 1])
@@ -37,6 +38,7 @@ class FakeCLITransport:
             env["FAKE_CHILD_PID"] = str(self.child_pid)
         self.command = [sys.executable, str(Path(__file__).with_name("fake_claude_cli.py"))] + args
         self.cwd = cwd
+        self.prompt = json.loads(prompt)
         process = subprocess.Popen(self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, cwd=cwd, env=env, start_new_session=True)
         return capture(process, prompt, timeout=self.config.timeout, max_event_bytes=self.config.max_event_bytes,
