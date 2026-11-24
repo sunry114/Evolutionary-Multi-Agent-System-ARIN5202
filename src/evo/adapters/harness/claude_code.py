@@ -214,6 +214,8 @@ class ClaudeCodeAdapter(ManagedHarness):
                      "preserving their project-relative paths. Previous archived files are available as references. "
                      "Validate what the current request requires. End with a concise result. "
                      "Use the Evo MCP tools for issue comments and issue status. "
+                     "Finish successfully after delegating through assign_issue_work; do not wait for members. "
+                     "The platform archives preview files before starting the queued members. "
                      "Report the current issue_status returned by set_issue_status. For deferred review, say review "
                      "was requested and takes effect after successful completion and artifact archiving. "
                      f"If a web deliverable needs browser verification, use `{browser_check}` with a project HTML file or a loopback URL. "

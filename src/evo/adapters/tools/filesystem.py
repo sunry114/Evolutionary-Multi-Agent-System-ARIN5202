@@ -19,7 +19,7 @@ MAX_DIRECTORY_ENTRIES = 1000
 PURPOSE_SUFFIXES = {
     "document": DOCUMENT_SUFFIXES,
     "slides": frozenset({".html"}),
-    "code": frozenset({".py"}),
+    "code": frozenset({".py", ".js", ".css"}),
     "config": frozenset({".json", ".yaml", ".yml"}),
     "data": frozenset({".json", ".csv"}),
 }

@@ -64,7 +64,9 @@ class SquadIncidentDemoTests(unittest.TestCase):
 
             detail = app.dispatch("task", {"task_id": issue})
             self.assertEqual(detail["next_action"], "review")
-            _, analyst, reviewer = detail["tree"]
+            self.assertEqual(len(detail["tree"]), 3)
+            analyst, = [task for task in detail["tree"] if task["owner"] == "analyst"]
+            reviewer, = [task for task in detail["tree"] if task["owner"] == "reviewer"]
             self.assertEqual((analyst["owner"], analyst["parent_id"]), ("analyst", issue))
             self.assertEqual((reviewer["owner"], reviewer["parent_id"]), ("reviewer", analyst["id"]))
             self.assertEqual([event["event_type"] for event in detail["negotiations"]], [

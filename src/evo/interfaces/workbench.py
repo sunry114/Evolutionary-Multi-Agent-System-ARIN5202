@@ -188,12 +188,13 @@ class Workbench:
                                    for name in squad.members)
                 prompt += f"\n\nSquad: {squad.name}\nMembers and responsibilities:\n{roster}"
                 role += (f" Your handle is @{agent}. An ordinary comment never dispatches another agent. "
-                         "Queued teammate runs start after your current run ends.")
+                         "Queued teammate runs start after your current run ends and any preview files are archived.")
                 if coordinating:
                     role += (" As squad lead, own scoping, decisions, delegation, and sign-off. "
                              "Use assign_issue_work to give each necessary subtask to a suitable teammate. "
                              "Keep delegation bounded to the requested deliverable and let teammates do the work. "
-                             "After dispatching, end this turn. Teammate results will wake you. "
+                             "After dispatching, finish successfully. Do not wait, sleep, or poll for teammate replies. "
+                             "Teammate results will wake you. "
                              "On a reply, assess new results or requester input and delegate only uncovered work. "
                              "When the requested deliverables are ready, call set_issue_status with in_review "
                              "and finish with a concise sign-off. Reuse the files already delivered by teammates.")
@@ -209,7 +210,8 @@ class Workbench:
             lessons = tuple(item.lesson for item in memory.recall(issue_text)) if memory else ()
             request = RunRequest(run_id, agent, issue_id, workspace.workspace, prompt, role=role, memory=lessons)
             if self.queue.stopping(run_id) or self.shutdown.is_set():
-                self.queue.finish(run, "stopped", "Stopped before execution", assignee=assignee)
+                self.queue.finish(run, "stopped", "Stopped before execution",
+                                  assignee=self._assignee(self._issue(issue_id)))
                 return
             handle = harness.start(request)
             stage = "reading runtime progress"
